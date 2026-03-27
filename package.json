@@ -1,0 +1,22 @@
+{
+  "name": "nomade-for-codex",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "services/*",
+    "agent/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run -ws build",
+    "dev:control": "npm --workspace services/control-api run dev",
+    "dev:gateway": "npm --workspace services/tunnel-gateway run dev",
+    "dev:agent": "npm --workspace agent/nomade-agent run dev",
+    "test": "npm run -ws test"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.57",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

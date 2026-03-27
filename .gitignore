@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+coverage/
+*.tsbuildinfo
+*.tgz
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Temp / cache
+.cache/
+tmp/
+temp/
+
+# Flutter / Dart artifacts
+apps/mobile/.dart_tool/
+apps/mobile/.flutter-plugins
+apps/mobile/.flutter-plugins-dependencies
+apps/mobile/.metadata
+apps/mobile/.packages
+apps/mobile/.pub/
+apps/mobile/.pub-cache/
+apps/mobile/build/
+
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

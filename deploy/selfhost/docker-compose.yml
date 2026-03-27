@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: nomade
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  control-api:
+    build:
+      context: ../..
+      dockerfile: services/control-api/Dockerfile
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/nomade
+      JWT_SECRET: ${JWT_SECRET:-change-me}
+      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:-gateway-dev-secret}
+      PREVIEW_BASE_DOMAIN: ${PREVIEW_BASE_DOMAIN:-preview.localhost}
+    depends_on:
+      - postgres
+    ports:
+      - "8080:8080"
+
+  tunnel-gateway:
+    build:
+      context: ../..
+      dockerfile: services/tunnel-gateway/Dockerfile
+    environment:
+      PORT: 8081
+      CONTROL_API_URL: http://control-api:8080
+      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:-gateway-dev-secret}
+      PREVIEW_BASE_DOMAIN: ${PREVIEW_BASE_DOMAIN:-preview.localhost}
+    depends_on:
+      - control-api
+    ports:
+      - "8081:8081"
+
+volumes:
+  postgres_data:
