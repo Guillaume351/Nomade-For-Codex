@@ -3,6 +3,7 @@ import { randomToken } from "@nomade/shared";
 import { defaultConfigPath, readConfig } from "./config.js";
 import { SessionManager } from "./session-manager.js";
 import { TunnelManager } from "./tunnel-manager.js";
+import { ConversationManager } from "./conversation-manager.js";
 
 interface RunArgs {
   configPath?: string;
@@ -14,6 +15,14 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
 
   const wsUrl = `${config.controlWsUrl}?agent_token=${encodeURIComponent(config.agentToken)}`;
   const ws = new WebSocket(wsUrl);
+  const sendToControl = (payload: Record<string, unknown>): void => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify(payload));
+    }
+  };
+  const conversationManager = new ConversationManager((payload) => {
+    sendToControl(payload);
+  });
 
   const sessionManager = new SessionManager({
     onOutput: (sessionId, stream, data, cursor) => {
@@ -54,7 +63,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
     try {
       const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
       const type = String(msg.type ?? "");
-      if (type === "session.create") {
+        if (type === "session.create") {
         sessionManager.createSession({
           sessionId: String(msg.sessionId),
           command: String(msg.command),
@@ -82,6 +91,26 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
             status: "open"
           })
         );
+        return;
+      }
+
+      if (type === "conversation.turn.start") {
+        await conversationManager.startTurn({
+          conversationId: String(msg.conversationId ?? ""),
+          turnId: String(msg.turnId ?? ""),
+          threadId: msg.threadId ? String(msg.threadId) : undefined,
+          prompt: String(msg.prompt ?? ""),
+          model: msg.model ? String(msg.model) : undefined,
+          cwd: msg.cwd ? String(msg.cwd) : undefined
+        });
+        return;
+      }
+
+      if (type === "conversation.turn.interrupt") {
+        await conversationManager.interruptTurn({
+          conversationId: String(msg.conversationId ?? ""),
+          turnId: String(msg.turnId ?? "")
+        });
         return;
       }
 
@@ -147,6 +176,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
             })
           );
         }
+        return;
       }
     } catch (error) {
       console.error("[agent] failed to process message", error);
@@ -154,11 +184,13 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
   });
 
   ws.on("close", () => {
+    conversationManager.close();
     console.error("[agent] connection closed");
     process.exit(1);
   });
 
   ws.on("error", (error) => {
+    conversationManager.close();
     console.error("[agent] websocket error", error);
     process.exit(1);
   });

@@ -9,9 +9,13 @@
   ],
   "scripts": {
     "build": "npm run -ws build",
+    "dev:up": "docker compose -f deploy/selfhost/docker-compose.dev.yml up --build -d",
+    "dev:down": "docker compose -f deploy/selfhost/docker-compose.dev.yml down -v",
+    "dev:logs": "docker compose -f deploy/selfhost/docker-compose.dev.yml logs -f",
     "dev:control": "npm --workspace services/control-api run dev",
     "dev:gateway": "npm --workspace services/tunnel-gateway run dev",
     "dev:agent": "npm --workspace agent/nomade-agent run dev",
+    "dev:agent:codex": "npm --workspace agent/nomade-agent run dev -- run",
     "test": "npm run -ws test"
   },
   "devDependencies": {

@@ -16,6 +16,49 @@ export interface SessionRecord {
   cursor: number;
 }
 
+export interface WorkspaceRecord {
+  id: string;
+  user_id: string;
+  agent_id: string;
+  name: string;
+  path: string;
+}
+
+export interface ConversationRecord {
+  id: string;
+  user_id: string;
+  workspace_id: string;
+  agent_id: string;
+  title: string;
+  status: string;
+  codex_thread_id: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface ConversationTurnRecord {
+  id: string;
+  conversation_id: string;
+  user_prompt: string;
+  codex_turn_id: string | null;
+  status: string;
+  diff: string;
+  error: string | null;
+  created_at: Date;
+  updated_at: Date;
+  completed_at: Date | null;
+}
+
+export interface ConversationItemRecord {
+  id: string;
+  turn_id: string;
+  item_id: string;
+  item_type: string;
+  ordinal: number;
+  payload: Record<string, unknown>;
+  created_at: Date;
+}
+
 export interface TunnelRecord {
   id: string;
   user_id: string;
@@ -223,6 +266,19 @@ export class Repositories {
     return result.rows;
   }
 
+  async findWorkspaceById(userId: string, workspaceId: string): Promise<WorkspaceRecord | null> {
+    const result = await this.pool.query<WorkspaceRecord>(
+      `SELECT id, user_id, agent_id, name, path
+       FROM workspaces
+       WHERE user_id = $1 AND id = $2`,
+      [userId, workspaceId]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      return null;
+    }
+    return result.rows[0];
+  }
+
   async createSession(params: {
     userId: string;
     workspaceId: string;
@@ -256,6 +312,189 @@ export class Repositories {
 
   async updateSessionCursor(sessionId: string, cursor: number): Promise<void> {
     await this.pool.query("UPDATE sessions SET cursor = $1, updated_at = NOW() WHERE id = $2", [cursor, sessionId]);
+  }
+
+  async createConversation(params: {
+    userId: string;
+    workspaceId: string;
+    agentId: string;
+    title: string;
+  }): Promise<ConversationRecord> {
+    const id = newId();
+    const result = await this.pool.query<ConversationRecord>(
+      `INSERT INTO conversations (id, user_id, workspace_id, agent_id, title, status)
+       VALUES ($1, $2, $3, $4, $5, 'idle')
+       RETURNING id, user_id, workspace_id, agent_id, title, status, codex_thread_id, created_at, updated_at`,
+      [id, params.userId, params.workspaceId, params.agentId, params.title]
+    );
+    return result.rows[0];
+  }
+
+  async listConversations(userId: string, workspaceId: string): Promise<ConversationRecord[]> {
+    const result = await this.pool.query<ConversationRecord>(
+      `SELECT id, user_id, workspace_id, agent_id, title, status, codex_thread_id, created_at, updated_at
+       FROM conversations
+       WHERE user_id = $1 AND workspace_id = $2
+       ORDER BY updated_at DESC`,
+      [userId, workspaceId]
+    );
+    return result.rows;
+  }
+
+  async findConversation(userId: string, conversationId: string): Promise<ConversationRecord | null> {
+    const result = await this.pool.query<ConversationRecord>(
+      `SELECT id, user_id, workspace_id, agent_id, title, status, codex_thread_id, created_at, updated_at
+       FROM conversations
+       WHERE user_id = $1 AND id = $2`,
+      [userId, conversationId]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      return null;
+    }
+    return result.rows[0];
+  }
+
+  async updateConversationThreadId(conversationId: string, threadId: string): Promise<void> {
+    await this.pool.query(
+      "UPDATE conversations SET codex_thread_id = $1, status = 'running', updated_at = NOW() WHERE id = $2",
+      [threadId, conversationId]
+    );
+  }
+
+  async updateConversationStatus(conversationId: string, status: string): Promise<void> {
+    await this.pool.query("UPDATE conversations SET status = $1, updated_at = NOW() WHERE id = $2", [
+      status,
+      conversationId
+    ]);
+  }
+
+  async createConversationTurn(params: {
+    conversationId: string;
+    prompt: string;
+  }): Promise<ConversationTurnRecord> {
+    const id = newId();
+    const result = await this.pool.query<ConversationTurnRecord>(
+      `INSERT INTO conversation_turns (id, conversation_id, user_prompt, status)
+       VALUES ($1, $2, $3, 'queued')
+       RETURNING id, conversation_id, user_prompt, codex_turn_id, status, diff, error, created_at, updated_at, completed_at`,
+      [id, params.conversationId, params.prompt]
+    );
+    return result.rows[0];
+  }
+
+  async listConversationTurns(conversationId: string): Promise<Array<ConversationTurnRecord & { items: ConversationItemRecord[] }>> {
+    const result = await this.pool.query<
+      ConversationTurnRecord & {
+        items: ConversationItemRecord[];
+      }
+    >(
+      `SELECT
+         t.id,
+         t.conversation_id,
+         t.user_prompt,
+         t.codex_turn_id,
+         t.status,
+         t.diff,
+         t.error,
+         t.created_at,
+         t.updated_at,
+         t.completed_at,
+         COALESCE(
+           (
+             SELECT json_agg(
+               json_build_object(
+                 'id', i.id,
+                 'turn_id', i.turn_id,
+                 'item_id', i.item_id,
+                 'item_type', i.item_type,
+                 'ordinal', i.ordinal,
+                 'payload', i.payload,
+                 'created_at', i.created_at
+               )
+               ORDER BY i.ordinal ASC
+             )
+             FROM conversation_items i
+             WHERE i.turn_id = t.id
+           ),
+           '[]'::json
+         ) AS items
+       FROM conversation_turns t
+       WHERE t.conversation_id = $1
+       ORDER BY t.created_at ASC`,
+      [conversationId]
+    );
+    return result.rows;
+  }
+
+  async findConversationTurn(turnId: string): Promise<ConversationTurnRecord | null> {
+    const result = await this.pool.query<ConversationTurnRecord>(
+      `SELECT id, conversation_id, user_prompt, codex_turn_id, status, diff, error, created_at, updated_at, completed_at
+       FROM conversation_turns
+       WHERE id = $1`,
+      [turnId]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      return null;
+    }
+    return result.rows[0];
+  }
+
+  async markConversationTurnStarted(params: {
+    turnId: string;
+    codexTurnId: string;
+  }): Promise<void> {
+    await this.pool.query(
+      `UPDATE conversation_turns
+       SET status = 'running', codex_turn_id = $1, updated_at = NOW()
+       WHERE id = $2`,
+      [params.codexTurnId, params.turnId]
+    );
+  }
+
+  async updateConversationTurnDiff(turnId: string, diff: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE conversation_turns
+       SET diff = $1, updated_at = NOW()
+       WHERE id = $2`,
+      [diff, turnId]
+    );
+  }
+
+  async completeConversationTurn(params: {
+    turnId: string;
+    status: "completed" | "interrupted" | "failed";
+    error?: string;
+  }): Promise<void> {
+    await this.pool.query(
+      `UPDATE conversation_turns
+       SET status = $1, error = $2, completed_at = NOW(), updated_at = NOW()
+       WHERE id = $3`,
+      [params.status, params.error ?? null, params.turnId]
+    );
+  }
+
+  async addConversationItem(params: {
+    turnId: string;
+    itemId: string;
+    itemType: string;
+    payload: Record<string, unknown>;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO conversation_items (id, turn_id, item_id, item_type, ordinal, payload)
+       VALUES (
+         $1,
+         $2,
+         $3,
+         $4,
+         (
+           SELECT COALESCE(MAX(ordinal), 0) + 1
+           FROM conversation_items
+           WHERE turn_id = $2
+         ),
+         $5::jsonb
+       )`,
+      [newId(), params.turnId, params.itemId, params.itemType, JSON.stringify(params.payload)]
+    );
   }
 
   async createTunnel(params: {

@@ -12,6 +12,11 @@
 - `GET /agents`
 - `POST /workspaces` body `{ agentId, name, path }`
 - `GET /workspaces`
+- `POST /conversations` body `{ workspaceId, agentId?, title? }`
+- `GET /conversations?workspaceId=...`
+- `GET /conversations/:conversationId/turns`
+- `POST /conversations/:conversationId/turns` body `{ prompt, model?, cwd? }`
+- `POST /conversations/:conversationId/turns/:turnId/interrupt`
 - `POST /sessions` body `{ workspaceId, agentId, name, command, cwd? }`
 - `GET /sessions?workspaceId=...`
 - `POST /tunnels` body `{ workspaceId, agentId, targetPort, ttlSec? }`
@@ -29,6 +34,13 @@
 
 ### Messages to agent
 - `session.create`, `session.input`, `session.terminate`, `tunnel.open`, `tunnel.http.request`
+- `conversation.turn.start`, `conversation.turn.interrupt`
 
 ### Messages from agent
 - `session.output`, `session.status`, `tunnel.status`, `tunnel.http.response`, `agent.heartbeat`
+- `conversation.thread.started`
+- `conversation.turn.started`
+- `conversation.item.delta`
+- `conversation.item.completed`
+- `conversation.turn.diff.updated`
+- `conversation.turn.completed`

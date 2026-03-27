@@ -1,28 +1,19 @@
 # Quickstart (local)
 
-## 1. Start Postgres
-```bash
-docker run --rm -it \
-  -e POSTGRES_DB=nomade \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 postgres:16
-```
-
-## 2. Install and build
+## 1. Install and build
 ```bash
 npm install
 npm run build
 npm test
 ```
 
-## 3. Start services
+## 2. Start backend services (one command)
 ```bash
-npm run dev:control
-npm run dev:gateway
+npm run dev:up
+npm run dev:logs
 ```
 
-## 4. Login and pair agent
+## 3. Login and pair agent
 ```bash
 # device code start
 curl -sX POST http://localhost:8080/auth/device/start | jq
@@ -44,4 +35,9 @@ curl -sX POST http://localhost:8080/agents/pair \
 # pair + run agent
 npm run dev:agent -- pair --server-url http://localhost:8080 --pairing-code <PAIRING_CODE>
 npm run dev:agent -- run
+```
+
+## 4. Stop backend services
+```bash
+npm run dev:down
 ```

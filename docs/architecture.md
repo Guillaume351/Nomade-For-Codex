@@ -5,11 +5,13 @@
   - Device code auth and refresh tokens
   - Agent pairing and registration
   - Workspaces, sessions, tunnels metadata in Postgres
+  - Conversations + turns + items metadata in Postgres
   - WebSocket broker between mobile users and host agents
   - Internal tunnel proxy RPC endpoint for gateway
 - `agent/nomade-agent`:
   - User-space daemon process
   - Managed shell sessions for remote command execution
+  - Local Codex App Server bridge (`thread/start`, `turn/start`, `turn/interrupt`)
   - Localhost HTTP request execution for tunnels
 - `services/tunnel-gateway`:
   - Public entrypoint for preview URLs (`<slug>.<preview-domain>`)
@@ -23,8 +25,8 @@
 2. Mobile requests pairing code.
 3. Agent registers with pairing code and receives `agentToken`.
 4. Agent opens WS connection to `/ws?agent_token=...`.
-5. Mobile creates sessions/tunnels via REST; control-api pushes commands to agent WS.
-6. Agent streams output/status over WS.
+5. Mobile creates conversations/sessions/tunnels via REST; control-api pushes commands to agent WS.
+6. Agent streams output/status/Codex turn events over WS.
 7. Tunnel gateway forwards HTTP preview requests through control-api WS RPC to the agent.
 
 ## Security defaults

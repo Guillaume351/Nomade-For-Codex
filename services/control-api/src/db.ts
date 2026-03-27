@@ -71,6 +71,41 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS conversations (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+      agent_id TEXT NOT NULL REFERENCES agents(id),
+      title TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'idle',
+      codex_thread_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS conversation_turns (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      user_prompt TEXT NOT NULL,
+      codex_turn_id TEXT,
+      status TEXT NOT NULL DEFAULT 'queued',
+      diff TEXT NOT NULL DEFAULT '',
+      error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ
+    );
+
+    CREATE TABLE IF NOT EXISTS conversation_items (
+      id TEXT PRIMARY KEY,
+      turn_id TEXT NOT NULL REFERENCES conversation_turns(id) ON DELETE CASCADE,
+      item_id TEXT NOT NULL,
+      item_type TEXT NOT NULL,
+      ordinal INT NOT NULL,
+      payload JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS tunnels (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id),

@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: nomade
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nomade"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - nomade_dev_postgres:/var/lib/postgresql/data
+
+  control-api:
+    image: node:20-alpine
+    working_dir: /workspace
+    command: >
+      sh -c "npm install &&
+             npm --workspace packages/shared run build &&
+             npm --workspace services/control-api run dev"
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/nomade
+      JWT_SECRET: ${JWT_SECRET:-change-me}
+      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:-gateway-dev-secret}
+      PREVIEW_BASE_DOMAIN: ${PREVIEW_BASE_DOMAIN:-preview.localhost}
+      ACCESS_TOKEN_TTL_SEC: ${ACCESS_TOKEN_TTL_SEC:-900}
+      REFRESH_TOKEN_TTL_SEC: ${REFRESH_TOKEN_TTL_SEC:-2592000}
+      DEVICE_CODE_TTL_SEC: ${DEVICE_CODE_TTL_SEC:-600}
+      PAIRING_CODE_TTL_SEC: ${PAIRING_CODE_TTL_SEC:-600}
+      CHOKIDAR_USEPOLLING: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../..:/workspace
+
+  tunnel-gateway:
+    image: node:20-alpine
+    working_dir: /workspace
+    command: >
+      sh -c "npm install &&
+             npm --workspace services/tunnel-gateway run dev"
+    environment:
+      PORT: 8081
+      CONTROL_API_URL: http://control-api:8080
+      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:-gateway-dev-secret}
+      PREVIEW_BASE_DOMAIN: ${PREVIEW_BASE_DOMAIN:-preview.localhost}
+      CHOKIDAR_USEPOLLING: "true"
+    depends_on:
+      control-api:
+        condition: service_started
+    ports:
+      - "8081:8081"
+    volumes:
+      - ../..:/workspace
+
+volumes:
+  nomade_dev_postgres:

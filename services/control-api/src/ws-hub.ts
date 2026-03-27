@@ -28,6 +28,9 @@ export class WsHub {
   private readonly sessionOwner = new Map<string, string>();
   private readonly sessionAgent = new Map<string, string>();
   private readonly tunnelOwner = new Map<string, string>();
+  private readonly conversationOwner = new Map<string, string>();
+  private readonly conversationAgent = new Map<string, string>();
+  private readonly turnConversation = new Map<string, string>();
   private readonly pendingProxy = new Map<string, PendingProxy>();
 
   constructor(
@@ -48,6 +51,17 @@ export class WsHub {
 
   rememberTunnelOwner(tunnelId: string, userId: string): void {
     this.tunnelOwner.set(tunnelId, userId);
+  }
+
+  rememberConversationOwner(conversationId: string, userId: string, agentId?: string): void {
+    this.conversationOwner.set(conversationId, userId);
+    if (agentId) {
+      this.conversationAgent.set(conversationId, agentId);
+    }
+  }
+
+  rememberConversationTurn(turnId: string, conversationId: string): void {
+    this.turnConversation.set(turnId, conversationId);
   }
 
   sendToAgent(agentId: string, message: unknown): boolean {
@@ -251,6 +265,103 @@ export class WsHub {
 
     if (type === "agent.heartbeat") {
       void this.repositories.touchAgentLastSeen(agentId);
+      return;
+    }
+
+    if (type === "conversation.thread.started") {
+      const conversationId = String(msg.conversationId ?? "");
+      const threadId = String(msg.threadId ?? "");
+      const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+
+      if (conversationId && threadId) {
+        void this.repositories.updateConversationThreadId(conversationId, threadId);
+        void this.repositories.updateConversationStatus(conversationId, "running");
+      }
+      this.broadcastToUser(userId, msg);
+      return;
+    }
+
+    if (type === "conversation.turn.started") {
+      const conversationId = String(msg.conversationId ?? "");
+      const turnId = String(msg.turnId ?? "");
+      const codexTurnId = String(msg.codexTurnId ?? "");
+      const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+
+      if (conversationId) {
+        void this.repositories.updateConversationStatus(conversationId, "running");
+      }
+      if (turnId && conversationId) {
+        this.turnConversation.set(turnId, conversationId);
+      }
+      if (turnId && codexTurnId) {
+        void this.repositories.markConversationTurnStarted({ turnId, codexTurnId });
+      }
+      this.broadcastToUser(userId, msg);
+      return;
+    }
+
+    if (type === "conversation.turn.diff.updated") {
+      const conversationId = String(msg.conversationId ?? "");
+      const turnId = String(msg.turnId ?? "");
+      const diff = String(msg.diff ?? "");
+      const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+      if (turnId) {
+        void this.repositories.updateConversationTurnDiff(turnId, diff);
+      }
+      this.broadcastToUser(userId, msg);
+      return;
+    }
+
+    if (type === "conversation.item.completed") {
+      const conversationId = String(msg.conversationId ?? "");
+      const turnId = String(msg.turnId ?? "");
+      const itemId = String(msg.itemId ?? "");
+      const itemType = String(msg.itemType ?? "unknown");
+      const item = (msg.item as Record<string, unknown>) ?? {};
+      const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+
+      if (turnId && itemId) {
+        void this.repositories.addConversationItem({
+          turnId,
+          itemId,
+          itemType,
+          payload: item
+        });
+      }
+      this.broadcastToUser(userId, msg);
+      return;
+    }
+
+    if (type === "conversation.item.delta") {
+      const conversationId = String(msg.conversationId ?? "");
+      const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+      this.broadcastToUser(userId, msg);
+      return;
+    }
+
+    if (type === "conversation.turn.completed") {
+      const conversationId = String(msg.conversationId ?? "");
+      const turnId = String(msg.turnId ?? "");
+      const statusRaw = String(msg.status ?? "failed");
+      const error = msg.error ? String(msg.error) : undefined;
+      const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+      const status =
+        statusRaw === "completed" || statusRaw === "interrupted" ? statusRaw : ("failed" as const);
+
+      if (turnId) {
+        void this.repositories.completeConversationTurn({
+          turnId,
+          status,
+          error
+        });
+      }
+      if (conversationId) {
+        void this.repositories.updateConversationStatus(
+          conversationId,
+          status === "completed" ? "idle" : status === "interrupted" ? "interrupted" : "failed"
+        );
+      }
+      this.broadcastToUser(userId, msg);
     }
   }
 

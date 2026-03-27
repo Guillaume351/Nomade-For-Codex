@@ -182,6 +182,151 @@ export const createServer = async (): Promise<http.Server> => {
     res.json({ items: workspaces });
   });
 
+  app.post("/conversations", requireUserAuth(auth), async (req, res) => {
+    const schema = z.object({
+      workspaceId: z.string().min(6),
+      agentId: z.string().min(6).optional(),
+      title: z.string().min(1).max(240).optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+
+    const workspace = await repositories.findWorkspaceById(req.userId!, parsed.data.workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: "workspace_not_found" });
+      return;
+    }
+
+    const agentId = parsed.data.agentId ?? workspace.agent_id;
+    const conversation = await repositories.createConversation({
+      userId: req.userId!,
+      workspaceId: parsed.data.workspaceId,
+      agentId,
+      title: parsed.data.title ?? "New conversation"
+    });
+    wsHub.rememberConversationOwner(conversation.id, req.userId!, agentId);
+
+    res.status(201).json(conversation);
+  });
+
+  app.get("/conversations", requireUserAuth(auth), async (req, res) => {
+    const workspaceId = String(req.query.workspaceId ?? "");
+    if (!workspaceId) {
+      res.status(400).json({ error: "workspace_id_required" });
+      return;
+    }
+
+    const conversations = await repositories.listConversations(req.userId!, workspaceId);
+    for (const conversation of conversations) {
+      wsHub.rememberConversationOwner(conversation.id, req.userId!, conversation.agent_id);
+    }
+    res.json({ items: conversations });
+  });
+
+  app.get("/conversations/:conversationId/turns", requireUserAuth(auth), async (req, res) => {
+    const conversation = await repositories.findConversation(req.userId!, req.params.conversationId);
+    if (!conversation) {
+      res.status(404).json({ error: "conversation_not_found" });
+      return;
+    }
+
+    wsHub.rememberConversationOwner(conversation.id, req.userId!, conversation.agent_id);
+    const turns = await repositories.listConversationTurns(conversation.id);
+    for (const turn of turns) {
+      wsHub.rememberConversationTurn(turn.id, conversation.id);
+    }
+
+    res.json({
+      conversation,
+      items: turns
+    });
+  });
+
+  app.post("/conversations/:conversationId/turns", requireUserAuth(auth), async (req, res) => {
+    const schema = z.object({
+      prompt: z.string().min(1),
+      model: z.string().min(1).max(120).optional(),
+      cwd: z.string().min(1).optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+
+    const conversation = await repositories.findConversation(req.userId!, req.params.conversationId);
+    if (!conversation) {
+      res.status(404).json({ error: "conversation_not_found" });
+      return;
+    }
+
+    const workspace = await repositories.findWorkspaceById(req.userId!, conversation.workspace_id);
+    const turn = await repositories.createConversationTurn({
+      conversationId: conversation.id,
+      prompt: parsed.data.prompt
+    });
+
+    wsHub.rememberConversationOwner(conversation.id, req.userId!, conversation.agent_id);
+    wsHub.rememberConversationTurn(turn.id, conversation.id);
+
+    const delivered = wsHub.sendToAgent(conversation.agent_id, {
+      type: "conversation.turn.start",
+      conversationId: conversation.id,
+      turnId: turn.id,
+      threadId: conversation.codex_thread_id ?? undefined,
+      prompt: parsed.data.prompt,
+      model: parsed.data.model,
+      cwd: parsed.data.cwd ?? workspace?.path
+    });
+
+    if (!delivered) {
+      await repositories.completeConversationTurn({
+        turnId: turn.id,
+        status: "failed",
+        error: "agent_offline"
+      });
+      await repositories.updateConversationStatus(conversation.id, "failed");
+      res.status(503).json({ error: "agent_offline" });
+      return;
+    }
+
+    await repositories.updateConversationStatus(conversation.id, "running");
+    res.status(201).json(turn);
+  });
+
+  app.post("/conversations/:conversationId/turns/:turnId/interrupt", requireUserAuth(auth), async (req, res) => {
+    const conversation = await repositories.findConversation(req.userId!, req.params.conversationId);
+    if (!conversation) {
+      res.status(404).json({ error: "conversation_not_found" });
+      return;
+    }
+
+    const turn = await repositories.findConversationTurn(req.params.turnId);
+    if (!turn || turn.conversation_id !== conversation.id) {
+      res.status(404).json({ error: "turn_not_found" });
+      return;
+    }
+
+    wsHub.rememberConversationOwner(conversation.id, req.userId!, conversation.agent_id);
+    wsHub.rememberConversationTurn(turn.id, conversation.id);
+
+    const delivered = wsHub.sendToAgent(conversation.agent_id, {
+      type: "conversation.turn.interrupt",
+      conversationId: conversation.id,
+      turnId: turn.id,
+      threadId: conversation.codex_thread_id ?? undefined
+    });
+    if (!delivered) {
+      res.status(503).json({ error: "agent_offline" });
+      return;
+    }
+
+    res.json({ accepted: true });
+  });
+
   app.post("/sessions", requireUserAuth(auth), async (req, res) => {
     const schema = z.object({
       workspaceId: z.string().min(6),

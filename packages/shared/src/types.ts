@@ -68,6 +68,78 @@ export interface TunnelStatusMessage {
   reason?: string;
 }
 
+export interface ConversationTurnStartMessage {
+  type: "conversation.turn.start";
+  conversationId: string;
+  turnId: string;
+  threadId?: string;
+  prompt: string;
+  model?: string;
+  cwd?: string;
+}
+
+export interface ConversationTurnInterruptMessage {
+  type: "conversation.turn.interrupt";
+  conversationId: string;
+  turnId: string;
+  threadId?: string;
+}
+
+export interface ConversationThreadStartedMessage {
+  type: "conversation.thread.started";
+  conversationId: string;
+  threadId: string;
+}
+
+export interface ConversationTurnStartedMessage {
+  type: "conversation.turn.started";
+  conversationId: string;
+  turnId: string;
+  threadId: string;
+  codexTurnId: string;
+}
+
+export interface ConversationTurnDiffUpdatedMessage {
+  type: "conversation.turn.diff.updated";
+  conversationId: string;
+  turnId: string;
+  threadId: string;
+  codexTurnId: string;
+  diff: string;
+}
+
+export interface ConversationItemDeltaMessage {
+  type: "conversation.item.delta";
+  conversationId: string;
+  turnId: string;
+  threadId: string;
+  codexTurnId: string;
+  itemId: string;
+  stream: "agentMessage" | "commandExecution" | "fileChange" | "reasoning" | "plan";
+  delta: string;
+}
+
+export interface ConversationItemCompletedMessage {
+  type: "conversation.item.completed";
+  conversationId: string;
+  turnId: string;
+  threadId: string;
+  codexTurnId: string;
+  itemId: string;
+  itemType: string;
+  item: Record<string, unknown>;
+}
+
+export interface ConversationTurnCompletedMessage {
+  type: "conversation.turn.completed";
+  conversationId: string;
+  turnId: string;
+  threadId: string;
+  codexTurnId: string;
+  status: "completed" | "interrupted" | "failed";
+  error?: string;
+}
+
 export interface ErrorMessage {
   type: "error";
   code: string;
@@ -79,13 +151,21 @@ export type MobileToAgentMessage =
   | SessionInputMessage
   | SessionTerminateMessage
   | TunnelOpenMessage
-  | TunnelHttpRequestMessage;
+  | TunnelHttpRequestMessage
+  | ConversationTurnStartMessage
+  | ConversationTurnInterruptMessage;
 
 export type AgentToMobileMessage =
   | SessionOutputMessage
   | SessionStatusMessage
   | TunnelStatusMessage
   | TunnelHttpResponseMessage
+  | ConversationThreadStartedMessage
+  | ConversationTurnStartedMessage
+  | ConversationTurnDiffUpdatedMessage
+  | ConversationItemDeltaMessage
+  | ConversationItemCompletedMessage
+  | ConversationTurnCompletedMessage
   | ErrorMessage;
 
 export interface UserClaims {
