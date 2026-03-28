@@ -416,6 +416,30 @@ export const createServer = async (): Promise<http.Server> => {
     });
   });
 
+  app.get("/agents/:agentId/codex/options", requireUserAuth(auth), async (req, res) => {
+    const userId = req.userId!;
+    const agentId = req.params.agentId;
+    const cwd = typeof req.query.cwd === "string" ? req.query.cwd.trim() : "";
+
+    const agents = await repositories.listAgents(userId);
+    if (!agents.some((agent) => agent.id === agentId)) {
+      res.status(404).json({ error: "agent_not_found" });
+      return;
+    }
+
+    try {
+      const options = await wsHub.getCodexOptionsThroughAgent({
+        agentId,
+        cwd: cwd || undefined
+      });
+      res.json(options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "codex_options_failed";
+      const status = message === "agent_offline" ? 409 : 502;
+      res.status(status).json({ error: message });
+    }
+  });
+
   app.post("/workspaces", requireUserAuth(auth), async (req, res) => {
     const schema = z.object({
       agentId: z.string().uuid().or(z.string().min(10)),
@@ -539,10 +563,17 @@ export const createServer = async (): Promise<http.Server> => {
   });
 
   app.post("/conversations/:conversationId/turns", requireUserAuth(auth), async (req, res) => {
+    const approvalPolicySchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
+    const sandboxModeSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
+    const reasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+
     const schema = z.object({
       prompt: z.string().min(1),
       model: z.string().min(1).max(120).optional(),
-      cwd: z.string().min(1).optional()
+      cwd: z.string().min(1).optional(),
+      approvalPolicy: approvalPolicySchema.optional(),
+      sandboxMode: sandboxModeSchema.optional(),
+      effort: reasoningEffortSchema.optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -572,7 +603,10 @@ export const createServer = async (): Promise<http.Server> => {
       threadId: conversation.codex_thread_id ?? undefined,
       prompt: parsed.data.prompt,
       model: parsed.data.model,
-      cwd: parsed.data.cwd ?? workspace?.path
+      cwd: parsed.data.cwd ?? workspace?.path,
+      approvalPolicy: parsed.data.approvalPolicy,
+      sandboxMode: parsed.data.sandboxMode,
+      effort: parsed.data.effort
     });
 
     if (!delivered) {

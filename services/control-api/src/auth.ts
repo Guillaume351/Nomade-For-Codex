@@ -76,6 +76,18 @@ export class AuthService {
     }
   }
 
+  async verifyAccessTokenWithUser(token: string): Promise<UserClaims | null> {
+    const claims = this.verifyAccessToken(token);
+    if (!claims) {
+      return null;
+    }
+    const user = await this.repositories.getUserById(claims.sub);
+    if (!user) {
+      return null;
+    }
+    return claims;
+  }
+
   private async issueUserTokens(user: User): Promise<TokenPair> {
     const claims: UserClaims = {
       sub: user.id,

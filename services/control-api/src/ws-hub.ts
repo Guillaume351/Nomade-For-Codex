@@ -64,6 +64,39 @@ interface PendingThreadRead {
   timeout: NodeJS.Timeout;
 }
 
+export interface CodexModelOption {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+  hidden: boolean;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: Array<{
+    reasoningEffort: string;
+    description: string;
+  }>;
+}
+
+export interface CodexRuntimeOptions {
+  models: CodexModelOption[];
+  approvalPolicies: string[];
+  sandboxModes: string[];
+  reasoningEfforts: string[];
+  defaults: {
+    model?: string;
+    approvalPolicy?: string;
+    sandboxMode?: string;
+    effort?: string;
+  };
+}
+
+interface PendingCodexOptions {
+  resolve: (value: CodexRuntimeOptions) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
+
 const normalizeCodexThreadReadItem = (rawItem: Record<string, unknown>, itemIndex: number): CodexThreadReadItem => {
   const wrappedPayload = rawItem.payload;
   if (wrappedPayload && typeof wrappedPayload === "object") {
@@ -141,6 +174,7 @@ export class WsHub {
   private readonly pendingProxy = new Map<string, PendingProxy>();
   private readonly pendingThreadList = new Map<string, PendingThreadList>();
   private readonly pendingThreadRead = new Map<string, PendingThreadRead>();
+  private readonly pendingCodexOptions = new Map<string, PendingCodexOptions>();
 
   constructor(
     private readonly auth: AuthService,
@@ -273,6 +307,33 @@ export class WsHub {
     });
   }
 
+  async getCodexOptionsThroughAgent(params: {
+    agentId: string;
+    cwd?: string;
+  }): Promise<CodexRuntimeOptions> {
+    const requestId = randomToken("co");
+    const conn = this.agentSockets.get(params.agentId);
+    if (!conn || conn.ws.readyState !== conn.ws.OPEN) {
+      throw new Error("agent_offline");
+    }
+
+    const payload = {
+      type: "codex.options.get",
+      requestId,
+      cwd: params.cwd
+    };
+
+    return new Promise<CodexRuntimeOptions>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingCodexOptions.delete(requestId);
+        reject(new Error("codex_options_timeout"));
+      }, 20_000);
+
+      this.pendingCodexOptions.set(requestId, { resolve, reject, timeout });
+      conn.ws.send(JSON.stringify(payload));
+    });
+  }
+
   private handleUpgrade(req: IncomingMessage, socket: import("stream").Duplex, head: Buffer): void {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== "/ws") {
@@ -290,12 +351,13 @@ export class WsHub {
 
     this.wss.handleUpgrade(req, socket, head, (ws) => {
       if (accessToken) {
-        const claims = this.auth.verifyAccessToken(accessToken);
-        if (!claims) {
-          ws.close();
-          return;
-        }
-        this.bindUserSocket(claims.sub, ws);
+        void this.auth.verifyAccessTokenWithUser(accessToken).then((claims) => {
+          if (!claims) {
+            ws.close();
+            return;
+          }
+          this.bindUserSocket(claims.sub, ws);
+        });
         return;
       }
 
@@ -482,6 +544,77 @@ export class WsHub {
       }
 
       pending.resolve(parseCodexThreadReadSummary(rawThread as Record<string, unknown>));
+      return;
+    }
+
+    if (type === "codex.options.result") {
+      const requestId = String(msg.requestId ?? "");
+      const pending = this.pendingCodexOptions.get(requestId);
+      if (!pending) {
+        return;
+      }
+      this.pendingCodexOptions.delete(requestId);
+      clearTimeout(pending.timeout);
+
+      const status = String(msg.status ?? "error");
+      if (status !== "ok") {
+        pending.reject(new Error(String(msg.error ?? "codex_options_failed")));
+        return;
+      }
+
+      const optionsRaw = msg.options;
+      if (!optionsRaw || typeof optionsRaw !== "object") {
+        pending.reject(new Error("codex_options_missing_payload"));
+        return;
+      }
+
+      const options = optionsRaw as Record<string, unknown>;
+      const modelsRaw = Array.isArray(options.models) ? options.models : [];
+      const models: CodexModelOption[] = modelsRaw
+        .filter((entry) => typeof entry === "object" && entry !== null)
+        .map((entry) => {
+          const model = entry as Record<string, unknown>;
+          const effortsRaw = Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [];
+          const supportedReasoningEfforts = effortsRaw
+            .filter((effort) => typeof effort === "object" && effort !== null)
+            .map((effort) => {
+              const value = effort as Record<string, unknown>;
+              return {
+                reasoningEffort: String(value.reasoningEffort ?? ""),
+                description: String(value.description ?? "")
+              };
+            })
+            .filter((effort) => effort.reasoningEffort.length > 0);
+
+          return {
+            id: String(model.id ?? ""),
+            model: String(model.model ?? ""),
+            displayName: String(model.displayName ?? model.model ?? ""),
+            description: String(model.description ?? ""),
+            isDefault: model.isDefault === true,
+            hidden: model.hidden === true,
+            defaultReasoningEffort: String(model.defaultReasoningEffort ?? "medium"),
+            supportedReasoningEfforts
+          };
+        })
+        .filter((model) => model.model.length > 0);
+
+      const toStringList = (value: unknown): string[] =>
+        Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+
+      const defaultsRaw = (options.defaults as Record<string, unknown> | undefined) ?? {};
+      pending.resolve({
+        models,
+        approvalPolicies: toStringList(options.approvalPolicies),
+        sandboxModes: toStringList(options.sandboxModes),
+        reasoningEfforts: toStringList(options.reasoningEfforts),
+        defaults: {
+          model: typeof defaultsRaw.model === "string" ? defaultsRaw.model : undefined,
+          approvalPolicy: typeof defaultsRaw.approvalPolicy === "string" ? defaultsRaw.approvalPolicy : undefined,
+          sandboxMode: typeof defaultsRaw.sandboxMode === "string" ? defaultsRaw.sandboxMode : undefined,
+          effort: typeof defaultsRaw.effort === "string" ? defaultsRaw.effort : undefined
+        }
+      });
       return;
     }
 

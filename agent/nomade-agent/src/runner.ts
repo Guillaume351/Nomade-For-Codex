@@ -101,7 +101,12 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           threadId: msg.threadId ? String(msg.threadId) : undefined,
           prompt: String(msg.prompt ?? ""),
           model: msg.model ? String(msg.model) : undefined,
-          cwd: msg.cwd ? String(msg.cwd) : undefined
+          cwd: msg.cwd ? String(msg.cwd) : undefined,
+          approvalPolicy: msg.approvalPolicy ? String(msg.approvalPolicy) as "untrusted" | "on-failure" | "on-request" | "never" : undefined,
+          sandboxMode:
+            msg.sandboxMode ? (String(msg.sandboxMode) as "read-only" | "workspace-write" | "danger-full-access") : undefined,
+          effort:
+            msg.effort ? (String(msg.effort) as "none" | "minimal" | "low" | "medium" | "high" | "xhigh") : undefined
         });
         return;
       }
@@ -173,6 +178,33 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
               requestId,
               status: "error",
               error: error instanceof Error ? error.message : "thread_read_failed"
+            })
+          );
+        }
+        return;
+      }
+
+      if (type === "codex.options.get") {
+        const requestId = String(msg.requestId ?? randomToken("copt"));
+        try {
+          const options = await conversationManager.getRuntimeOptions({
+            cwd: msg.cwd ? String(msg.cwd) : undefined
+          });
+          ws.send(
+            JSON.stringify({
+              type: "codex.options.result",
+              requestId,
+              status: "ok",
+              options
+            })
+          );
+        } catch (error) {
+          ws.send(
+            JSON.stringify({
+              type: "codex.options.result",
+              requestId,
+              status: "error",
+              error: error instanceof Error ? error.message : "codex_options_failed"
             })
           );
         }

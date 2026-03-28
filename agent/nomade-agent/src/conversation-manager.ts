@@ -1,4 +1,11 @@
-import { CodexAppServerClient, type AppServerNotification } from "./codex-app-server.js";
+import {
+  CodexAppServerClient,
+  type AppServerNotification,
+  type CodexApprovalPolicy,
+  type CodexModelSummary,
+  type CodexReasoningEffort,
+  type CodexSandboxMode
+} from "./codex-app-server.js";
 
 interface ConversationTurnStartParams {
   conversationId: string;
@@ -7,6 +14,9 @@ interface ConversationTurnStartParams {
   prompt: string;
   model?: string;
   cwd?: string;
+  approvalPolicy?: CodexApprovalPolicy;
+  sandboxMode?: CodexSandboxMode;
+  effort?: CodexReasoningEffort;
 }
 
 interface ConversationTurnInterruptParams {
@@ -50,6 +60,23 @@ export interface CodexThreadReadSummary {
   turns: CodexThreadTurnSummary[];
 }
 
+export interface CodexRuntimeOptions {
+  models: CodexModelSummary[];
+  approvalPolicies: CodexApprovalPolicy[];
+  sandboxModes: CodexSandboxMode[];
+  reasoningEfforts: CodexReasoningEffort[];
+  defaults: {
+    model?: string;
+    approvalPolicy?: CodexApprovalPolicy;
+    sandboxMode?: CodexSandboxMode;
+    effort?: CodexReasoningEffort;
+  };
+}
+
+const codexApprovalPolicies: CodexApprovalPolicy[] = ["untrusted", "on-failure", "on-request", "never"];
+const codexSandboxModes: CodexSandboxMode[] = ["read-only", "workspace-write", "danger-full-access"];
+const codexReasoningEfforts: CodexReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+
 const buildTurnKey = (threadId: string, codexTurnId: string): string => `${threadId}:${codexTurnId}`;
 
 export class ConversationManager {
@@ -64,36 +91,78 @@ export class ConversationManager {
   }
 
   async startTurn(params: ConversationTurnStartParams): Promise<void> {
+    let currentThreadId = params.threadId ?? this.threadByConversation.get(params.conversationId) ?? "";
     try {
       await this.codexClient.start();
 
-      let threadId = params.threadId ?? this.threadByConversation.get(params.conversationId);
-      if (!threadId) {
-        threadId = await this.codexClient.ensureThread({
+      if (!currentThreadId) {
+        currentThreadId = await this.codexClient.ensureThread({
           conversationId: params.conversationId,
           cwd: params.cwd,
-          model: params.model
+          model: params.model,
+          approvalPolicy: params.approvalPolicy,
+          sandboxMode: params.sandboxMode
         });
-        this.threadByConversation.set(params.conversationId, threadId);
+        this.threadByConversation.set(params.conversationId, currentThreadId);
         this.emit({
           type: "conversation.thread.started",
           conversationId: params.conversationId,
-          threadId
+          threadId: currentThreadId
         });
+      } else {
+        this.threadByConversation.set(params.conversationId, currentThreadId);
       }
 
-      this.pendingTurnByThread.set(threadId, {
-        conversationId: params.conversationId,
-        turnId: params.turnId
-      });
+      const runTurnStart = async (threadId: string): Promise<string> => {
+        this.pendingTurnByThread.set(threadId, {
+          conversationId: params.conversationId,
+          turnId: params.turnId
+        });
+        try {
+          return await this.codexClient.turnStart({
+            threadId,
+            prompt: params.prompt,
+            cwd: params.cwd,
+            model: params.model,
+            approvalPolicy: params.approvalPolicy,
+            sandboxMode: params.sandboxMode,
+            effort: params.effort
+          });
+        } catch (error) {
+          this.pendingTurnByThread.delete(threadId);
+          throw error;
+        }
+      };
 
-      const codexTurnId = await this.codexClient.turnStart({
-        threadId,
-        prompt: params.prompt,
-        cwd: params.cwd,
-        model: params.model
-      });
-      this.bindTurn(threadId, codexTurnId, {
+      let codexTurnId: string;
+      try {
+        codexTurnId = await runTurnStart(currentThreadId);
+      } catch (error) {
+        if (!this.isThreadNotFoundError(error)) {
+          throw error;
+        }
+
+        this.pendingTurnByThread.delete(currentThreadId);
+        this.threadByConversation.delete(params.conversationId);
+
+        currentThreadId = await this.codexClient.ensureThread({
+          conversationId: params.conversationId,
+          cwd: params.cwd,
+          model: params.model,
+          approvalPolicy: params.approvalPolicy,
+          sandboxMode: params.sandboxMode
+        });
+        this.threadByConversation.set(params.conversationId, currentThreadId);
+        this.emit({
+          type: "conversation.thread.started",
+          conversationId: params.conversationId,
+          threadId: currentThreadId
+        });
+
+        codexTurnId = await runTurnStart(currentThreadId);
+      }
+
+      this.bindTurn(currentThreadId, codexTurnId, {
         conversationId: params.conversationId,
         turnId: params.turnId
       });
@@ -102,7 +171,7 @@ export class ConversationManager {
         type: "conversation.turn.started",
         conversationId: params.conversationId,
         turnId: params.turnId,
-        threadId,
+        threadId: currentThreadId,
         codexTurnId
       });
     } catch (error) {
@@ -110,7 +179,7 @@ export class ConversationManager {
         type: "conversation.turn.completed",
         conversationId: params.conversationId,
         turnId: params.turnId,
-        threadId: params.threadId ?? "",
+        threadId: currentThreadId,
         codexTurnId: "",
         status: "failed",
         error: error instanceof Error ? error.message : "turn_start_failed"
@@ -221,6 +290,45 @@ export class ConversationManager {
       cwd: typeof thread.cwd === "string" && thread.cwd.length > 0 ? thread.cwd : ".",
       updatedAt: typeof thread.updatedAt === "number" ? thread.updatedAt : 0,
       turns
+    };
+  }
+
+  async getRuntimeOptions(params?: { cwd?: string }): Promise<CodexRuntimeOptions> {
+    await this.codexClient.start();
+
+    const [modelPage, config] = await Promise.all([
+      this.codexClient.modelList({
+        limit: 200,
+        includeHidden: false
+      }),
+      this.codexClient.configRead({ cwd: params?.cwd ?? null })
+    ]);
+
+    const approvalRaw = config.approval_policy;
+    const sandboxRaw = config.sandbox_mode;
+    const effortRaw = config.model_reasoning_effort;
+    const modelRaw = config.model;
+
+    const defaults: CodexRuntimeOptions["defaults"] = {};
+    if (typeof modelRaw === "string" && modelRaw.trim().length > 0) {
+      defaults.model = modelRaw.trim();
+    }
+    if (this.isApprovalPolicy(approvalRaw)) {
+      defaults.approvalPolicy = approvalRaw;
+    }
+    if (this.isSandboxMode(sandboxRaw)) {
+      defaults.sandboxMode = sandboxRaw;
+    }
+    if (this.isReasoningEffort(effortRaw)) {
+      defaults.effort = effortRaw;
+    }
+
+    return {
+      models: modelPage.data,
+      approvalPolicies: codexApprovalPolicies,
+      sandboxModes: codexSandboxModes,
+      reasoningEfforts: codexReasoningEfforts,
+      defaults
     };
   }
 
@@ -402,5 +510,24 @@ export class ConversationManager {
       }
     }
     return parts.join("\n\n");
+  }
+
+  private isApprovalPolicy(value: unknown): value is CodexApprovalPolicy {
+    return value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never";
+  }
+
+  private isSandboxMode(value: unknown): value is CodexSandboxMode {
+    return value === "read-only" || value === "workspace-write" || value === "danger-full-access";
+  }
+
+  private isReasoningEffort(value: unknown): value is CodexReasoningEffort {
+    return value === "none" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh";
+  }
+
+  private isThreadNotFoundError(error: unknown): boolean {
+    if (!(error instanceof Error)) {
+      return false;
+    }
+    return /thread[\s_-]*not[\s_-]*found/i.test(error.message);
   }
 }

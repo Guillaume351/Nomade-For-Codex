@@ -41,10 +41,66 @@ interface ThreadReadResult {
   thread: Record<string, unknown>;
 }
 
+interface ModelListReasoningEffortEntry {
+  reasoningEffort?: unknown;
+  description?: unknown;
+}
+
+interface ModelListEntry {
+  id?: unknown;
+  model?: unknown;
+  displayName?: unknown;
+  description?: unknown;
+  isDefault?: unknown;
+  hidden?: unknown;
+  defaultReasoningEffort?: unknown;
+  supportedReasoningEfforts?: unknown;
+}
+
+interface ModelListResult {
+  data?: unknown;
+  nextCursor?: unknown;
+}
+
+interface ConfigReadResult {
+  config?: unknown;
+}
+
 export interface AppServerNotification {
   method: string;
   params: Record<string, unknown>;
 }
+
+export type CodexApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
+export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+export type CodexReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+export interface CodexModelSummary {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+  hidden: boolean;
+  defaultReasoningEffort: CodexReasoningEffort;
+  supportedReasoningEfforts: Array<{
+    reasoningEffort: CodexReasoningEffort;
+    description: string;
+  }>;
+}
+
+const toSandboxPolicy = (sandboxMode?: CodexSandboxMode): Record<string, unknown> | undefined => {
+  if (!sandboxMode) {
+    return undefined;
+  }
+  if (sandboxMode === "read-only") {
+    return { type: "readOnly" };
+  }
+  if (sandboxMode === "workspace-write") {
+    return { type: "workspaceWrite" };
+  }
+  return { type: "dangerFullAccess" };
+};
 
 export class CodexAppServerClient {
   private child: ChildProcessWithoutNullStreams | null = null;
@@ -99,6 +155,8 @@ export class CodexAppServerClient {
     conversationId: string;
     cwd?: string;
     model?: string;
+    approvalPolicy?: CodexApprovalPolicy;
+    sandboxMode?: CodexSandboxMode;
   }): Promise<string> {
     const existing = this.threadStartLock.get(params.conversationId);
     if (existing) {
@@ -114,11 +172,17 @@ export class CodexAppServerClient {
     }
   }
 
-  async threadStart(params: { cwd?: string; model?: string }): Promise<string> {
+  async threadStart(params: {
+    cwd?: string;
+    model?: string;
+    approvalPolicy?: CodexApprovalPolicy;
+    sandboxMode?: CodexSandboxMode;
+  }): Promise<string> {
     const response = (await this.request("thread/start", {
       cwd: params.cwd,
       model: params.model,
-      approvalPolicy: "never",
+      approvalPolicy: params.approvalPolicy ?? "never",
+      sandbox: params.sandboxMode,
       ephemeral: true
     })) as ThreadStartResult;
 
@@ -134,13 +198,18 @@ export class CodexAppServerClient {
     prompt: string;
     cwd?: string;
     model?: string;
+    approvalPolicy?: CodexApprovalPolicy;
+    sandboxMode?: CodexSandboxMode;
+    effort?: CodexReasoningEffort;
   }): Promise<string> {
     const response = (await this.request("turn/start", {
       threadId: params.threadId,
       input: [{ type: "text", text: params.prompt }],
       cwd: params.cwd,
       model: params.model,
-      approvalPolicy: "never"
+      approvalPolicy: params.approvalPolicy ?? "never",
+      sandboxPolicy: toSandboxPolicy(params.sandboxMode),
+      effort: params.effort
     })) as TurnStartResult;
 
     const turnId = response?.turn?.id;
@@ -191,6 +260,69 @@ export class CodexAppServerClient {
       throw new Error("thread_read_missing_thread");
     }
     return response.thread;
+  }
+
+  async modelList(params?: {
+    limit?: number;
+    cursor?: string | null;
+    includeHidden?: boolean;
+  }): Promise<{ data: CodexModelSummary[]; nextCursor: string | null }> {
+    const response = (await this.request("model/list", {
+      limit: params?.limit ?? 100,
+      cursor: params?.cursor ?? null,
+      includeHidden: params?.includeHidden ?? false
+    })) as ModelListResult;
+
+    const rawData = Array.isArray(response?.data) ? response.data : [];
+    const data = rawData
+      .filter((entry) => typeof entry === "object" && entry !== null)
+      .map((entry) => {
+        const model = entry as ModelListEntry;
+        const defaultEffort = this.normalizeReasoningEffort(model.defaultReasoningEffort) ?? "medium";
+        const supportedReasoningEfforts = Array.isArray(model.supportedReasoningEfforts)
+          ? model.supportedReasoningEfforts
+              .filter((effort) => typeof effort === "object" && effort !== null)
+              .map((effort) => {
+                const value = effort as ModelListReasoningEffortEntry;
+                return {
+                  reasoningEffort: this.normalizeReasoningEffort(value.reasoningEffort),
+                  description: typeof value.description === "string" ? value.description : ""
+                };
+              })
+              .filter(
+                (value): value is { reasoningEffort: CodexReasoningEffort; description: string } =>
+                  value.reasoningEffort !== undefined
+              )
+          : [];
+
+        return {
+          id: typeof model.id === "string" ? model.id : "",
+          model: typeof model.model === "string" ? model.model : "",
+          displayName: typeof model.displayName === "string" ? model.displayName : "",
+          description: typeof model.description === "string" ? model.description : "",
+          isDefault: model.isDefault === true,
+          hidden: model.hidden === true,
+          defaultReasoningEffort: defaultEffort,
+          supportedReasoningEfforts
+        };
+      })
+      .filter((entry) => entry.model.length > 0 && entry.displayName.length > 0);
+
+    return {
+      data,
+      nextCursor: typeof response?.nextCursor === "string" ? response.nextCursor : null
+    };
+  }
+
+  async configRead(params?: { cwd?: string | null }): Promise<Record<string, unknown>> {
+    const response = (await this.request("config/read", {
+      cwd: params?.cwd ?? null,
+      includeLayers: false
+    })) as ConfigReadResult;
+    if (!response?.config || typeof response.config !== "object") {
+      return {};
+    }
+    return response.config as Record<string, unknown>;
   }
 
   close(): void {
@@ -298,5 +430,19 @@ export class CodexAppServerClient {
       return;
     }
     this.child.stdin.write(`${JSON.stringify(value)}\n`);
+  }
+
+  private normalizeReasoningEffort(value: unknown): CodexReasoningEffort | undefined {
+    if (
+      value === "none" ||
+      value === "minimal" ||
+      value === "low" ||
+      value === "medium" ||
+      value === "high" ||
+      value === "xhigh"
+    ) {
+      return value;
+    }
+    return undefined;
   }
 }

@@ -157,6 +157,27 @@ class NomadeApi {
     return _decodeObject(response);
   }
 
+  Future<Map<String, dynamic>> getCodexOptions({
+    required String accessToken,
+    required String agentId,
+    String? cwd,
+  }) async {
+    final query = <String, String>{};
+    if (cwd != null && cwd.trim().isNotEmpty) {
+      query['cwd'] = cwd.trim();
+    }
+    final response = await _send(
+      () => http.get(
+        _uri(
+          '/agents/$agentId/codex/options',
+          queryParameters: query.isEmpty ? null : query,
+        ),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    return _decodeObject(response);
+  }
+
   Future<List<Map<String, dynamic>>> listAgents(String accessToken) async {
     final response = await _send(
       () => http.get(
@@ -293,7 +314,29 @@ class NomadeApi {
     required String accessToken,
     required String conversationId,
     required String prompt,
+    String? model,
+    String? cwd,
+    String? approvalPolicy,
+    String? sandboxMode,
+    String? effort,
   }) async {
+    final body = <String, dynamic>{'prompt': prompt};
+    if (model != null && model.trim().isNotEmpty) {
+      body['model'] = model.trim();
+    }
+    if (cwd != null && cwd.trim().isNotEmpty) {
+      body['cwd'] = cwd.trim();
+    }
+    if (approvalPolicy != null && approvalPolicy.trim().isNotEmpty) {
+      body['approvalPolicy'] = approvalPolicy.trim();
+    }
+    if (sandboxMode != null && sandboxMode.trim().isNotEmpty) {
+      body['sandboxMode'] = sandboxMode.trim();
+    }
+    if (effort != null && effort.trim().isNotEmpty) {
+      body['effort'] = effort.trim();
+    }
+
     final response = await _send(
       () => http.post(
         _uri('/conversations/$conversationId/turns'),
@@ -301,7 +344,7 @@ class NomadeApi {
           'authorization': 'Bearer $accessToken',
           'content-type': 'application/json',
         },
-        body: jsonEncode({'prompt': prompt}),
+        body: jsonEncode(body),
       ),
     );
     return _decodeObject(response);

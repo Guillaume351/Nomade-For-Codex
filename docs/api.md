@@ -14,13 +14,20 @@
 - `POST /agents/:agentId/codex/import` body `{ limit? }`
   - imports threads from Codex app-server into Nomade workspaces/conversations (default limit `500`)
   - response counters include `threads_scanned`, `imported`, `skipped`, `hydrated_or_repaired`
+- `GET /agents/:agentId/codex/options?cwd=...`
+  - returns runtime options from Codex app-server:
+    - `models`
+    - `approvalPolicies`
+    - `sandboxModes`
+    - `reasoningEfforts`
+    - `defaults` (`model`, `approvalPolicy`, `sandboxMode`, `effort`)
 - `POST /workspaces` body `{ agentId, name, path }`
 - `GET /workspaces?agentId=...` (optional filter by active agent)
 - `POST /conversations` body `{ workspaceId, agentId?, title? }`
 - `GET /conversations?workspaceId=...`
 - `GET /conversations/:conversationId/turns?forceHydrate=1`
   - includes `hydration` metadata: `{ attempted, repaired, deferred, reason }`
-- `POST /conversations/:conversationId/turns` body `{ prompt, model?, cwd? }`
+- `POST /conversations/:conversationId/turns` body `{ prompt, model?, cwd?, approvalPolicy?, sandboxMode?, effort? }`
 - `POST /conversations/:conversationId/turns/:turnId/interrupt`
 - `POST /sessions` body `{ workspaceId, agentId, name, command, cwd? }`
 - `GET /sessions?workspaceId=...`

@@ -1,0 +1,59 @@
+name: nomade-staging
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nomade}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-nomade}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - nomade_staging_postgres:/var/lib/postgresql/data
+
+  control-api:
+    image: ${CONTROL_API_IMAGE:-ghcr.io/CHANGE_ME/nomade-for-codex-control-api}:${IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-nomade}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:?set INTERNAL_GATEWAY_SECRET}
+      PREVIEW_BASE_DOMAIN: ${PREVIEW_BASE_DOMAIN:-preview.localhost}
+      ACCESS_TOKEN_TTL_SEC: ${ACCESS_TOKEN_TTL_SEC:-900}
+      REFRESH_TOKEN_TTL_SEC: ${REFRESH_TOKEN_TTL_SEC:-2592000}
+      DEVICE_CODE_TTL_SEC: ${DEVICE_CODE_TTL_SEC:-600}
+      PAIRING_CODE_TTL_SEC: ${PAIRING_CODE_TTL_SEC:-600}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${CONTROL_API_PORT:-8080}:8080"
+
+  tunnel-gateway:
+    image: ${TUNNEL_GATEWAY_IMAGE:-ghcr.io/CHANGE_ME/nomade-for-codex-tunnel-gateway}:${IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      PORT: 8081
+      CONTROL_API_URL: http://control-api:8080
+      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:?set INTERNAL_GATEWAY_SECRET}
+      PREVIEW_BASE_DOMAIN: ${PREVIEW_BASE_DOMAIN:-preview.localhost}
+    depends_on:
+      control-api:
+        condition: service_started
+    ports:
+      - "${TUNNEL_GATEWAY_PORT:-8081}:8081"
+
+volumes:
+  nomade_staging_postgres:
