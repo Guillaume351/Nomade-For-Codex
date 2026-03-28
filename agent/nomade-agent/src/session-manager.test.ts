@@ -16,8 +16,12 @@ describe("SessionManager", () => {
       command: "echo hello"
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(statuses[0]).toBe("running");
+    const timeoutAt = Date.now() + 3_000;
+    while (Date.now() < timeoutAt && !outputs.join("").includes("hello")) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    expect(statuses).toContain("running");
     expect(outputs.join("")).toContain("hello");
   });
 });

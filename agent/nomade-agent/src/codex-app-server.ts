@@ -24,6 +24,23 @@ interface TurnStartResult {
   };
 }
 
+interface ThreadListEntry {
+  id: string;
+  preview: string;
+  cwd: string;
+  updatedAt: number;
+  name: string | null;
+}
+
+interface ThreadListResult {
+  data: ThreadListEntry[];
+  nextCursor: string | null;
+}
+
+interface ThreadReadResult {
+  thread: Record<string, unknown>;
+}
+
 export interface AppServerNotification {
   method: string;
   params: Record<string, unknown>;
@@ -138,6 +155,42 @@ export class CodexAppServerClient {
       threadId: params.threadId,
       turnId: params.turnId
     });
+  }
+
+  async threadList(params?: { limit?: number; cursor?: string | null }): Promise<ThreadListResult> {
+    const response = (await this.request("thread/list", {
+      limit: params?.limit ?? 50,
+      cursor: params?.cursor ?? null
+    })) as ThreadListResult;
+
+    const data = Array.isArray(response?.data)
+      ? response.data
+          .filter((entry) => typeof entry?.id === "string")
+          .map((entry) => ({
+            id: entry.id,
+            preview: typeof entry.preview === "string" ? entry.preview : "",
+            cwd: typeof entry.cwd === "string" ? entry.cwd : ".",
+            updatedAt: typeof entry.updatedAt === "number" ? entry.updatedAt : 0,
+            name: typeof entry.name === "string" ? entry.name : null
+          }))
+      : [];
+
+    return {
+      data,
+      nextCursor: typeof response?.nextCursor === "string" ? response.nextCursor : null
+    };
+  }
+
+  async threadRead(params: { threadId: string; includeTurns?: boolean }): Promise<Record<string, unknown>> {
+    const response = (await this.request("thread/read", {
+      threadId: params.threadId,
+      includeTurns: params.includeTurns ?? true
+    })) as ThreadReadResult;
+
+    if (!response?.thread || typeof response.thread !== "object") {
+      throw new Error("thread_read_missing_thread");
+    }
+    return response.thread;
   }
 
   close(): void {

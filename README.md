@@ -9,6 +9,10 @@ Monorepo for remote control of `codex-cli` and localhost preview tunneling.
 - `apps/mobile`: Flutter scaffold for login + pairing code generation.
 
 ## Local development
+Fast one-command dev loop:
+- `npm run dev:full -- you@example.com`
+- `npm run dev:stop`
+
 1. Start Postgres (`docker run ...` from `QUICKSTART.md`).
 2. Install dependencies: `npm install`.
 3. Build and test: `npm run build && npm test`.
@@ -16,10 +20,11 @@ Monorepo for remote control of `codex-cli` and localhost preview tunneling.
    - `npm run dev:control`
    - `npm run dev:gateway`
 5. Pair and run agent:
-   - `npm run dev:agent -- pair --server-url http://localhost:8080 --pairing-code <PAIRING_CODE>`
-   - `npm run dev:agent -- run`
+   - `npm run dev:agent:pair -- --server-url http://localhost:8080 --pairing-code <PAIRING_CODE>`
+   - `npm run dev:agent:run`
 
-Detailed local flow: [`QUICKSTART.md`](./QUICKSTART.md)
+Detailed local flow: [`QUICKSTART.md`](./QUICKSTART.md)  
+Troubleshooting: [`docs/troubleshooting.md`](./docs/troubleshooting.md)
 
 ## Self-host
 Use [`deploy/selfhost/docker-compose.yml`](./deploy/selfhost/docker-compose.yml).

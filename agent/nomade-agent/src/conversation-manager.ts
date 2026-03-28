@@ -19,6 +19,37 @@ interface TurnContext {
   turnId: string;
 }
 
+export interface CodexThreadSummary {
+  threadId: string;
+  title: string;
+  preview: string;
+  cwd: string;
+  updatedAt: number;
+}
+
+export interface CodexThreadItemSummary {
+  itemId: string;
+  itemType: string;
+  payload: Record<string, unknown>;
+}
+
+export interface CodexThreadTurnSummary {
+  turnId: string;
+  status: "running" | "completed" | "interrupted" | "failed";
+  error?: string;
+  userPrompt: string;
+  items: CodexThreadItemSummary[];
+}
+
+export interface CodexThreadReadSummary {
+  threadId: string;
+  title: string;
+  preview: string;
+  cwd: string;
+  updatedAt: number;
+  turns: CodexThreadTurnSummary[];
+}
+
 const buildTurnKey = (threadId: string, codexTurnId: string): string => `${threadId}:${codexTurnId}`;
 
 export class ConversationManager {
@@ -96,6 +127,101 @@ export class ConversationManager {
       threadId: mapping.threadId,
       turnId: mapping.codexTurnId
     });
+  }
+
+  async listThreads(params?: { limit?: number }): Promise<CodexThreadSummary[]> {
+    await this.codexClient.start();
+
+    const target = Math.max(1, Math.min(params?.limit ?? 200, 1000));
+    const collected: CodexThreadSummary[] = [];
+    let cursor: string | null = null;
+
+    while (collected.length < target) {
+      const page = await this.codexClient.threadList({
+        limit: Math.min(100, target - collected.length),
+        cursor
+      });
+
+      for (const thread of page.data) {
+        const preview = thread.preview.trim();
+        const fallbackTitle = preview.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "Codex thread";
+        const rawName = thread.name?.trim() ?? "";
+        const title = rawName.length > 0 ? rawName : fallbackTitle;
+
+        collected.push({
+          threadId: thread.id,
+          title: title.length > 240 ? `${title.substring(0, 240)}...` : title,
+          preview,
+          cwd: thread.cwd || ".",
+          updatedAt: thread.updatedAt
+        });
+      }
+
+      if (!page.nextCursor || page.data.length === 0) {
+        break;
+      }
+      cursor = page.nextCursor;
+    }
+
+    return collected;
+  }
+
+  async readThread(params: { threadId: string }): Promise<CodexThreadReadSummary> {
+    await this.codexClient.start();
+    const thread = await this.codexClient.threadRead({
+      threadId: params.threadId,
+      includeTurns: true
+    });
+
+    const preview = typeof thread.preview === "string" ? thread.preview.trim() : "";
+    const rawName = typeof thread.name === "string" ? thread.name.trim() : "";
+    const fallbackTitle = preview.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "Codex thread";
+    const turnsRaw = Array.isArray(thread.turns) ? thread.turns : [];
+
+    const turns: CodexThreadTurnSummary[] = turnsRaw
+      .filter((entry) => typeof entry === "object" && entry !== null)
+      .map((entry, index) => {
+        const turn = entry as Record<string, unknown>;
+        const rawStatus = String(turn.status ?? "failed");
+        const status =
+          rawStatus === "completed" || rawStatus === "interrupted" || rawStatus === "failed" ? rawStatus : "running";
+
+        const rawError = turn.error as Record<string, unknown> | null | undefined;
+        const errorMessage = typeof rawError?.message === "string" ? rawError.message : undefined;
+        const itemsRaw = Array.isArray(turn.items) ? turn.items : [];
+        const items = itemsRaw
+          .filter((item) => typeof item === "object" && item !== null)
+          .map((item, itemIndex) => {
+            const payload = (item as Record<string, unknown>) ?? {};
+            const itemId = typeof payload.id === "string" ? payload.id : `item-${itemIndex + 1}`;
+            const itemType = typeof payload.type === "string" ? payload.type : "unknown";
+            return {
+              itemId,
+              itemType,
+              payload
+            };
+          });
+
+        const userItem = items.find((item) => item.itemType == "userMessage");
+        const userPrompt = this.extractUserPrompt(userItem?.payload);
+
+        return {
+          turnId: typeof turn.id === "string" ? turn.id : `turn-${index + 1}`,
+          status,
+          error: errorMessage,
+          userPrompt,
+          items
+        };
+      });
+
+    return {
+      threadId: typeof thread.id === "string" ? thread.id : params.threadId,
+      title: rawName.length > 0 ? rawName : fallbackTitle,
+      preview,
+      cwd: typeof thread.cwd === "string" && thread.cwd.length > 0 ? thread.cwd : ".",
+      updatedAt: typeof thread.updatedAt === "number" ? thread.updatedAt : 0,
+      turns
+    };
   }
 
   close(): void {
@@ -254,5 +380,27 @@ export class ConversationManager {
       return String(turn.id ?? "");
     }
     return String(params.turnId ?? "");
+  }
+
+  private extractUserPrompt(payload?: Record<string, unknown>): string {
+    if (!payload) {
+      return "";
+    }
+    const content = payload.content;
+    if (!Array.isArray(content)) {
+      return "";
+    }
+    const parts: string[] = [];
+    for (const item of content) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const entry = item as Record<string, unknown>;
+      const text = entry.text;
+      if (typeof text === "string" && text.trim().length > 0) {
+        parts.push(text.trim());
+      }
+    }
+    return parts.join("\n\n");
   }
 }

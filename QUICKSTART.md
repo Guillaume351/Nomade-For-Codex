@@ -1,5 +1,20 @@
 # Quickstart (local)
 
+## Fast path (one command)
+```bash
+npm run dev:full -- you@example.com
+```
+- Starts Docker services
+- Authenticates your user
+- Pairs agent automatically if needed
+- Starts local agent daemon
+- Launches Flutter app on macOS with dev auto-login
+
+Stop everything:
+```bash
+npm run dev:stop
+```
+
 ## 1. Install and build
 ```bash
 npm install
@@ -33,11 +48,29 @@ curl -sX POST http://localhost:8080/agents/pair \
   -H "authorization: Bearer <ACCESS_TOKEN>" | jq
 
 # pair + run agent
-npm run dev:agent -- pair --server-url http://localhost:8080 --pairing-code <PAIRING_CODE>
-npm run dev:agent -- run
+npm run dev:agent:pair -- --server-url http://localhost:8080 --pairing-code <PAIRING_CODE>
+npm run dev:agent:run
 ```
 
-## 4. Stop backend services
+## 4. Run Flutter app (macOS / iOS)
+```bash
+cd apps/mobile
+fvm flutter pub get
+fvm flutter run -d macos
+```
+
+For iPhone/iPad, use your Mac LAN IP (not `localhost`):
+```bash
+ipconfig getifaddr en0
+fvm flutter run -d <ios-device-id> --dart-define NOMADE_API_URL=http://<MAC_LAN_IP>:8080
+```
+
+## 5. Stop backend services
 ```bash
 npm run dev:down
 ```
+
+## Troubleshooting
+- `Import failed: API 409: agent_offline`: pair succeeded but agent daemon is not running. Start it with `npm run dev:agent:run`.
+- Turns show only `completed` without message body: open the conversation again (auto hydration/repair runs), or use `Retry hydrate` in the app.
+- `API 401: invalid_token`: session expired; app should auto-refresh. If needed, logout/login again.

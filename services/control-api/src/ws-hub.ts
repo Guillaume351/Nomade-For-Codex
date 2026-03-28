@@ -21,6 +21,113 @@ interface PendingProxy {
   timeout: NodeJS.Timeout;
 }
 
+export interface CodexThreadSummary {
+  threadId: string;
+  title: string;
+  preview: string;
+  cwd: string;
+  updatedAt: number;
+}
+
+interface PendingThreadList {
+  resolve: (value: CodexThreadSummary[]) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
+
+export interface CodexThreadReadItem {
+  itemId: string;
+  itemType: string;
+  payload: Record<string, unknown>;
+}
+
+export interface CodexThreadReadTurn {
+  turnId: string;
+  status: "running" | "completed" | "interrupted" | "failed";
+  error?: string;
+  userPrompt: string;
+  items: CodexThreadReadItem[];
+}
+
+export interface CodexThreadReadSummary {
+  threadId: string;
+  title: string;
+  preview: string;
+  cwd: string;
+  updatedAt: number;
+  turns: CodexThreadReadTurn[];
+}
+
+interface PendingThreadRead {
+  resolve: (value: CodexThreadReadSummary) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
+
+const normalizeCodexThreadReadItem = (rawItem: Record<string, unknown>, itemIndex: number): CodexThreadReadItem => {
+  const wrappedPayload = rawItem.payload;
+  if (wrappedPayload && typeof wrappedPayload === "object") {
+    const payload = wrappedPayload as Record<string, unknown>;
+    return {
+      itemId: String(rawItem.itemId ?? payload.id ?? `item-${itemIndex + 1}`),
+      itemType: String(rawItem.itemType ?? payload.type ?? "unknown"),
+      payload
+    };
+  }
+
+  return {
+    itemId: String(rawItem.id ?? `item-${itemIndex + 1}`),
+    itemType: String(rawItem.type ?? "unknown"),
+    payload: rawItem
+  };
+};
+
+const normalizeCodexThreadReadError = (value: unknown): string | undefined => {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+  if (value && typeof value === "object") {
+    const message = (value as Record<string, unknown>).message;
+    if (typeof message === "string" && message.trim().length > 0) {
+      return message;
+    }
+  }
+  return undefined;
+};
+
+export const parseCodexThreadReadSummary = (rawThread: Record<string, unknown>): CodexThreadReadSummary => {
+  const rawTurns = Array.isArray(rawThread.turns) ? rawThread.turns : [];
+  const turns: CodexThreadReadTurn[] = rawTurns
+    .filter((entry) => typeof entry === "object" && entry !== null)
+    .map((entry, index) => {
+      const turn = entry as Record<string, unknown>;
+      const rawStatus = String(turn.status ?? "failed");
+      const status =
+        rawStatus === "completed" || rawStatus === "interrupted" || rawStatus === "failed" ? rawStatus : "running";
+      const rawItems = Array.isArray(turn.items) ? turn.items : [];
+      const items = rawItems
+        .filter((item) => typeof item === "object" && item !== null)
+        .map((item, itemIndex) => normalizeCodexThreadReadItem(item as Record<string, unknown>, itemIndex));
+
+      return {
+        turnId: String(turn.turnId ?? turn.id ?? `turn-${index + 1}`),
+        status,
+        error: normalizeCodexThreadReadError(turn.error),
+        userPrompt: String(turn.userPrompt ?? ""),
+        items
+      };
+    });
+
+  return {
+    threadId: String(rawThread.threadId ?? rawThread.id ?? ""),
+    title: String(rawThread.title ?? "Codex thread"),
+    preview: String(rawThread.preview ?? ""),
+    cwd: String(rawThread.cwd ?? "."),
+    updatedAt: Number(rawThread.updatedAt ?? 0),
+    turns
+  };
+};
+
 export class WsHub {
   private readonly wss: WebSocketServer;
   private readonly userSockets = new Map<string, Set<WebSocket>>();
@@ -32,6 +139,8 @@ export class WsHub {
   private readonly conversationAgent = new Map<string, string>();
   private readonly turnConversation = new Map<string, string>();
   private readonly pendingProxy = new Map<string, PendingProxy>();
+  private readonly pendingThreadList = new Map<string, PendingThreadList>();
+  private readonly pendingThreadRead = new Map<string, PendingThreadRead>();
 
   constructor(
     private readonly auth: AuthService,
@@ -106,6 +215,60 @@ export class WsHub {
       }, 15_000);
 
       this.pendingProxy.set(requestId, { resolve, reject, timeout });
+      conn.ws.send(JSON.stringify(payload));
+    });
+  }
+
+  async listCodexThreadsThroughAgent(params: {
+    agentId: string;
+    limit?: number;
+  }): Promise<CodexThreadSummary[]> {
+    const requestId = randomToken("cl");
+    const conn = this.agentSockets.get(params.agentId);
+    if (!conn || conn.ws.readyState !== conn.ws.OPEN) {
+      throw new Error("agent_offline");
+    }
+
+    const payload = {
+      type: "codex.thread.list",
+      requestId,
+      limit: params.limit ?? 100
+    };
+
+    return new Promise<CodexThreadSummary[]>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingThreadList.delete(requestId);
+        reject(new Error("thread_list_timeout"));
+      }, 20_000);
+
+      this.pendingThreadList.set(requestId, { resolve, reject, timeout });
+      conn.ws.send(JSON.stringify(payload));
+    });
+  }
+
+  async readCodexThreadThroughAgent(params: {
+    agentId: string;
+    threadId: string;
+  }): Promise<CodexThreadReadSummary> {
+    const requestId = randomToken("cr");
+    const conn = this.agentSockets.get(params.agentId);
+    if (!conn || conn.ws.readyState !== conn.ws.OPEN) {
+      throw new Error("agent_offline");
+    }
+
+    const payload = {
+      type: "codex.thread.read",
+      requestId,
+      threadId: params.threadId
+    };
+
+    return new Promise<CodexThreadReadSummary>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingThreadRead.delete(requestId);
+        reject(new Error("thread_read_timeout"));
+      }, 20_000);
+
+      this.pendingThreadRead.set(requestId, { resolve, reject, timeout });
       conn.ws.send(JSON.stringify(payload));
     });
   }
@@ -260,6 +423,70 @@ export class WsHub {
         headers: (msg.headers as Record<string, string>) ?? {},
         bodyBase64: String(msg.bodyBase64 ?? "")
       });
+      return;
+    }
+
+    if (type === "codex.thread.list.result") {
+      const requestId = String(msg.requestId ?? "");
+      const pending = this.pendingThreadList.get(requestId);
+      if (!pending) {
+        return;
+      }
+      this.pendingThreadList.delete(requestId);
+      clearTimeout(pending.timeout);
+
+      const status = String(msg.status ?? "error");
+      if (status !== "ok") {
+        pending.reject(new Error(String(msg.error ?? "thread_list_failed")));
+        return;
+      }
+
+      const rawItems = Array.isArray(msg.items) ? msg.items : [];
+      const items = rawItems
+        .filter((item) => typeof item === "object" && item !== null)
+        .map((item) => {
+          const entry = item as Record<string, unknown>;
+          return {
+            threadId: String(entry.threadId ?? ""),
+            title: String(entry.title ?? "Codex thread"),
+            preview: String(entry.preview ?? ""),
+            cwd: String(entry.cwd ?? "."),
+            updatedAt: Number(entry.updatedAt ?? 0)
+          };
+        })
+        .filter((item) => item.threadId.length > 0);
+
+      pending.resolve(items);
+      return;
+    }
+
+    if (type === "codex.thread.read.result") {
+      const requestId = String(msg.requestId ?? "");
+      const pending = this.pendingThreadRead.get(requestId);
+      if (!pending) {
+        return;
+      }
+      this.pendingThreadRead.delete(requestId);
+      clearTimeout(pending.timeout);
+
+      const status = String(msg.status ?? "error");
+      if (status !== "ok") {
+        pending.reject(new Error(String(msg.error ?? "thread_read_failed")));
+        return;
+      }
+
+      const rawThread = msg.thread;
+      if (!rawThread || typeof rawThread !== "object") {
+        pending.reject(new Error("thread_read_missing_thread"));
+        return;
+      }
+
+      pending.resolve(parseCodexThreadReadSummary(rawThread as Record<string, unknown>));
+      return;
+    }
+
+    if (type === "agent.hello") {
+      void this.repositories.touchAgentLastSeen(agentId);
       return;
     }
 

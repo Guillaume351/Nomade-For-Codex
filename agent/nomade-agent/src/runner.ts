@@ -114,6 +114,71 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         return;
       }
 
+      if (type === "codex.thread.list") {
+        const requestId = String(msg.requestId ?? randomToken("ctl"));
+        try {
+          const threads = await conversationManager.listThreads({
+            limit: Number(msg.limit ?? 100)
+          });
+          ws.send(
+            JSON.stringify({
+              type: "codex.thread.list.result",
+              requestId,
+              status: "ok",
+              items: threads
+            })
+          );
+        } catch (error) {
+          ws.send(
+            JSON.stringify({
+              type: "codex.thread.list.result",
+              requestId,
+              status: "error",
+              error: error instanceof Error ? error.message : "thread_list_failed"
+            })
+          );
+        }
+        return;
+      }
+
+      if (type === "codex.thread.read") {
+        const requestId = String(msg.requestId ?? randomToken("cth"));
+        const threadId = String(msg.threadId ?? "");
+        if (!threadId) {
+          ws.send(
+            JSON.stringify({
+              type: "codex.thread.read.result",
+              requestId,
+              status: "error",
+              error: "thread_id_required"
+            })
+          );
+          return;
+        }
+
+        try {
+          const thread = await conversationManager.readThread({ threadId });
+          ws.send(
+            JSON.stringify({
+              type: "codex.thread.read.result",
+              requestId,
+              status: "ok",
+              thread
+            })
+          );
+        } catch (error) {
+          ws.send(
+            JSON.stringify({
+              type: "codex.thread.read.result",
+              requestId,
+              status: "error",
+              error: error instanceof Error ? error.message : "thread_read_failed"
+            })
+          );
+        }
+        return;
+      }
+
       if (type === "tunnel.http.request") {
         const tunnelId = String(msg.tunnelId);
         const requestId = String(msg.requestId ?? randomToken("tr"));

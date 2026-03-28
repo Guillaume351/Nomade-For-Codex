@@ -14,8 +14,12 @@
     "dev:logs": "docker compose -f deploy/selfhost/docker-compose.dev.yml logs -f",
     "dev:control": "npm --workspace services/control-api run dev",
     "dev:gateway": "npm --workspace services/tunnel-gateway run dev",
-    "dev:agent": "npm --workspace agent/nomade-agent run dev",
-    "dev:agent:codex": "npm --workspace agent/nomade-agent run dev -- run",
+    "dev:agent": "npm --workspace agent/nomade-agent run dev --",
+    "dev:agent:pair": "npm --workspace agent/nomade-agent run pair --",
+    "dev:agent:run": "npm --workspace agent/nomade-agent run dev:run",
+    "dev:agent:codex": "npm --workspace agent/nomade-agent run dev:run",
+    "dev:full": "bash scripts/dev-full.sh",
+    "dev:stop": "bash scripts/dev-stop.sh",
     "test": "npm run -ws test"
   },
   "devDependencies": {

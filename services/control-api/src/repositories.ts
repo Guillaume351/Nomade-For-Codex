@@ -173,6 +173,18 @@ export class Repositories {
     return { userId: result.rows[0].user_id };
   }
 
+  async revokeRefreshToken(token: string, userId: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE refresh_tokens
+       SET revoked_at = NOW()
+       WHERE token_hash = $1
+         AND user_id = $2
+         AND revoked_at IS NULL`,
+      [sha256(token), userId]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async getUserById(userId: string): Promise<User | null> {
     const result = await this.pool.query<User>("SELECT id, email FROM users WHERE id = $1", [userId]);
     if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
@@ -234,9 +246,11 @@ export class Repositories {
     await this.pool.query("UPDATE agents SET last_seen_at = NOW() WHERE id = $1", [agentId]);
   }
 
-  async listAgents(userId: string): Promise<Array<{ id: string; name: string; last_seen_at: Date | null }>> {
-    const result = await this.pool.query<{ id: string; name: string; last_seen_at: Date | null }>(
-      "SELECT id, name, last_seen_at FROM agents WHERE user_id = $1 ORDER BY created_at DESC",
+  async listAgents(
+    userId: string
+  ): Promise<Array<{ id: string; name: string; last_seen_at: Date | null; created_at: Date }>> {
+    const result = await this.pool.query<{ id: string; name: string; last_seen_at: Date | null; created_at: Date }>(
+      "SELECT id, name, last_seen_at, created_at FROM agents WHERE user_id = $1 ORDER BY created_at DESC",
       [userId]
     );
     return result.rows;
@@ -258,11 +272,18 @@ export class Repositories {
     return result.rows[0];
   }
 
-  async listWorkspaces(userId: string): Promise<Array<{ id: string; name: string; path: string; agent_id: string }>> {
-    const result = await this.pool.query<{ id: string; name: string; path: string; agent_id: string }>(
-      "SELECT id, name, path, agent_id FROM workspaces WHERE user_id = $1 ORDER BY created_at DESC",
-      [userId]
-    );
+  async listWorkspaces(
+    userId: string,
+    agentId?: string
+  ): Promise<Array<{ id: string; name: string; path: string; agent_id: string }>> {
+    const values: string[] = [userId];
+    let query = "SELECT id, name, path, agent_id FROM workspaces WHERE user_id = $1";
+    if (agentId) {
+      query += " AND agent_id = $2";
+      values.push(agentId);
+    }
+    query += " ORDER BY created_at DESC";
+    const result = await this.pool.query<{ id: string; name: string; path: string; agent_id: string }>(query, values);
     return result.rows;
   }
 
@@ -424,6 +445,10 @@ export class Repositories {
       [conversationId]
     );
     return result.rows;
+  }
+
+  async deleteConversationTurns(conversationId: string): Promise<void> {
+    await this.pool.query("DELETE FROM conversation_turns WHERE conversation_id = $1", [conversationId]);
   }
 
   async findConversationTurn(turnId: string): Promise<ConversationTurnRecord | null> {

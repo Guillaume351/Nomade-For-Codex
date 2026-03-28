@@ -5,16 +5,21 @@
 - `POST /auth/device/approve` body `{ userCode, email }`
 - `POST /auth/device/poll` body `{ deviceCode }` -> pending or `{ accessToken, refreshToken }`
 - `POST /auth/refresh` body `{ refreshToken }`
+- `POST /auth/logout` body `{ refreshToken }` (requires Bearer access token)
 
 ## User endpoints (Bearer access token)
 - `GET /me`
 - `POST /agents/pair`
-- `GET /agents`
+- `GET /agents` (sorted online first; each item includes `display_name`, `is_online`, `last_seen_at`, `created_at`)
+- `POST /agents/:agentId/codex/import` body `{ limit? }`
+  - imports threads from Codex app-server into Nomade workspaces/conversations (default limit `500`)
+  - response counters include `threads_scanned`, `imported`, `skipped`, `hydrated_or_repaired`
 - `POST /workspaces` body `{ agentId, name, path }`
-- `GET /workspaces`
+- `GET /workspaces?agentId=...` (optional filter by active agent)
 - `POST /conversations` body `{ workspaceId, agentId?, title? }`
 - `GET /conversations?workspaceId=...`
-- `GET /conversations/:conversationId/turns`
+- `GET /conversations/:conversationId/turns?forceHydrate=1`
+  - includes `hydration` metadata: `{ attempted, repaired, deferred, reason }`
 - `POST /conversations/:conversationId/turns` body `{ prompt, model?, cwd? }`
 - `POST /conversations/:conversationId/turns/:turnId/interrupt`
 - `POST /sessions` body `{ workspaceId, agentId, name, command, cwd? }`

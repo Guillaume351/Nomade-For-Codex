@@ -1,4 +1,5 @@
 import http from "node:http";
+import path from "node:path";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -12,6 +13,41 @@ import { requireUserAuth } from "./http-auth.js";
 import { WsHub } from "./ws-hub.js";
 
 const jsonLimit = "2mb";
+const agentOnlineWindowMs = 30_000;
+
+const isTruthyQuery = (value: unknown): boolean => {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+};
+
+const hasLegacyWrappedItemPayload = (payload: unknown): boolean => {
+  if (!payload || typeof payload !== "object") {
+    return false;
+  }
+  const value = payload as Record<string, unknown>;
+  return typeof value.itemType === "string" && value.payload !== undefined;
+};
+
+const turnsNeedRepair = (
+  turns: Array<{ items?: Array<{ item_type?: unknown; payload?: unknown }> }>
+): boolean => {
+  for (const turn of turns) {
+    const items = Array.isArray(turn.items) ? turn.items : [];
+    for (const item of items) {
+      const itemType = String(item.item_type ?? "");
+      if (itemType === "unknown") {
+        return true;
+      }
+      if (hasLegacyWrappedItemPayload(item.payload)) {
+        return true;
+      }
+    }
+  }
+  return false;
+};
 
 export const createServer = async (): Promise<http.Server> => {
   const config = loadConfig();
@@ -32,6 +68,50 @@ export const createServer = async (): Promise<http.Server> => {
 
   const server = http.createServer(app);
   const wsHub = new WsHub(auth, repositories, server);
+
+  const importThreadHistoryIntoConversation = async (params: {
+    conversationId: string;
+    agentId: string;
+    threadId: string;
+  }): Promise<void> => {
+    const thread = await wsHub.readCodexThreadThroughAgent({
+      agentId: params.agentId,
+      threadId: params.threadId
+    });
+
+    await repositories.deleteConversationTurns(params.conversationId);
+    for (const turn of thread.turns) {
+      const userPrompt = turn.userPrompt.trim().length > 0 ? turn.userPrompt.trim() : "Imported turn";
+      const createdTurn = await repositories.createConversationTurn({
+        conversationId: params.conversationId,
+        prompt: userPrompt
+      });
+
+      await repositories.markConversationTurnStarted({
+        turnId: createdTurn.id,
+        codexTurnId: turn.turnId
+      });
+
+      if (turn.status === "completed" || turn.status === "interrupted" || turn.status === "failed") {
+        await repositories.completeConversationTurn({
+          turnId: createdTurn.id,
+          status: turn.status,
+          error: turn.error
+        });
+      }
+
+      for (const item of turn.items) {
+        await repositories.addConversationItem({
+          turnId: createdTurn.id,
+          itemId: item.itemId,
+          itemType: item.itemType,
+          payload: item.payload
+        });
+      }
+    }
+
+    await repositories.updateConversationStatus(params.conversationId, "idle");
+  };
 
   app.post("/auth/device/start", async (_req, res) => {
     const created = await auth.startDeviceCode();
@@ -103,6 +183,18 @@ export const createServer = async (): Promise<http.Server> => {
     res.json(tokens);
   });
 
+  app.post("/auth/logout", requireUserAuth(auth), async (req, res) => {
+    const schema = z.object({ refreshToken: z.string().min(8) });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+
+    await repositories.revokeRefreshToken(parsed.data.refreshToken, req.userId!);
+    res.json({ ok: true });
+  });
+
   app.get("/me", requireUserAuth(auth), async (req, res) => {
     const me = await repositories.getUserById(req.userId!);
     if (!me) {
@@ -151,8 +243,177 @@ export const createServer = async (): Promise<http.Server> => {
   });
 
   app.get("/agents", requireUserAuth(auth), async (req, res) => {
-    const agents = await repositories.listAgents(req.userId!);
+    const now = Date.now();
+    const rawAgents = await repositories.listAgents(req.userId!);
+    const nameCounts = new Map<string, number>();
+    for (const agent of rawAgents) {
+      nameCounts.set(agent.name, (nameCounts.get(agent.name) ?? 0) + 1);
+    }
+
+    const agents = rawAgents
+      .map((agent) => {
+        const lastSeen = agent.last_seen_at;
+        const isOnline = Boolean(lastSeen && now - lastSeen.getTime() <= agentOnlineWindowMs);
+        const duplicate = (nameCounts.get(agent.name) ?? 0) > 1;
+        const displayName = duplicate ? `${agent.name} (${agent.id.slice(0, 8)})` : agent.name;
+
+        return {
+          id: agent.id,
+          name: agent.name,
+          display_name: displayName,
+          is_online: isOnline,
+          last_seen_at: lastSeen ? lastSeen.toISOString() : null,
+          created_at: agent.created_at.toISOString()
+        };
+      })
+      .sort((a, b) => {
+        if (a.is_online !== b.is_online) {
+          return a.is_online ? -1 : 1;
+        }
+        const aLastSeen = a.last_seen_at ? Date.parse(a.last_seen_at) : 0;
+        const bLastSeen = b.last_seen_at ? Date.parse(b.last_seen_at) : 0;
+        if (aLastSeen !== bLastSeen) {
+          return bLastSeen - aLastSeen;
+        }
+        return Date.parse(b.created_at) - Date.parse(a.created_at);
+      });
+
     res.json({ items: agents });
+  });
+
+  app.post("/agents/:agentId/codex/import", requireUserAuth(auth), async (req, res) => {
+    const schema = z.object({
+      limit: z.number().int().min(1).max(500).optional()
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+
+    const userId = req.userId!;
+    const agentId = req.params.agentId;
+
+    const agents = await repositories.listAgents(userId);
+    if (!agents.some((agent) => agent.id === agentId)) {
+      res.status(404).json({ error: "agent_not_found" });
+      return;
+    }
+
+    let threads: Array<{
+      threadId: string;
+      title: string;
+      preview: string;
+      cwd: string;
+      updatedAt: number;
+    }> = [];
+
+    try {
+      threads = await wsHub.listCodexThreadsThroughAgent({
+        agentId,
+        limit: parsed.data.limit ?? 500
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "thread_list_failed";
+      const status = message === "agent_offline" ? 409 : 502;
+      res.status(status).json({ error: message });
+      return;
+    }
+
+    const existingWorkspaces = await repositories.listWorkspaces(userId);
+    const workspaceByPath = new Map<string, { id: string; name: string; path: string; agent_id: string }>();
+    for (const workspace of existingWorkspaces) {
+      if (workspace.agent_id === agentId) {
+        workspaceByPath.set(workspace.path, workspace);
+      }
+    }
+
+    const conversationByThreadId = new Map<string, string>();
+    for (const workspace of workspaceByPath.values()) {
+      const conversations = await repositories.listConversations(userId, workspace.id);
+      for (const conversation of conversations) {
+        if (conversation.codex_thread_id) {
+          conversationByThreadId.set(conversation.codex_thread_id, conversation.id);
+        }
+      }
+    }
+
+    let importedWorkspaces = 0;
+    let importedConversations = 0;
+    let skippedConversations = 0;
+    let hydratedOrRepaired = 0;
+
+    for (const thread of threads) {
+      const normalizedPath = thread.cwd.trim() || ".";
+      let workspace = workspaceByPath.get(normalizedPath);
+
+      if (!workspace) {
+        const baseName = path.basename(normalizedPath) || "Workspace";
+        workspace = await repositories.createWorkspace({
+          userId,
+          agentId,
+          name: baseName.length > 120 ? `${baseName.substring(0, 120)}...` : baseName,
+          path: normalizedPath
+        });
+        workspaceByPath.set(normalizedPath, workspace);
+        importedWorkspaces += 1;
+      }
+
+      if (conversationByThreadId.has(thread.threadId)) {
+        skippedConversations += 1;
+        const existingConversationId = conversationByThreadId.get(thread.threadId);
+        if (existingConversationId) {
+          const existingTurns = await repositories.listConversationTurns(existingConversationId);
+          const needsRepair = existingTurns.length === 0 || turnsNeedRepair(existingTurns);
+          if (needsRepair) {
+            try {
+              await importThreadHistoryIntoConversation({
+                conversationId: existingConversationId,
+                agentId,
+                threadId: thread.threadId
+              });
+              hydratedOrRepaired += 1;
+            } catch (error) {
+              const message = error instanceof Error ? error.message : "thread_hydration_failed";
+              console.warn("[control-api] import repair skipped", existingConversationId, message);
+            }
+          }
+        }
+        continue;
+      }
+
+      const fallback = thread.preview
+        .split("\n")
+        .find((line) => line.trim().length > 0)
+        ?.trim() ?? "Imported Codex thread";
+      const rawTitle = thread.title.trim().length > 0 ? thread.title.trim() : fallback;
+      const title = rawTitle.length > 240 ? `${rawTitle.substring(0, 240)}...` : rawTitle;
+
+      const conversation = await repositories.createConversation({
+        userId,
+        workspaceId: workspace.id,
+        agentId,
+        title
+      });
+      await repositories.updateConversationThreadId(conversation.id, thread.threadId);
+      await repositories.updateConversationStatus(conversation.id, "idle");
+      wsHub.rememberConversationOwner(conversation.id, userId, agentId);
+
+      conversationByThreadId.set(thread.threadId, conversation.id);
+      importedConversations += 1;
+    }
+
+    res.json({
+      threadsScanned: threads.length,
+      importedWorkspaces,
+      importedConversations,
+      skippedConversations,
+      hydratedOrRepaired,
+      threads_scanned: threads.length,
+      imported: importedConversations,
+      skipped: skippedConversations,
+      hydrated_or_repaired: hydratedOrRepaired
+    });
   });
 
   app.post("/workspaces", requireUserAuth(auth), async (req, res) => {
@@ -178,7 +439,8 @@ export const createServer = async (): Promise<http.Server> => {
   });
 
   app.get("/workspaces", requireUserAuth(auth), async (req, res) => {
-    const workspaces = await repositories.listWorkspaces(req.userId!);
+    const agentId = typeof req.query.agentId === "string" ? req.query.agentId.trim() : "";
+    const workspaces = await repositories.listWorkspaces(req.userId!, agentId || undefined);
     res.json({ items: workspaces });
   });
 
@@ -234,14 +496,45 @@ export const createServer = async (): Promise<http.Server> => {
     }
 
     wsHub.rememberConversationOwner(conversation.id, req.userId!, conversation.agent_id);
-    const turns = await repositories.listConversationTurns(conversation.id);
+    let turns = await repositories.listConversationTurns(conversation.id);
+    const forceHydrate = isTruthyQuery(req.query.forceHydrate);
+    const needsRepair = turnsNeedRepair(turns);
+    const shouldHydrate = Boolean(
+      conversation.codex_thread_id && (forceHydrate || turns.length === 0 || needsRepair)
+    );
+    const hydration = {
+      attempted: false,
+      repaired: false,
+      deferred: false,
+      reason: null as string | null
+    };
+
+    if (shouldHydrate && conversation.codex_thread_id) {
+      hydration.attempted = true;
+      try {
+        await importThreadHistoryIntoConversation({
+          conversationId: conversation.id,
+          agentId: conversation.agent_id,
+          threadId: conversation.codex_thread_id
+        });
+        turns = await repositories.listConversationTurns(conversation.id);
+        hydration.repaired = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "thread_hydration_failed";
+        hydration.deferred = true;
+        hydration.reason = message;
+        console.warn("[control-api] failed to hydrate thread history", conversation.id, message);
+      }
+    }
+
     for (const turn of turns) {
       wsHub.rememberConversationTurn(turn.id, conversation.id);
     }
 
     res.json({
       conversation,
-      items: turns
+      items: turns,
+      hydration
     });
   });
 
