@@ -24,6 +24,7 @@ pnpm-debug.log*
 .cache/
 tmp/
 temp/
+.dev/*.pid
 
 # Flutter / Dart artifacts
 apps/mobile/.dart_tool/

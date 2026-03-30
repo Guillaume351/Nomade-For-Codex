@@ -55,6 +55,7 @@ npm run dev:agent:run
 ## 4. Run Flutter app (macOS / iOS)
 ```bash
 cd apps/mobile
+fvm install
 fvm flutter pub get
 fvm flutter run -d macos
 ```

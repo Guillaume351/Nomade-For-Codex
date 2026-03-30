@@ -16,14 +16,24 @@ This app now includes a cross-platform conversation UI scaffold for:
 ## Run
 ```bash
 cd apps/mobile
+fvm install
 fvm flutter pub get
 fvm flutter run -d macos
 ```
 
 Other supported targets:
 ```bash
+fvm flutter run -d linux
 fvm flutter run -d chrome
 fvm flutter run -d <ios-device-id>
+```
+
+For Windows desktop builds, run Flutter from Windows PowerShell/CMD (not from WSL shell).
+
+Linux desktop prerequisites (Ubuntu/WSL):
+```bash
+sudo apt-get update
+sudo apt-get install -y libsecret-1-dev
 ```
 
 For a physical iPhone/iPad, do not use `localhost` (it points to the phone).

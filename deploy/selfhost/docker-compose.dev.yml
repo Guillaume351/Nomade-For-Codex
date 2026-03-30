@@ -21,7 +21,7 @@ services:
     command: >
       sh -c "npm install &&
              npm --workspace packages/shared run build &&
-             npm --workspace services/control-api run dev"
+             npm --workspace services/control-api exec tsx src/index.ts"
     environment:
       PORT: 8080
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/nomade
@@ -36,17 +36,24 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "-", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
     ports:
       - "8080:8080"
     volumes:
       - ../..:/workspace
+      - control_api_node_modules:/workspace/node_modules
 
   tunnel-gateway:
     image: node:20-alpine
     working_dir: /workspace
     command: >
       sh -c "npm install &&
-             npm --workspace services/tunnel-gateway run dev"
+             npm --workspace services/tunnel-gateway exec tsx src/index.ts"
     environment:
       PORT: 8081
       CONTROL_API_URL: http://control-api:8080
@@ -55,11 +62,14 @@ services:
       CHOKIDAR_USEPOLLING: "true"
     depends_on:
       control-api:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "8081:8081"
     volumes:
       - ../..:/workspace
+      - tunnel_gateway_node_modules:/workspace/node_modules
 
 volumes:
   nomade_dev_postgres:
+  control_api_node_modules:
+  tunnel_gateway_node_modules:
