@@ -22,6 +22,7 @@ export interface WorkspaceRecord {
   agent_id: string;
   name: string;
   path: string;
+  created_at: Date;
 }
 
 export interface ConversationRecord {
@@ -261,12 +262,12 @@ export class Repositories {
     agentId: string;
     name: string;
     path: string;
-  }): Promise<{ id: string; name: string; path: string; agent_id: string }> {
+  }): Promise<{ id: string; name: string; path: string; agent_id: string; created_at: Date }> {
     const workspaceId = newId();
-    const result = await this.pool.query<{ id: string; name: string; path: string; agent_id: string }>(
+    const result = await this.pool.query<{ id: string; name: string; path: string; agent_id: string; created_at: Date }>(
       `INSERT INTO workspaces (id, user_id, agent_id, name, path)
        VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, name, path, agent_id`,
+       RETURNING id, name, path, agent_id, created_at`,
       [workspaceId, params.userId, params.agentId, params.name, params.path]
     );
     return result.rows[0];
@@ -275,21 +276,24 @@ export class Repositories {
   async listWorkspaces(
     userId: string,
     agentId?: string
-  ): Promise<Array<{ id: string; name: string; path: string; agent_id: string }>> {
+  ): Promise<Array<{ id: string; name: string; path: string; agent_id: string; created_at: Date }>> {
     const values: string[] = [userId];
-    let query = "SELECT id, name, path, agent_id FROM workspaces WHERE user_id = $1";
+    let query = "SELECT id, name, path, agent_id, created_at FROM workspaces WHERE user_id = $1";
     if (agentId) {
       query += " AND agent_id = $2";
       values.push(agentId);
     }
     query += " ORDER BY created_at DESC";
-    const result = await this.pool.query<{ id: string; name: string; path: string; agent_id: string }>(query, values);
+    const result = await this.pool.query<{ id: string; name: string; path: string; agent_id: string; created_at: Date }>(
+      query,
+      values
+    );
     return result.rows;
   }
 
   async findWorkspaceById(userId: string, workspaceId: string): Promise<WorkspaceRecord | null> {
     const result = await this.pool.query<WorkspaceRecord>(
-      `SELECT id, user_id, agent_id, name, path
+      `SELECT id, user_id, agent_id, name, path, created_at
        FROM workspaces
        WHERE user_id = $1 AND id = $2`,
       [userId, workspaceId]

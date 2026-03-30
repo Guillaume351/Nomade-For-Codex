@@ -8,12 +8,17 @@ class Workspace {
   });
 
   factory Workspace.fromJson(Map<String, dynamic> json) {
+    final createdAtRaw = json['created_at'];
+    final parsedCreatedAt = createdAtRaw is String
+        ? DateTime.tryParse(createdAtRaw)
+        : null;
+
     return Workspace(
-      id: json['id'] as String,
-      agentId: json['agent_id'] as String,
-      name: json['name'] as String,
-      path: json['path'] as String,
-      createdAt: DateTime.parse(json['created_at'] as String),
+      id: (json['id'] ?? '').toString(),
+      agentId: (json['agent_id'] ?? json['agentId'] ?? '').toString(),
+      name: (json['name'] ?? 'Workspace').toString(),
+      path: (json['path'] ?? '.').toString(),
+      createdAt: parsedCreatedAt ?? DateTime.fromMillisecondsSinceEpoch(0),
     );
   }
 

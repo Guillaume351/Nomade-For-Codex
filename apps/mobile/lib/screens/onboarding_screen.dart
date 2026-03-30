@@ -15,17 +15,20 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final List<OnboardingData> _data = [
     OnboardingData(
       title: 'Welcome to Nomade',
-      description: 'Your portable interface for Codex agents. Work from anywhere, seamlessly.',
+      description:
+          'Your portable interface for Codex agents. Work from anywhere, seamlessly.',
       icon: Icons.explore,
     ),
     OnboardingData(
       title: 'Collaborate with Agents',
-      description: 'Pair your local agents and run powerful AI workflows directly from your mobile.',
+      description:
+          'Pair your local agents and run powerful AI workflows directly from your mobile.',
       icon: Icons.smart_toy,
     ),
     OnboardingData(
       title: 'Secure & Modular',
-      description: 'Built with security first. Your agents, your data, your control.',
+      description:
+          'Built with security first. Your agents, your data, your control.',
       icon: Icons.security,
     ),
   ];
@@ -41,7 +44,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 controller: _pageController,
                 itemCount: _data.length,
                 onPageChanged: (index) => setState(() => _currentPage = index),
-                itemBuilder: (context, index) => _OnboardingPage(data: _data[index]),
+                itemBuilder: (context, index) =>
+                    _OnboardingPage(data: _data[index]),
               ),
             ),
             Padding(
@@ -60,7 +64,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         decoration: BoxDecoration(
                           color: _currentPage == index
                               ? Theme.of(context).primaryColor
-                              : Colors.grey.withOpacity(0.3),
+                              : Colors.grey.withValues(alpha: 0.3),
                           borderRadius: BorderRadius.circular(4),
                         ),
                       ),
@@ -77,11 +81,14 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       } else {
                         Navigator.pushReplacement(
                           context,
-                          MaterialPageRoute(builder: (_) => const LoginScreen()),
+                          MaterialPageRoute(
+                              builder: (_) => const LoginScreen()),
                         );
                       }
                     },
-                    child: Text(_currentPage == _data.length - 1 ? 'Get Started' : 'Next'),
+                    child: Text(_currentPage == _data.length - 1
+                        ? 'Get Started'
+                        : 'Next'),
                   ),
                 ],
               ),
@@ -98,7 +105,8 @@ class OnboardingData {
   final String description;
   final IconData icon;
 
-  OnboardingData({required this.title, required this.description, required this.icon});
+  OnboardingData(
+      {required this.title, required this.description, required this.icon});
 }
 
 class _OnboardingPage extends StatelessWidget {

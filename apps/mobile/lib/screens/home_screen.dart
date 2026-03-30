@@ -37,7 +37,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _handleSend() async {
     final text = _promptController.text.trim();
     if (text.isEmpty) return;
-    
+
     _promptController.clear();
     final provider = context.read<NomadeProvider>();
     await provider.sendPrompt(text);
@@ -67,7 +67,7 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           Expanded(
             child: provider.turns.isEmpty
-                ? _buildEmptyState()
+                ? _buildEmptyState(provider)
                 : ListView.builder(
                     controller: _scrollController,
                     padding: const EdgeInsets.all(16),
@@ -83,7 +83,16 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildEmptyState() {
+  Widget _buildEmptyState(NomadeProvider provider) {
+    String message = 'Start a conversation with Codex';
+    if (provider.selectedAgent == null) {
+      message = 'Select or pair an agent in the sidebar';
+    } else if (provider.selectedWorkspace == null) {
+      message = 'Import history or create a workspace from the sidebar';
+    } else if (provider.selectedConversation == null) {
+      message = 'Create or select a conversation from the sidebar';
+    }
+
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -91,8 +100,9 @@ class _HomeScreenState extends State<HomeScreen> {
           Icon(Icons.chat_bubble_outline, size: 64, color: Colors.grey[400]),
           const SizedBox(height: 16),
           Text(
-            'Start a conversation with Codex',
+            message,
             style: TextStyle(fontSize: 18, color: Colors.grey[600]),
+            textAlign: TextAlign.center,
           ),
         ],
       ),
@@ -108,7 +118,7 @@ class _HomeScreenState extends State<HomeScreen> {
         color: Theme.of(context).cardTheme.color,
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
+            color: Colors.black.withValues(alpha: 0.05),
             blurRadius: 10,
             offset: const Offset(0, -5),
           ),
@@ -123,8 +133,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 maxLines: 5,
                 minLines: 1,
                 decoration: InputDecoration(
-                  hintText: isRunning ? 'Codex is thinking...' : 'Ask something...',
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  hintText:
+                      isRunning ? 'Codex is thinking...' : 'Ask something...',
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 ),
                 enabled: !isRunning,
                 onSubmitted: (_) => _handleSend(),
@@ -137,7 +149,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   ? const SizedBox(
                       width: 18,
                       height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white),
                     )
                   : const Icon(Icons.send_rounded),
             ),
@@ -167,7 +180,7 @@ class _OptionsSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<NomadeProvider>();
-    
+
     return Padding(
       padding: const EdgeInsets.all(24.0),
       child: Column(
@@ -182,7 +195,8 @@ class _OptionsSheet extends StatelessWidget {
           _buildDropdown(
             label: 'Model',
             value: provider.selectedModel,
-            items: provider.codexModels.map((m) => m['model'] as String).toList(),
+            items:
+                provider.codexModels.map((m) => m['model'] as String).toList(),
             onChanged: (val) => provider.selectedModel = val,
           ),
           const SizedBox(height: 16),
@@ -225,9 +239,12 @@ class _OptionsSheet extends StatelessWidget {
         const SizedBox(height: 8),
         DropdownButtonFormField<String>(
           value: value,
-          items: items.map((i) => DropdownMenuItem(value: i, child: Text(i))).toList(),
+          items: items
+              .map((i) => DropdownMenuItem(value: i, child: Text(i)))
+              .toList(),
           onChanged: onChanged,
-          decoration: const InputDecoration(contentPadding: EdgeInsets.symmetric(horizontal: 12)),
+          decoration: const InputDecoration(
+              contentPadding: EdgeInsets.symmetric(horizontal: 12)),
         ),
       ],
     );

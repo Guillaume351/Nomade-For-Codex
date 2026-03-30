@@ -27,7 +27,6 @@ class NomadeProvider with ChangeNotifier {
   static const _selectedApprovalPolicyKey = 'nomade.selected_approval_policy';
   static const _selectedSandboxModeKey = 'nomade.selected_sandbox_mode';
   static const _selectedEffortKey = 'nomade.selected_effort';
-  static const _selectedCwdOverrideKey = 'nomade.selected_cwd_override';
 
   String status = 'Idle';
   String? accessToken;
@@ -125,7 +124,10 @@ class NomadeProvider with ChangeNotifier {
     persistSession();
     notifyListeners();
   }
+
   bool loadingCodexOptions = false;
+  bool importingHistory = false;
+  bool loadingData = false;
 
   WebSocketChannel? socket;
   StreamSubscription<dynamic>? socketSub;
@@ -155,8 +157,9 @@ class NomadeProvider with ChangeNotifier {
       _selectedApprovalPolicy =
           await _storage.read(key: _selectedApprovalPolicyKey) ??
               _selectedApprovalPolicy;
-      _selectedSandboxMode = await _storage.read(key: _selectedSandboxModeKey) ??
-          _selectedSandboxMode;
+      _selectedSandboxMode =
+          await _storage.read(key: _selectedSandboxModeKey) ??
+              _selectedSandboxMode;
       _selectedEffort =
           await _storage.read(key: _selectedEffortKey) ?? _selectedEffort;
 
@@ -218,7 +221,8 @@ class NomadeProvider with ChangeNotifier {
   Future<void> logout() async {
     if (accessToken != null && refreshToken != null) {
       try {
-        await api.logout(accessToken: accessToken!, refreshToken: refreshToken!);
+        await api.logout(
+            accessToken: accessToken!, refreshToken: refreshToken!);
       } catch (_) {}
     }
 
@@ -281,6 +285,8 @@ class NomadeProvider with ChangeNotifier {
 
   Future<void> bootstrapData(
       {String? storedAgentId, String? storedWorkspaceId}) async {
+    loadingData = true;
+    notifyListeners();
     try {
       final loadedAgents = await api.listAgents(accessToken!);
       agents = loadedAgents.map((e) => Agent.fromJson(e)).toList();
@@ -298,18 +304,32 @@ class NomadeProvider with ChangeNotifier {
 
         if (selectedWorkspace != null) {
           await loadConversations();
+        } else {
+          await importCodexHistory(silent: true);
         }
+      } else {
+        workspaces = [];
+        conversations = [];
+        turns = [];
+        _selectedAgent = null;
+        _selectedWorkspace = null;
+        _selectedConversation = null;
       }
       notifyListeners();
     } catch (e) {
       status = 'Error: $e';
       notifyListeners();
+    } finally {
+      loadingData = false;
+      notifyListeners();
     }
   }
 
-  Future<void> loadWorkspacesForSelectedAgent({String? storedWorkspaceId}) async {
+  Future<void> loadWorkspacesForSelectedAgent(
+      {String? storedWorkspaceId}) async {
     if (selectedAgent == null) return;
-    final loaded = await api.listWorkspaces(accessToken!, agentId: selectedAgent!.id);
+    final loaded =
+        await api.listWorkspaces(accessToken!, agentId: selectedAgent!.id);
     workspaces = loaded.map((e) => Workspace.fromJson(e)).toList();
 
     if (workspaces.isNotEmpty) {
@@ -319,6 +339,9 @@ class NomadeProvider with ChangeNotifier {
       );
     } else {
       _selectedWorkspace = null;
+      _selectedConversation = null;
+      conversations = [];
+      turns = [];
     }
     notifyListeners();
   }
@@ -331,12 +354,14 @@ class NomadeProvider with ChangeNotifier {
 
     // Pick first conversation by default if none selected or not in current list
     if (conversations.isNotEmpty) {
-      if (_selectedConversation == null || !conversations.any((c) => c.id == _selectedConversation!.id)) {
+      if (_selectedConversation == null ||
+          !conversations.any((c) => c.id == _selectedConversation!.id)) {
         _selectedConversation = conversations.first;
         await loadTurns(_selectedConversation!.id);
       }
     } else {
       _selectedConversation = null;
+      turns = [];
     }
     notifyListeners();
   }
@@ -382,15 +407,31 @@ class NomadeProvider with ChangeNotifier {
       if (sandboxModes.isNotEmpty) codexSandboxModes = sandboxModes;
       if (reasoningEfforts.isNotEmpty) codexReasoningEfforts = reasoningEfforts;
 
-      final defaultModel = defaults['model'] is String ? (defaults['model'] as String).trim() : null;
-      final defaultApproval = defaults['approvalPolicy'] is String ? (defaults['approvalPolicy'] as String).trim() : null;
-      final defaultSandbox = defaults['sandboxMode'] is String ? (defaults['sandboxMode'] as String).trim() : null;
-      final defaultEffort = defaults['effort'] is String ? (defaults['effort'] as String).trim() : null;
+      final defaultModel = defaults['model'] is String
+          ? (defaults['model'] as String).trim()
+          : null;
+      final defaultApproval = defaults['approvalPolicy'] is String
+          ? (defaults['approvalPolicy'] as String).trim()
+          : null;
+      final defaultSandbox = defaults['sandboxMode'] is String
+          ? (defaults['sandboxMode'] as String).trim()
+          : null;
+      final defaultEffort = defaults['effort'] is String
+          ? (defaults['effort'] as String).trim()
+          : null;
 
-      if (_selectedModel == null && defaultModel != null) _selectedModel = defaultModel;
-      if (_selectedApprovalPolicy == null && defaultApproval != null) _selectedApprovalPolicy = defaultApproval;
-      if (_selectedSandboxMode == null && defaultSandbox != null) _selectedSandboxMode = defaultSandbox;
-      if (_selectedEffort == null && defaultEffort != null) _selectedEffort = defaultEffort;
+      if (_selectedModel == null && defaultModel != null) {
+        _selectedModel = defaultModel;
+      }
+      if (_selectedApprovalPolicy == null && defaultApproval != null) {
+        _selectedApprovalPolicy = defaultApproval;
+      }
+      if (_selectedSandboxMode == null && defaultSandbox != null) {
+        _selectedSandboxMode = defaultSandbox;
+      }
+      if (_selectedEffort == null && defaultEffort != null) {
+        _selectedEffort = defaultEffort;
+      }
 
       // Fallback if still null
       if (_selectedModel == null && codexModels.isNotEmpty) {
@@ -407,6 +448,8 @@ class NomadeProvider with ChangeNotifier {
   Future<void> connectSocket() async {
     if (accessToken == null) return;
     try {
+      await socketSub?.cancel();
+      await socket?.sink.close();
       socket = api.openUserSocket(accessToken!);
       socketSub = socket!.stream.listen(
         _onSocketEvent,
@@ -428,7 +471,11 @@ class NomadeProvider with ChangeNotifier {
       final turnId = event['turnId'] as String?;
       final delta = event['delta'] as String?;
       final stream = event['stream'] as String?;
-      if (turnId != null && delta != null && (stream == 'agentMessage' || stream == 'reasoning' || stream == 'plan')) {
+      if (turnId != null &&
+          delta != null &&
+          (stream == 'agentMessage' ||
+              stream == 'reasoning' ||
+              stream == 'plan')) {
         final buffer = streamByTurn.putIfAbsent(turnId, StringBuffer.new);
         buffer.write(delta);
         notifyListeners();
@@ -470,9 +517,29 @@ class NomadeProvider with ChangeNotifier {
   }
 
   Future<void> sendPrompt(String prompt) async {
-    if (selectedConversation == null || accessToken == null) return;
+    if (accessToken == null) return;
 
     try {
+      if (selectedWorkspace == null) {
+        final ready = await createDefaultWorkspace();
+        if (!ready) {
+          status = 'No workspace available';
+          notifyListeners();
+          return;
+        }
+      }
+
+      if (selectedConversation == null) {
+        final created = await createConversation(
+          title: prompt.split('\n').first.trim(),
+        );
+        if (!created) {
+          status = 'Unable to create conversation';
+          notifyListeners();
+          return;
+        }
+      }
+
       final turn = await api.createTurn(
         accessToken: accessToken!,
         conversationId: selectedConversation!.id,
@@ -483,7 +550,7 @@ class NomadeProvider with ChangeNotifier {
         sandboxMode: selectedSandboxMode,
         effort: selectedEffort,
       );
-      
+
       activeTurnId = turn['id'] as String;
       await loadTurns(selectedConversation!.id);
     } catch (e) {
@@ -505,9 +572,9 @@ class NomadeProvider with ChangeNotifier {
 
   Future<void> approveAndPoll(String email) async {
     if (userCode == null || deviceCode == null) return;
-    
+
     await api.approveDeviceCode(userCode: userCode!, email: email);
-    
+
     while (true) {
       final polled = await api.pollDeviceCode(deviceCode!);
       final pollStatus = polled['status'] as String? ?? 'pending';
@@ -525,5 +592,148 @@ class NomadeProvider with ChangeNotifier {
       await Future.delayed(const Duration(seconds: 2));
     }
     notifyListeners();
+  }
+
+  Future<void> onAgentSelected(Agent agent) async {
+    selectedAgent = agent;
+    _selectedWorkspace = null;
+    _selectedConversation = null;
+    workspaces = [];
+    conversations = [];
+    turns = [];
+    notifyListeners();
+
+    await loadWorkspacesForSelectedAgent();
+    await loadCodexOptions();
+    if (selectedWorkspace != null) {
+      await loadConversations();
+    } else {
+      await importCodexHistory(silent: true);
+    }
+  }
+
+  Future<void> onWorkspaceSelected(Workspace workspace) async {
+    selectedWorkspace = workspace;
+    await loadCodexOptions();
+    await loadConversations();
+  }
+
+  Future<bool> createDefaultWorkspace() async {
+    if (accessToken == null || selectedAgent == null) return false;
+    if (selectedWorkspace != null) return true;
+
+    status = 'Creating workspace...';
+    notifyListeners();
+    try {
+      await api.createWorkspace(
+        accessToken: accessToken!,
+        agentId: selectedAgent!.id,
+        name: 'Local workspace',
+        path: '.',
+      );
+      await loadWorkspacesForSelectedAgent();
+      if (selectedWorkspace != null) {
+        await loadConversations();
+      }
+      status = 'Workspace ready';
+      notifyListeners();
+      return selectedWorkspace != null;
+    } catch (e) {
+      status = 'Workspace creation failed: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<bool> createConversation({String? title}) async {
+    if (accessToken == null ||
+        selectedWorkspace == null ||
+        selectedAgent == null) {
+      return false;
+    }
+
+    final fallback = (title ?? 'New conversation').trim();
+    final rawTitle = fallback.isEmpty ? 'New conversation' : fallback;
+    final clipped =
+        rawTitle.length > 120 ? '${rawTitle.substring(0, 120)}...' : rawTitle;
+
+    try {
+      final created = await api.createConversation(
+        accessToken: accessToken!,
+        workspaceId: selectedWorkspace!.id,
+        agentId: selectedAgent!.id,
+        title: clipped,
+      );
+      final conversation = Conversation.fromJson(created);
+      conversations = [conversation, ...conversations];
+      _selectedConversation = conversation;
+      turns = [];
+      notifyListeners();
+      return true;
+    } catch (e) {
+      status = 'Conversation creation failed: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<void> importCodexHistory({bool silent = false}) async {
+    if (accessToken == null || selectedAgent == null) return;
+    if (!selectedAgent!.isOnline) {
+      if (!silent) {
+        status = 'Import unavailable: selected agent is offline';
+        notifyListeners();
+      }
+      return;
+    }
+    if (importingHistory) return;
+
+    importingHistory = true;
+    if (!silent) {
+      status = 'Importing Codex history...';
+      notifyListeners();
+    } else {
+      notifyListeners();
+    }
+
+    try {
+      final result = await api.importCodexThreads(
+        accessToken: accessToken!,
+        agentId: selectedAgent!.id,
+      );
+      await loadWorkspacesForSelectedAgent(
+          storedWorkspaceId: selectedWorkspace?.id);
+      if (selectedWorkspace != null) {
+        await loadConversations();
+      }
+
+      if (!silent) {
+        final imported = (result['imported'] as num?)?.toInt() ?? 0;
+        final repaired = (result['hydrated_or_repaired'] as num?)?.toInt() ?? 0;
+        status = 'Import complete: $imported new, $repaired repaired';
+      }
+    } catch (e) {
+      if (!silent) {
+        status = 'Import failed: $e';
+      }
+    } finally {
+      importingHistory = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> refreshAll() async {
+    if (!isAuthenticated || accessToken == null) return;
+
+    final ready = await ensureFreshToken();
+    if (!ready) {
+      await logout();
+      return;
+    }
+    await connectSocket();
+    await bootstrapData(
+      storedAgentId: selectedAgent?.id,
+      storedWorkspaceId: selectedWorkspace?.id,
+    );
   }
 }

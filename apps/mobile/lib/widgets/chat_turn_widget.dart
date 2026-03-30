@@ -28,7 +28,7 @@ class ChatTurnWidget extends StatelessWidget {
   String _getMarkdown(NomadeProvider provider) {
     final buffer = provider.streamByTurn[turn.id];
     if (buffer != null) return buffer.toString();
-    
+
     // Fallback to turn items if no buffer
     final agentMessages = turn.items.where((i) => i.itemType == 'agentMessage');
     if (agentMessages.isNotEmpty) {
@@ -59,7 +59,8 @@ class ChatTurnWidget extends StatelessWidget {
     );
   }
 
-  Widget _buildAssistantBubble(BuildContext context, String markdown, Turn turn) {
+  Widget _buildAssistantBubble(
+      BuildContext context, String markdown, Turn turn) {
     return Container(
       margin: const EdgeInsets.only(bottom: 24, right: 48),
       padding: const EdgeInsets.all(16),
@@ -72,7 +73,7 @@ class ChatTurnWidget extends StatelessWidget {
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
+            color: Colors.black.withValues(alpha: 0.05),
             blurRadius: 10,
             offset: const Offset(0, 4),
           ),
@@ -126,7 +127,8 @@ class ChatTurnWidget extends StatelessWidget {
           const SizedBox(width: 16),
         ],
         if (tokens > 0) ...[
-          const Icon(Icons.generating_tokens_outlined, size: 14, color: Colors.grey),
+          const Icon(Icons.generating_tokens_outlined,
+              size: 14, color: Colors.grey),
           const SizedBox(width: 4),
           Text(
             '$tokens tokens',
@@ -139,7 +141,9 @@ class ChatTurnWidget extends StatelessWidget {
           onPressed: () {
             Clipboard.setData(ClipboardData(text: markdown));
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Copied to clipboard'), duration: Duration(seconds: 1)),
+              const SnackBar(
+                  content: Text('Copied to clipboard'),
+                  duration: Duration(seconds: 1)),
             );
           },
           tooltip: 'Copy to clipboard',
