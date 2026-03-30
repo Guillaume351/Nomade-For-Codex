@@ -18,7 +18,7 @@ need_cmd fvm
 
 API_URL="${NOMADE_API_URL:-http://localhost:8080}"
 EMAIL="${1:-${NOMADE_DEV_EMAIL:-}}"
-DEVICE="${NOMADE_FLUTTER_DEVICE:-macos}"
+DEVICE="${NOMADE_FLUTTER_DEVICE:-}"
 FORCE_PAIR="${NOMADE_FORCE_PAIR:-0}"
 CONFIG_PATH="${NOMADE_AGENT_CONFIG_PATH:-$HOME/.config/nomade-agent/config.json}"
 DEV_DIR="$ROOT_DIR/.dev"
@@ -29,6 +29,37 @@ AGENT_RESTARTED=0
 if [[ -z "$EMAIL" ]]; then
   echo "Usage: npm run dev:full -- <email>" >&2
   echo "or set NOMADE_DEV_EMAIL in your environment." >&2
+  exit 1
+fi
+
+root_tsx_bin="$ROOT_DIR/node_modules/.bin/tsx"
+agent_tsx_bin="$ROOT_DIR/agent/nomade-agent/node_modules/.bin/tsx"
+if [[ -d "$ROOT_DIR/node_modules" && ! -w "$ROOT_DIR/node_modules" ]]; then
+  echo "node_modules is not writable by the current user ($(id -un))." >&2
+  echo "Fix ownership once, then retry:" >&2
+  echo "  sudo chown -R $(id -u):$(id -g) \"$ROOT_DIR/node_modules\"" >&2
+  exit 1
+fi
+
+if [[ ! -x "$root_tsx_bin" && ! -x "$agent_tsx_bin" ]]; then
+  echo "[dev:full] local dependencies missing (tsx not found), running npm install..."
+  if ! npm install; then
+    echo "Failed to install local dependencies. Please run 'npm install' and retry." >&2
+    exit 1
+  fi
+fi
+
+if [[ ! -x "$root_tsx_bin" && ! -x "$agent_tsx_bin" ]]; then
+  echo "tsx is still unavailable after installation. Check your Node/npm setup and retry." >&2
+  exit 1
+fi
+
+echo "[dev:full] ensuring Flutter SDK from apps/mobile/.fvmrc..."
+if ! (
+  cd "$ROOT_DIR/apps/mobile"
+  fvm install >/dev/null
+); then
+  echo "Failed to install/select Flutter SDK from apps/mobile/.fvmrc" >&2
   exit 1
 fi
 
@@ -165,6 +196,37 @@ if [[ -n "$resolved_agent_id" ]]; then
     fi
     sleep 1
   done
+fi
+
+devices_json="$(
+  cd "$ROOT_DIR/apps/mobile"
+  fvm flutter devices --machine 2>/dev/null || echo "[]"
+)"
+
+if [[ -n "$DEVICE" ]]; then
+  if ! jq -e --arg id "$DEVICE" 'map(.id) | index($id) != null' <<<"$devices_json" >/dev/null 2>&1; then
+    echo "[dev:full] requested Flutter device '$DEVICE' is unavailable, selecting an available device..."
+    DEVICE=""
+  fi
+fi
+
+if [[ -z "$DEVICE" ]]; then
+  DEVICE="$(jq -r '
+    map(.id) as $ids
+    | ["macos", "linux", "windows", "chrome", "edge", "web-server"]
+    | map(select(. as $id | $ids | index($id)))
+    | .[0] // empty
+  ' <<<"$devices_json" 2>/dev/null || true)"
+
+  if [[ -z "$DEVICE" ]]; then
+    DEVICE="$(jq -r '.[0].id // empty' <<<"$devices_json" 2>/dev/null || true)"
+  fi
+fi
+
+if [[ -z "$DEVICE" ]]; then
+  echo "No Flutter device found. Set NOMADE_FLUTTER_DEVICE and retry." >&2
+  echo "Example: NOMADE_FLUTTER_DEVICE=chrome npm run dev:full -- $EMAIL" >&2
+  exit 1
 fi
 
 echo "[dev:full] launching Flutter app on $DEVICE..."
