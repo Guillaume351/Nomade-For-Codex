@@ -111,12 +111,53 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
       user_id TEXT NOT NULL REFERENCES users(id),
       workspace_id TEXT NOT NULL REFERENCES workspaces(id),
       agent_id TEXT NOT NULL REFERENCES agents(id),
+      service_id TEXT,
       slug TEXT NOT NULL UNIQUE,
       target_port INT NOT NULL,
       access_token_hash TEXT NOT NULL,
+      token_required BOOLEAN NOT NULL DEFAULT TRUE,
       status TEXT NOT NULL,
       expires_at TIMESTAMPTZ,
+      last_probe_at TIMESTAMPTZ,
+      last_probe_status TEXT,
+      last_probe_error TEXT,
+      last_probe_code INT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS workspace_dev_settings (
+      workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+      trusted_dev_mode BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS dev_services (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL REFERENCES agents(id),
+      name TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'service',
+      command TEXT NOT NULL,
+      cwd TEXT,
+      port INT NOT NULL,
+      health_path TEXT NOT NULL DEFAULT '/',
+      env_template JSONB NOT NULL DEFAULT '{}'::jsonb,
+      depends_on JSONB NOT NULL DEFAULT '[]'::jsonb,
+      auto_tunnel BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (workspace_id, name)
+    );
+
+    CREATE TABLE IF NOT EXISTS dev_service_runtime (
+      service_id TEXT PRIMARY KEY REFERENCES dev_services(id) ON DELETE CASCADE,
+      session_id TEXT REFERENCES sessions(id),
+      tunnel_id TEXT REFERENCES tunnels(id),
+      status TEXT NOT NULL DEFAULT 'stopped',
+      last_error TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -129,5 +170,15 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
       metadata JSONB NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS service_id TEXT;
+    ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS token_required BOOLEAN NOT NULL DEFAULT TRUE;
+    ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_at TIMESTAMPTZ;
+    ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_status TEXT;
+    ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_error TEXT;
+    ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_code INT;
+
+    CREATE INDEX IF NOT EXISTS idx_dev_services_workspace_id ON dev_services (workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_tunnels_service_id ON tunnels (service_id);
   `);
 };

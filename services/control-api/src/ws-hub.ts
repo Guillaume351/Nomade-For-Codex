@@ -21,6 +21,21 @@ interface PendingProxy {
   timeout: NodeJS.Timeout;
 }
 
+interface TunnelWsBridge {
+  onFrame: (data: Buffer, isBinary: boolean) => void;
+  onClosed: (code?: number, reason?: string) => void;
+  onError: (error: string) => void;
+}
+
+interface PendingTunnelWsOpen {
+  resolve: (connectionId: string) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+  agentId: string;
+  connectionId: string;
+  bridge: TunnelWsBridge;
+}
+
 export interface CodexThreadSummary {
   threadId: string;
   title: string;
@@ -172,6 +187,8 @@ export class WsHub {
   private readonly conversationAgent = new Map<string, string>();
   private readonly turnConversation = new Map<string, string>();
   private readonly pendingProxy = new Map<string, PendingProxy>();
+  private readonly pendingTunnelWsOpen = new Map<string, PendingTunnelWsOpen>();
+  private readonly tunnelWsRoute = new Map<string, { agentId: string; bridge: TunnelWsBridge }>();
   private readonly pendingThreadList = new Map<string, PendingThreadList>();
   private readonly pendingThreadRead = new Map<string, PendingThreadRead>();
   private readonly pendingCodexOptions = new Map<string, PendingCodexOptions>();
@@ -196,6 +213,30 @@ export class WsHub {
     this.tunnelOwner.set(tunnelId, userId);
   }
 
+  publishTunnelStatus(
+    tunnelId: string,
+    payload: {
+      status: "open" | "closed" | "error" | "starting" | "healthy" | "unhealthy" | "stopped";
+      detail?: string;
+      probeStatus?: "ok" | "error" | "unknown";
+      probeCode?: number;
+    }
+  ): void {
+    const userId = this.tunnelOwner.get(tunnelId);
+    if (!userId) {
+      return;
+    }
+    this.broadcastToUser(userId, {
+      type: "tunnel.status",
+      tunnelId,
+      status: payload.status,
+      detail: payload.detail,
+      probeStatus: payload.probeStatus,
+      probeCode: payload.probeCode,
+      probeAt: new Date().toISOString()
+    });
+  }
+
   rememberConversationOwner(conversationId: string, userId: string, agentId?: string): void {
     this.conversationOwner.set(conversationId, userId);
     if (agentId) {
@@ -214,6 +255,93 @@ export class WsHub {
     }
     conn.ws.send(JSON.stringify(message));
     return true;
+  }
+
+  async openTunnelWsThroughAgent(params: {
+    agentId: string;
+    tunnelId: string;
+    path: string;
+    query?: string;
+    headers?: Record<string, string>;
+    bridge: TunnelWsBridge;
+  }): Promise<string> {
+    const requestId = randomToken("two");
+    const connectionId = randomToken("twc");
+    const conn = this.agentSockets.get(params.agentId);
+    if (!conn || conn.ws.readyState !== conn.ws.OPEN) {
+      throw new Error("agent_offline");
+    }
+
+    const payload = {
+      type: "tunnel.ws.open",
+      requestId,
+      connectionId,
+      tunnelId: params.tunnelId,
+      path: params.path,
+      query: params.query,
+      headers: params.headers ?? {}
+    };
+
+    return new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingTunnelWsOpen.delete(requestId);
+        reject(new Error("tunnel_ws_open_timeout"));
+      }, 15_000);
+
+      this.pendingTunnelWsOpen.set(requestId, {
+        resolve,
+        reject,
+        timeout,
+        agentId: params.agentId,
+        connectionId,
+        bridge: params.bridge
+      });
+
+      conn.ws.send(JSON.stringify(payload));
+    });
+  }
+
+  sendTunnelWsFrame(params: { connectionId: string; data: Buffer; isBinary: boolean }): void {
+    const route = this.tunnelWsRoute.get(params.connectionId);
+    if (!route) {
+      return;
+    }
+    const conn = this.agentSockets.get(route.agentId);
+    if (!conn || conn.ws.readyState !== conn.ws.OPEN) {
+      route.bridge.onError("agent_offline");
+      this.tunnelWsRoute.delete(params.connectionId);
+      return;
+    }
+
+    conn.ws.send(
+      JSON.stringify({
+        type: "tunnel.ws.frame",
+        connectionId: params.connectionId,
+        dataBase64: params.data.toString("base64"),
+        isBinary: params.isBinary
+      })
+    );
+  }
+
+  closeTunnelWs(params: { connectionId: string; code?: number; reason?: string }): void {
+    const route = this.tunnelWsRoute.get(params.connectionId);
+    if (!route) {
+      return;
+    }
+    const conn = this.agentSockets.get(route.agentId);
+    if (!conn || conn.ws.readyState !== conn.ws.OPEN) {
+      this.tunnelWsRoute.delete(params.connectionId);
+      return;
+    }
+
+    conn.ws.send(
+      JSON.stringify({
+        type: "tunnel.ws.close",
+        connectionId: params.connectionId,
+        code: params.code,
+        reason: params.reason
+      })
+    );
   }
 
   async proxyHttpThroughAgent(params: {
@@ -337,7 +465,6 @@ export class WsHub {
   private handleUpgrade(req: IncomingMessage, socket: import("stream").Duplex, head: Buffer): void {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== "/ws") {
-      socket.destroy();
       return;
     }
 
@@ -438,6 +565,23 @@ export class WsHub {
       if (existing?.ws === ws) {
         this.agentSockets.delete(agent.agentId);
       }
+
+      for (const [requestId, pending] of this.pendingTunnelWsOpen.entries()) {
+        if (pending.agentId !== agent.agentId) {
+          continue;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingTunnelWsOpen.delete(requestId);
+        pending.reject(new Error("agent_offline"));
+      }
+
+      for (const [connectionId, route] of this.tunnelWsRoute.entries()) {
+        if (route.agentId !== agent.agentId) {
+          continue;
+        }
+        this.tunnelWsRoute.delete(connectionId);
+        route.bridge.onError("agent_offline");
+      }
     });
   }
 
@@ -485,6 +629,73 @@ export class WsHub {
         headers: (msg.headers as Record<string, string>) ?? {},
         bodyBase64: String(msg.bodyBase64 ?? "")
       });
+      return;
+    }
+
+    if (type === "tunnel.ws.opened") {
+      const requestId = String(msg.requestId ?? "");
+      const pending = this.pendingTunnelWsOpen.get(requestId);
+      if (!pending) {
+        return;
+      }
+      this.pendingTunnelWsOpen.delete(requestId);
+      clearTimeout(pending.timeout);
+      this.tunnelWsRoute.set(pending.connectionId, {
+        agentId: pending.agentId,
+        bridge: pending.bridge
+      });
+      pending.resolve(pending.connectionId);
+      return;
+    }
+
+    if (type === "tunnel.ws.frame") {
+      const connectionId = String(msg.connectionId ?? "");
+      const route = this.tunnelWsRoute.get(connectionId);
+      if (!route) {
+        return;
+      }
+      const encoded = String(msg.dataBase64 ?? "");
+      const isBinary = msg.isBinary === true;
+      route.bridge.onFrame(Buffer.from(encoded, "base64"), isBinary);
+      return;
+    }
+
+    if (type === "tunnel.ws.closed") {
+      const connectionId = String(msg.connectionId ?? "");
+      const route = this.tunnelWsRoute.get(connectionId);
+      if (!route) {
+        return;
+      }
+      this.tunnelWsRoute.delete(connectionId);
+      route.bridge.onClosed(
+        typeof msg.code === "number" ? Number(msg.code) : undefined,
+        typeof msg.reason === "string" ? msg.reason : undefined
+      );
+      return;
+    }
+
+    if (type === "tunnel.ws.error") {
+      const requestId = String(msg.requestId ?? "");
+      if (requestId) {
+        const pending = this.pendingTunnelWsOpen.get(requestId);
+        if (pending) {
+          this.pendingTunnelWsOpen.delete(requestId);
+          clearTimeout(pending.timeout);
+          pending.reject(new Error(String(msg.error ?? "tunnel_ws_open_failed")));
+          return;
+        }
+      }
+
+      const connectionId = String(msg.connectionId ?? "");
+      if (!connectionId) {
+        return;
+      }
+      const route = this.tunnelWsRoute.get(connectionId);
+      if (!route) {
+        return;
+      }
+      this.tunnelWsRoute.delete(connectionId);
+      route.bridge.onError(String(msg.error ?? "tunnel_ws_error"));
       return;
     }
 

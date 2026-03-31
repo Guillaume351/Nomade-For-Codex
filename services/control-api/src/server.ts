@@ -3,6 +3,7 @@ import path from "node:path";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import { WebSocketServer } from "ws";
 import { z } from "zod";
 import { sha256 } from "@nomade/shared";
 import { loadConfig } from "./config.js";
@@ -11,6 +12,7 @@ import { Repositories } from "./repositories.js";
 import { AuthService } from "./auth.js";
 import { requireUserAuth } from "./http-auth.js";
 import { WsHub } from "./ws-hub.js";
+import { DevServiceManager } from "./service-manager.js";
 
 const jsonLimit = "2mb";
 const agentOnlineWindowMs = 30_000;
@@ -68,6 +70,136 @@ export const createServer = async (): Promise<http.Server> => {
 
   const server = http.createServer(app);
   const wsHub = new WsHub(auth, repositories, server);
+  const devServiceManager = new DevServiceManager(repositories, wsHub, config.previewBaseDomain);
+  const internalTunnelWsServer = new WebSocketServer({ noServer: true });
+
+  const previewOriginFor = (slug: string): string => `https://${slug}.${config.previewBaseDomain}`;
+
+  const renderPreviewUrl = (params: {
+    slug: string;
+    tokenRequired: boolean;
+    token?: string;
+  }): string => {
+    const origin = previewOriginFor(params.slug);
+    if (!params.tokenRequired) {
+      return origin;
+    }
+    if (!params.token) {
+      return origin;
+    }
+    return `${origin}?nomade_token=${encodeURIComponent(params.token)}`;
+  };
+
+  server.on("upgrade", (req, socket, head) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const match = url.pathname.match(/^\/internal\/tunnels\/([^/]+)\/ws$/);
+    if (!match) {
+      return;
+    }
+
+    void (async () => {
+      if (req.headers["x-gateway-secret"] !== config.gatewaySecret) {
+        socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+
+      const slug = match[1] ?? "";
+      const tunnel = await repositories.findTunnelBySlug(slug);
+      if (!tunnel || tunnel.status !== "open") {
+        socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+
+      if (tunnel.expires_at && tunnel.expires_at.getTime() <= Date.now()) {
+        socket.write("HTTP/1.1 410 Gone\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+
+      const settings = await repositories.getWorkspaceDevSettings(tunnel.user_id, tunnel.workspace_id);
+      const trustedDevMode = settings?.trusted_dev_mode === true;
+      const token = (url.searchParams.get("nomade_token") ?? req.headers["x-nomade-token"] ?? "").toString();
+      if (tunnel.token_required && !trustedDevMode) {
+        if (!token || sha256(token) !== tunnel.access_token_hash) {
+          socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+          socket.destroy();
+          return;
+        }
+      }
+
+      internalTunnelWsServer.handleUpgrade(req, socket, head, (ws) => {
+        let connectionId: string | null = null;
+
+        void wsHub
+          .openTunnelWsThroughAgent({
+            agentId: tunnel.agent_id,
+            tunnelId: tunnel.id,
+            path: url.searchParams.get("path") ?? "/",
+            query: url.searchParams.get("query") ?? undefined,
+            headers: {
+              origin: req.headers.origin?.toString() ?? ""
+            },
+            bridge: {
+              onFrame: (data, isBinary) => {
+                if (ws.readyState === ws.OPEN) {
+                  ws.send(data, { binary: isBinary });
+                }
+              },
+              onClosed: (code, reason) => {
+                if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) {
+                  ws.close(code, reason);
+                }
+              },
+              onError: (error) => {
+                if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) {
+                  ws.close(1011, error.slice(0, 120));
+                }
+              }
+            }
+          })
+          .then((openedConnectionId) => {
+            connectionId = openedConnectionId;
+          })
+          .catch((error) => {
+            if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) {
+              ws.close(1011, error instanceof Error ? error.message.slice(0, 120) : "tunnel_ws_open_failed");
+            }
+          });
+
+        ws.on("message", (data, isBinary) => {
+          if (!connectionId) {
+            return;
+          }
+          const buffer = Buffer.isBuffer(data)
+            ? data
+            : Array.isArray(data)
+              ? Buffer.concat(data.map((chunk) => Buffer.from(chunk)))
+              : Buffer.from(data instanceof ArrayBuffer ? new Uint8Array(data) : data);
+          wsHub.sendTunnelWsFrame({
+            connectionId,
+            data: buffer,
+            isBinary
+          });
+        });
+
+        ws.on("close", (code, reason) => {
+          if (!connectionId) {
+            return;
+          }
+          wsHub.closeTunnelWs({
+            connectionId,
+            code,
+            reason: reason.toString()
+          });
+        });
+      });
+    })().catch(() => {
+      socket.write("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+    });
+  });
 
   const importThreadHistoryIntoConversation = async (params: {
     conversationId: string;
@@ -468,6 +600,175 @@ export const createServer = async (): Promise<http.Server> => {
     res.json({ items: workspaces });
   });
 
+  app.get("/workspaces/:workspaceId/dev-settings", requireUserAuth(auth), async (req, res) => {
+    const settings = await repositories.getWorkspaceDevSettings(req.userId!, req.params.workspaceId);
+    if (!settings) {
+      res.status(404).json({ error: "workspace_not_found" });
+      return;
+    }
+    res.json({
+      workspaceId: settings.workspace_id,
+      trustedDevMode: settings.trusted_dev_mode,
+      updatedAt: settings.updated_at.toISOString()
+    });
+  });
+
+  app.patch("/workspaces/:workspaceId/dev-settings", requireUserAuth(auth), async (req, res) => {
+    const schema = z.object({
+      trustedDevMode: z.boolean()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+    const updated = await repositories.setWorkspaceDevSettings({
+      userId: req.userId!,
+      workspaceId: req.params.workspaceId,
+      trustedDevMode: parsed.data.trustedDevMode
+    });
+    if (!updated) {
+      res.status(404).json({ error: "workspace_not_found" });
+      return;
+    }
+    res.json({
+      workspaceId: updated.workspace_id,
+      trustedDevMode: updated.trusted_dev_mode,
+      updatedAt: updated.updated_at.toISOString()
+    });
+  });
+
+  app.get("/workspaces/:workspaceId/services", requireUserAuth(auth), async (req, res) => {
+    const items = await devServiceManager.listWorkspaceServices(req.userId!, req.params.workspaceId);
+    if (!items) {
+      res.status(404).json({ error: "workspace_not_found" });
+      return;
+    }
+    res.json({ items });
+  });
+
+  app.post("/workspaces/:workspaceId/services", requireUserAuth(auth), async (req, res) => {
+    const schema = z.object({
+      name: z.string().min(1).max(120),
+      role: z.string().min(1).max(120).default("service"),
+      command: z.string().min(1),
+      cwd: z.string().optional(),
+      port: z.number().int().min(1).max(65535),
+      healthPath: z.string().optional(),
+      envTemplate: z.record(z.string()).optional(),
+      dependsOn: z.array(z.string()).optional(),
+      autoTunnel: z.boolean().optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+
+    const workspace = await repositories.findWorkspaceById(req.userId!, req.params.workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: "workspace_not_found" });
+      return;
+    }
+
+    try {
+      const created = await repositories.createDevService({
+        userId: req.userId!,
+        workspaceId: workspace.id,
+        agentId: workspace.agent_id,
+        name: parsed.data.name,
+        role: parsed.data.role,
+        command: parsed.data.command,
+        cwd: parsed.data.cwd,
+        port: parsed.data.port,
+        healthPath: parsed.data.healthPath,
+        envTemplate: parsed.data.envTemplate,
+        dependsOn: parsed.data.dependsOn,
+        autoTunnel: parsed.data.autoTunnel
+      });
+      const state = await devServiceManager.getServiceState(req.userId!, created.id);
+      res.status(201).json(state ?? created);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "service_create_failed";
+      if (message.includes("duplicate key value")) {
+        res.status(409).json({ error: "service_name_conflict" });
+        return;
+      }
+      res.status(502).json({ error: message });
+    }
+  });
+
+  app.patch("/services/:serviceId", requireUserAuth(auth), async (req, res) => {
+    const schema = z.object({
+      name: z.string().min(1).max(120).optional(),
+      role: z.string().min(1).max(120).optional(),
+      command: z.string().min(1).optional(),
+      cwd: z.string().nullable().optional(),
+      port: z.number().int().min(1).max(65535).optional(),
+      healthPath: z.string().optional(),
+      envTemplate: z.record(z.string()).optional(),
+      dependsOn: z.array(z.string()).optional(),
+      autoTunnel: z.boolean().optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+    const updated = await repositories.updateDevService({
+      userId: req.userId!,
+      serviceId: req.params.serviceId,
+      name: parsed.data.name,
+      role: parsed.data.role,
+      command: parsed.data.command,
+      cwd: parsed.data.cwd,
+      port: parsed.data.port,
+      healthPath: parsed.data.healthPath,
+      envTemplate: parsed.data.envTemplate,
+      dependsOn: parsed.data.dependsOn,
+      autoTunnel: parsed.data.autoTunnel
+    });
+    if (!updated) {
+      res.status(404).json({ error: "service_not_found" });
+      return;
+    }
+    const state = await devServiceManager.getServiceState(req.userId!, updated.id);
+    res.json(state ?? updated);
+  });
+
+  app.post("/services/:serviceId/start", requireUserAuth(auth), async (req, res) => {
+    try {
+      const state = await devServiceManager.startService(req.userId!, req.params.serviceId);
+      if (!state) {
+        res.status(404).json({ error: "service_not_found" });
+        return;
+      }
+      res.json(state);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "service_start_failed";
+      const status = message === "agent_offline" ? 503 : 502;
+      res.status(status).json({ error: message });
+    }
+  });
+
+  app.post("/services/:serviceId/stop", requireUserAuth(auth), async (req, res) => {
+    const state = await devServiceManager.stopService(req.userId!, req.params.serviceId);
+    if (!state) {
+      res.status(404).json({ error: "service_not_found" });
+      return;
+    }
+    res.json(state);
+  });
+
+  app.get("/services/:serviceId/state", requireUserAuth(auth), async (req, res) => {
+    const state = await devServiceManager.getServiceState(req.userId!, req.params.serviceId);
+    if (!state) {
+      res.status(404).json({ error: "service_not_found" });
+      return;
+    }
+    res.json(state);
+  });
+
   app.post("/conversations", requireUserAuth(auth), async (req, res) => {
     const schema = z.object({
       workspaceId: z.string().min(6),
@@ -660,7 +961,8 @@ export const createServer = async (): Promise<http.Server> => {
       agentId: z.string().min(6),
       name: z.string().min(1).max(120),
       command: z.string().min(1),
-      cwd: z.string().optional()
+      cwd: z.string().optional(),
+      env: z.record(z.string()).optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -682,7 +984,8 @@ export const createServer = async (): Promise<http.Server> => {
       workspaceId: parsed.data.workspaceId,
       agentId: parsed.data.agentId,
       command: parsed.data.command,
-      cwd: parsed.data.cwd
+      cwd: parsed.data.cwd,
+      env: parsed.data.env
     });
 
     if (!delivered) {
@@ -712,6 +1015,7 @@ export const createServer = async (): Promise<http.Server> => {
       workspaceId: z.string().min(6),
       agentId: z.string().min(6),
       targetPort: z.number().int().min(1).max(65535),
+      serviceId: z.string().min(6).optional(),
       ttlSec: z.number().int().min(60).max(60 * 60 * 24).optional()
     });
     const parsed = schema.safeParse(req.body);
@@ -720,11 +1024,22 @@ export const createServer = async (): Promise<http.Server> => {
       return;
     }
 
+    const workspace = await repositories.findWorkspaceById(req.userId!, parsed.data.workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: "workspace_not_found" });
+      return;
+    }
+
+    const settings = await repositories.getWorkspaceDevSettings(req.userId!, parsed.data.workspaceId);
+    const tokenRequired = !(settings?.trusted_dev_mode ?? false);
+
     const created = await repositories.createTunnel({
       userId: req.userId!,
       workspaceId: parsed.data.workspaceId,
       agentId: parsed.data.agentId,
+      serviceId: parsed.data.serviceId ?? null,
       targetPort: parsed.data.targetPort,
+      tokenRequired,
       ttlSec: parsed.data.ttlSec
     });
 
@@ -738,6 +1053,7 @@ export const createServer = async (): Promise<http.Server> => {
     });
 
     if (!delivered) {
+      await repositories.deleteTunnel(created.tunnel.id, req.userId!);
       res.status(503).json({ error: "agent_offline" });
       return;
     }
@@ -745,9 +1061,19 @@ export const createServer = async (): Promise<http.Server> => {
     res.status(201).json({
       id: created.tunnel.id,
       slug: created.tunnel.slug,
+      serviceId: created.tunnel.service_id,
       targetPort: created.tunnel.target_port,
-      previewUrl: `https://${created.tunnel.slug}.${config.previewBaseDomain}`,
-      accessToken: created.accessToken
+      tokenRequired: created.tunnel.token_required,
+      previewUrl: renderPreviewUrl({
+        slug: created.tunnel.slug,
+        tokenRequired: created.tunnel.token_required,
+        token: created.accessToken
+      }),
+      accessToken: created.accessToken,
+      isReachable: false,
+      lastProbeAt: null,
+      lastProbeStatus: null,
+      lastError: null
     });
   });
 
@@ -762,12 +1088,52 @@ export const createServer = async (): Promise<http.Server> => {
     res.json({
       items: tunnels.map((tunnel) => ({
         id: tunnel.id,
+        serviceId: tunnel.service_id,
         slug: tunnel.slug,
         targetPort: tunnel.target_port,
         status: tunnel.status,
-        previewUrl: `https://${tunnel.slug}.${config.previewBaseDomain}`
+        tokenRequired: tunnel.token_required,
+        previewUrl: previewOriginFor(tunnel.slug),
+        isReachable: tunnel.last_probe_status === "ok",
+        lastProbeAt: tunnel.last_probe_at ? tunnel.last_probe_at.toISOString() : null,
+        lastProbeStatus: tunnel.last_probe_status ?? null,
+        lastError: tunnel.last_probe_error ?? null,
+        lastProbeCode: tunnel.last_probe_code ?? null
       }))
     });
+  });
+
+  app.post("/tunnels/:tunnelId/issue-token", requireUserAuth(auth), async (req, res) => {
+    const issued = await devServiceManager.issueTunnelToken(req.userId!, req.params.tunnelId);
+    if (!issued) {
+      res.status(404).json({ error: "tunnel_not_found" });
+      return;
+    }
+    res.json({
+      accessToken: issued.token,
+      previewUrl: issued.previewUrl
+    });
+  });
+
+  app.post("/tunnels/:tunnelId/rotate-token", requireUserAuth(auth), async (req, res) => {
+    const issued = await devServiceManager.rotateTunnelToken(req.userId!, req.params.tunnelId);
+    if (!issued) {
+      res.status(404).json({ error: "tunnel_not_found" });
+      return;
+    }
+    res.json({
+      accessToken: issued.token,
+      previewUrl: issued.previewUrl
+    });
+  });
+
+  app.delete("/tunnels/:tunnelId", requireUserAuth(auth), async (req, res) => {
+    const deleted = await devServiceManager.closeTunnel(req.userId!, req.params.tunnelId);
+    if (!deleted) {
+      res.status(404).json({ error: "tunnel_not_found" });
+      return;
+    }
+    res.json({ ok: true });
   });
 
   app.post("/internal/tunnels/:slug/proxy", async (req, res) => {
@@ -782,7 +1148,7 @@ export const createServer = async (): Promise<http.Server> => {
       query: z.string().optional(),
       headers: z.record(z.string()),
       bodyBase64: z.string().optional(),
-      token: z.string().min(8)
+      token: z.string().optional()
     });
 
     const parsed = schema.safeParse(req.body);
@@ -802,9 +1168,14 @@ export const createServer = async (): Promise<http.Server> => {
       return;
     }
 
-    if (sha256(parsed.data.token) !== tunnel.access_token_hash) {
-      res.status(403).json({ error: "invalid_tunnel_token" });
-      return;
+    const settings = await repositories.getWorkspaceDevSettings(tunnel.user_id, tunnel.workspace_id);
+    const trustedDevMode = settings?.trusted_dev_mode === true;
+    if (tunnel.token_required && !trustedDevMode) {
+      const token = (parsed.data.token ?? "").trim();
+      if (!token || sha256(token) !== tunnel.access_token_hash) {
+        res.status(403).json({ error: "invalid_tunnel_token" });
+        return;
+      }
     }
 
     try {

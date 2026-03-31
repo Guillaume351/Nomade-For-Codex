@@ -9,6 +9,9 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../api/nomade_api.dart';
 import '../models/agent.dart';
 import '../models/conversation.dart';
+import '../models/dev_service.dart';
+import '../models/session_stream_chunk.dart';
+import '../models/tunnel.dart';
 import '../models/turn.dart';
 import '../models/workspace.dart';
 
@@ -37,6 +40,14 @@ class NomadeProvider with ChangeNotifier {
   List<Workspace> workspaces = [];
   List<Conversation> conversations = [];
   List<Turn> turns = [];
+  List<DevService> services = [];
+  List<TunnelPreview> tunnels = [];
+  final Map<String, StringBuffer> sessionLogsBySession = {};
+  final List<SessionStreamChunk> sessionChunks = [];
+  bool trustedDevMode = false;
+  bool loadingServices = false;
+  bool loadingTunnels = false;
+  String? selectedServiceId;
 
   Agent? _selectedAgent;
   Agent? get selectedAgent => _selectedAgent;
@@ -63,6 +74,19 @@ class NomadeProvider with ChangeNotifier {
     _selectedConversation = value;
     persistSession();
     notifyListeners();
+  }
+
+  DevService? get selectedService {
+    final id = selectedServiceId;
+    if (id == null) {
+      return null;
+    }
+    for (final service in services) {
+      if (service.id == id) {
+        return service;
+      }
+    }
+    return null;
   }
 
   String? activeTurnId;
@@ -233,6 +257,12 @@ class NomadeProvider with ChangeNotifier {
     workspaces = [];
     conversations = [];
     turns = [];
+    services = [];
+    tunnels = [];
+    selectedServiceId = null;
+    trustedDevMode = false;
+    sessionLogsBySession.clear();
+    sessionChunks.clear();
     _selectedAgent = null;
     _selectedWorkspace = null;
     _selectedConversation = null;
@@ -304,6 +334,9 @@ class NomadeProvider with ChangeNotifier {
 
         if (selectedWorkspace != null) {
           await loadConversations();
+          await loadDevSettings();
+          await loadServices();
+          await loadTunnels();
         } else {
           await importCodexHistory(silent: true);
         }
@@ -311,6 +344,10 @@ class NomadeProvider with ChangeNotifier {
         workspaces = [];
         conversations = [];
         turns = [];
+        services = [];
+        tunnels = [];
+        trustedDevMode = false;
+        selectedServiceId = null;
         _selectedAgent = null;
         _selectedWorkspace = null;
         _selectedConversation = null;
@@ -342,6 +379,10 @@ class NomadeProvider with ChangeNotifier {
       _selectedConversation = null;
       conversations = [];
       turns = [];
+      services = [];
+      tunnels = [];
+      trustedDevMode = false;
+      selectedServiceId = null;
     }
     notifyListeners();
   }
@@ -445,6 +486,233 @@ class NomadeProvider with ChangeNotifier {
     }
   }
 
+  Future<void> loadDevSettings() async {
+    if (selectedWorkspace == null || accessToken == null) return;
+    try {
+      final payload = await api.getWorkspaceDevSettings(
+        accessToken: accessToken!,
+        workspaceId: selectedWorkspace!.id,
+      );
+      trustedDevMode = payload['trustedDevMode'] == true;
+      notifyListeners();
+    } catch (_) {
+      // keep local value if server is not ready yet
+    }
+  }
+
+  Future<void> setTrustedDevMode(bool enabled) async {
+    if (selectedWorkspace == null || accessToken == null) return;
+    final previous = trustedDevMode;
+    trustedDevMode = enabled;
+    notifyListeners();
+    try {
+      await api.updateWorkspaceDevSettings(
+        accessToken: accessToken!,
+        workspaceId: selectedWorkspace!.id,
+        trustedDevMode: enabled,
+      );
+      await loadServices();
+      await loadTunnels();
+    } catch (e) {
+      trustedDevMode = previous;
+      status = 'Failed to update trusted mode: $e';
+      notifyListeners();
+    }
+  }
+
+  Future<void> loadServices() async {
+    if (selectedWorkspace == null || accessToken == null) return;
+    loadingServices = true;
+    notifyListeners();
+    try {
+      final payload = await api.listWorkspaceServices(
+        accessToken: accessToken!,
+        workspaceId: selectedWorkspace!.id,
+      );
+      services = payload.map(DevService.fromJson).toList();
+      if (selectedServiceId == null ||
+          !services.any((service) => service.id == selectedServiceId)) {
+        selectedServiceId = services.isNotEmpty ? services.first.id : null;
+      }
+    } catch (e) {
+      status = 'Failed to load services: $e';
+    } finally {
+      loadingServices = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> loadTunnels() async {
+    if (selectedWorkspace == null || accessToken == null) return;
+    loadingTunnels = true;
+    notifyListeners();
+    try {
+      final payload = await api.listTunnels(
+        accessToken: accessToken!,
+        workspaceId: selectedWorkspace!.id,
+      );
+      tunnels = payload.map(TunnelPreview.fromJson).toList();
+    } catch (e) {
+      status = 'Failed to load tunnels: $e';
+    } finally {
+      loadingTunnels = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> startService(String serviceId) async {
+    if (accessToken == null) return;
+    try {
+      final payload = await api.startService(
+        accessToken: accessToken!,
+        serviceId: serviceId,
+      );
+      _upsertService(DevService.fromJson(payload));
+      await loadTunnels();
+      status = 'Service started';
+    } catch (e) {
+      status = 'Start failed: $e';
+    }
+    notifyListeners();
+  }
+
+  Future<void> stopService(String serviceId) async {
+    if (accessToken == null) return;
+    try {
+      final payload = await api.stopService(
+        accessToken: accessToken!,
+        serviceId: serviceId,
+      );
+      _upsertService(DevService.fromJson(payload));
+      status = 'Service stopped';
+    } catch (e) {
+      status = 'Stop failed: $e';
+    }
+    notifyListeners();
+  }
+
+  Future<void> refreshServiceState(String serviceId) async {
+    if (accessToken == null) return;
+    try {
+      final payload = await api.getServiceState(
+        accessToken: accessToken!,
+        serviceId: serviceId,
+      );
+      _upsertService(DevService.fromJson(payload));
+      notifyListeners();
+    } catch (_) {
+      // ignore transient failures
+    }
+  }
+
+  Future<String?> issueTunnelLink(String tunnelId) async {
+    if (accessToken == null) return null;
+    try {
+      final payload = await api.issueTunnelToken(
+        accessToken: accessToken!,
+        tunnelId: tunnelId,
+      );
+      status = 'Tunnel link issued';
+      notifyListeners();
+      return payload['previewUrl']?.toString();
+    } catch (e) {
+      status = 'Issue token failed: $e';
+      notifyListeners();
+      return null;
+    }
+  }
+
+  Future<String?> rotateTunnelLink(String tunnelId) async {
+    if (accessToken == null) return null;
+    try {
+      final payload = await api.rotateTunnelToken(
+        accessToken: accessToken!,
+        tunnelId: tunnelId,
+      );
+      status = 'Tunnel token rotated';
+      notifyListeners();
+      return payload['previewUrl']?.toString();
+    } catch (e) {
+      status = 'Rotate token failed: $e';
+      notifyListeners();
+      return null;
+    }
+  }
+
+  Future<void> closeTunnel(String tunnelId) async {
+    if (accessToken == null) return;
+    try {
+      await api.deleteTunnel(
+        accessToken: accessToken!,
+        tunnelId: tunnelId,
+      );
+      tunnels = tunnels.where((item) => item.id != tunnelId).toList();
+      status = 'Tunnel closed';
+    } catch (e) {
+      status = 'Close tunnel failed: $e';
+    }
+    notifyListeners();
+  }
+
+  void sendSessionInput(String sessionId, String data) {
+    if (socket == null) return;
+    socket!.sink.add(jsonEncode({
+      'type': 'session.input',
+      'sessionId': sessionId,
+      'data': data,
+    }));
+  }
+
+  void terminateSession(String sessionId, {String? agentId}) {
+    if (socket == null) return;
+    socket!.sink.add(jsonEncode({
+      'type': 'session.terminate',
+      'sessionId': sessionId,
+      if (agentId != null) 'agentId': agentId,
+    }));
+  }
+
+  String serviceLogs(String serviceId) {
+    final service = services.firstWhere(
+      (item) => item.id == serviceId,
+      orElse: () => DevService(
+        id: '',
+        workspaceId: '',
+        agentId: '',
+        name: '',
+        role: 'service',
+        command: '',
+        cwd: null,
+        port: 0,
+        healthPath: '/',
+        envTemplate: const {},
+        dependsOn: const [],
+        autoTunnel: true,
+        state: 'stopped',
+        runtimeStatus: 'stopped',
+      ),
+    );
+    final sessionId = service.session?.id;
+    if (sessionId == null || sessionId.isEmpty) {
+      return '';
+    }
+    return sessionLogsBySession[sessionId]?.toString() ?? '';
+  }
+
+  void selectService(String? serviceId) {
+    selectedServiceId = serviceId;
+    notifyListeners();
+  }
+
+  void _upsertService(DevService incoming) {
+    final index = services.indexWhere((item) => item.id == incoming.id);
+    if (index == -1) {
+      services = [incoming, ...services];
+      return;
+    }
+    services[index] = incoming;
+  }
+
   Future<void> connectSocket() async {
     if (accessToken == null) return;
     try {
@@ -467,7 +735,87 @@ class NomadeProvider with ChangeNotifier {
     final event = jsonDecode(raw as String) as Map<String, dynamic>;
     final type = event['type'] as String?;
 
-    if (type == 'conversation.item.delta') {
+    if (type == 'session.output') {
+      final sessionId = event['sessionId']?.toString();
+      final stream = event['stream']?.toString() ?? 'stdout';
+      final data = event['data']?.toString() ?? '';
+      final cursor = (event['cursor'] as num?)?.toInt() ?? 0;
+      if (sessionId != null) {
+        final buffer =
+            sessionLogsBySession.putIfAbsent(sessionId, StringBuffer.new);
+        buffer.write(data);
+        sessionChunks.add(SessionStreamChunk(
+          sessionId: sessionId,
+          stream: stream,
+          data: data,
+          cursor: cursor,
+          at: DateTime.now(),
+        ));
+      }
+      notifyListeners();
+      return;
+    } else if (type == 'session.status') {
+      final sessionId = event['sessionId']?.toString();
+      final statusValue = event['status']?.toString() ?? 'unknown';
+      if (sessionId != null) {
+        final serviceIndex =
+            services.indexWhere((service) => service.session?.id == sessionId);
+        if (serviceIndex != -1) {
+          final service = services[serviceIndex];
+          final nextState =
+              statusValue == 'running' ? service.state : 'crashed';
+          services[serviceIndex] = service.copyWith(
+            runtimeStatus: statusValue,
+            state: nextState,
+            lastError: statusValue == 'running' ? null : 'session_$statusValue',
+          );
+        }
+      }
+      notifyListeners();
+      return;
+    } else if (type == 'tunnel.status') {
+      final tunnelId = event['tunnelId']?.toString();
+      final statusValue = event['status']?.toString() ?? 'unknown';
+      final probeStatus = event['probeStatus']?.toString();
+      final probeCode = (event['probeCode'] as num?)?.toInt();
+      final detail = event['detail']?.toString();
+      final probeAt = event['probeAt']?.toString();
+      if (tunnelId != null) {
+        final tunnelIndex = tunnels.indexWhere((item) => item.id == tunnelId);
+        if (tunnelIndex != -1) {
+          final current = tunnels[tunnelIndex];
+          tunnels[tunnelIndex] = current.copyWith(
+            status: statusValue,
+            isReachable: probeStatus == 'ok' || statusValue == 'healthy',
+            lastProbeStatus: probeStatus,
+            lastError: detail,
+            lastProbeCode: probeCode,
+            lastProbeAt: probeAt != null
+                ? DateTime.tryParse(probeAt)
+                : current.lastProbeAt,
+          );
+        }
+
+        final serviceIndex =
+            services.indexWhere((service) => service.tunnel?.id == tunnelId);
+        if (serviceIndex != -1) {
+          final service = services[serviceIndex];
+          final nextState = statusValue == 'healthy'
+              ? 'healthy'
+              : statusValue == 'unhealthy'
+                  ? 'unhealthy'
+                  : statusValue == 'stopped'
+                      ? 'stopped'
+                      : service.state;
+          services[serviceIndex] = service.copyWith(
+            state: nextState,
+            lastError: detail ?? service.lastError,
+          );
+        }
+      }
+      notifyListeners();
+      return;
+    } else if (type == 'conversation.item.delta') {
       final turnId = event['turnId'] as String?;
       final delta = event['delta'] as String?;
       final stream = event['stream'] as String?;
@@ -601,12 +949,19 @@ class NomadeProvider with ChangeNotifier {
     workspaces = [];
     conversations = [];
     turns = [];
+    services = [];
+    tunnels = [];
+    trustedDevMode = false;
+    selectedServiceId = null;
     notifyListeners();
 
     await loadWorkspacesForSelectedAgent();
     await loadCodexOptions();
     if (selectedWorkspace != null) {
       await loadConversations();
+      await loadDevSettings();
+      await loadServices();
+      await loadTunnels();
     } else {
       await importCodexHistory(silent: true);
     }
@@ -616,6 +971,9 @@ class NomadeProvider with ChangeNotifier {
     selectedWorkspace = workspace;
     await loadCodexOptions();
     await loadConversations();
+    await loadDevSettings();
+    await loadServices();
+    await loadTunnels();
   }
 
   Future<bool> createDefaultWorkspace() async {
@@ -634,6 +992,9 @@ class NomadeProvider with ChangeNotifier {
       await loadWorkspacesForSelectedAgent();
       if (selectedWorkspace != null) {
         await loadConversations();
+        await loadDevSettings();
+        await loadServices();
+        await loadTunnels();
       }
       status = 'Workspace ready';
       notifyListeners();
@@ -705,6 +1066,9 @@ class NomadeProvider with ChangeNotifier {
           storedWorkspaceId: selectedWorkspace?.id);
       if (selectedWorkspace != null) {
         await loadConversations();
+        await loadDevSettings();
+        await loadServices();
+        await loadTunnels();
       }
 
       if (!silent) {

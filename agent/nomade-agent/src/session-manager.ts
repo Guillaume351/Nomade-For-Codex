@@ -15,7 +15,7 @@ export class SessionManager {
 
   constructor(private readonly callbacks: SessionCallbacks) {}
 
-  createSession(params: { sessionId: string; command: string; cwd?: string }): void {
+  createSession(params: { sessionId: string; command: string; cwd?: string; env?: Record<string, string> }): void {
     if (this.sessions.has(params.sessionId)) {
       return;
     }
@@ -24,7 +24,10 @@ export class SessionManager {
     const child = spawn(shell, ["-lc", params.command], {
       cwd: params.cwd,
       stdio: "pipe",
-      env: process.env
+      env: {
+        ...process.env,
+        ...(params.env ?? {})
+      }
     });
 
     this.sessions.set(params.sessionId, { process: child, cursor: 0 });
