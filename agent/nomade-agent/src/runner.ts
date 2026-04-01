@@ -63,11 +63,19 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
     try {
       const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
       const type = String(msg.type ?? "");
-        if (type === "session.create") {
+      if (type === "session.create") {
+        const envRaw = msg.env;
+        const env =
+          envRaw && typeof envRaw === "object"
+            ? Object.fromEntries(
+                Object.entries(envRaw as Record<string, unknown>).map(([key, value]) => [key, String(value ?? "")])
+              )
+            : undefined;
         sessionManager.createSession({
           sessionId: String(msg.sessionId),
           command: String(msg.command),
-          cwd: msg.cwd ? String(msg.cwd) : undefined
+          cwd: msg.cwd ? String(msg.cwd) : undefined,
+          env
         });
         return;
       }
@@ -273,6 +281,110 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
             })
           );
         }
+        return;
+      }
+
+      if (type === "tunnel.ws.open") {
+        const requestId = String(msg.requestId ?? randomToken("tws"));
+        const connectionId = String(msg.connectionId ?? randomToken("twc"));
+        const tunnelId = String(msg.tunnelId ?? "");
+        const targetPort = tunnelManager.getPort(tunnelId);
+        if (!targetPort) {
+          ws.send(
+            JSON.stringify({
+              type: "tunnel.ws.error",
+              requestId,
+              connectionId,
+              error: "unknown_tunnel"
+            })
+          );
+          return;
+        }
+
+        const query = msg.query ? `?${String(msg.query)}` : "";
+        const localWsUrl = `ws://127.0.0.1:${targetPort}${String(msg.path ?? "/")}${query}`;
+        const requestHeaders = (msg.headers as Record<string, string> | undefined) ?? {};
+        const socket = new WebSocket(localWsUrl, {
+          headers: requestHeaders
+        });
+        tunnelManager.bindSocket(connectionId, socket);
+
+        socket.on("open", () => {
+          ws.send(
+            JSON.stringify({
+              type: "tunnel.ws.opened",
+              requestId,
+              connectionId
+            })
+          );
+        });
+
+        socket.on("message", (data, isBinary) => {
+          const payload = Buffer.isBuffer(data)
+            ? data
+            : Array.isArray(data)
+              ? Buffer.concat(data.map((chunk) => Buffer.from(chunk)))
+              : Buffer.from(data instanceof ArrayBuffer ? new Uint8Array(data) : data);
+          ws.send(
+            JSON.stringify({
+              type: "tunnel.ws.frame",
+              connectionId,
+              dataBase64: payload.toString("base64"),
+              isBinary
+            })
+          );
+        });
+
+        socket.on("close", (code, reason) => {
+          tunnelManager.unbindSocket(connectionId);
+          ws.send(
+            JSON.stringify({
+              type: "tunnel.ws.closed",
+              connectionId,
+              code,
+              reason: reason.toString()
+            })
+          );
+        });
+
+        socket.on("error", (error) => {
+          ws.send(
+            JSON.stringify({
+              type: "tunnel.ws.error",
+              requestId,
+              connectionId,
+              error: error instanceof Error ? error.message : "tunnel_ws_open_failed"
+            })
+          );
+        });
+
+        return;
+      }
+
+      if (type === "tunnel.ws.frame") {
+        const connectionId = String(msg.connectionId ?? "");
+        const socket = tunnelManager.getSocket(connectionId);
+        if (!socket) {
+          ws.send(
+            JSON.stringify({
+              type: "tunnel.ws.error",
+              connectionId,
+              error: "unknown_connection"
+            })
+          );
+          return;
+        }
+        const encoded = String(msg.dataBase64 ?? "");
+        const isBinary = msg.isBinary === true;
+        socket.send(Buffer.from(encoded, "base64"), { binary: isBinary });
+        return;
+      }
+
+      if (type === "tunnel.ws.close") {
+        const connectionId = String(msg.connectionId ?? "");
+        const code = typeof msg.code === "number" ? Number(msg.code) : undefined;
+        const reason = typeof msg.reason === "string" ? msg.reason : undefined;
+        tunnelManager.closeSocket(connectionId, code, reason);
         return;
       }
     } catch (error) {

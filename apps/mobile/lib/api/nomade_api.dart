@@ -364,6 +364,185 @@ class NomadeApi {
     return _decodeObject(response);
   }
 
+  Future<Map<String, dynamic>> getWorkspaceDevSettings({
+    required String accessToken,
+    required String workspaceId,
+  }) async {
+    final response = await _send(
+      () => http.get(
+        _uri('/workspaces/$workspaceId/dev-settings'),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> updateWorkspaceDevSettings({
+    required String accessToken,
+    required String workspaceId,
+    required bool trustedDevMode,
+  }) async {
+    final response = await _send(
+      () => http.patch(
+        _uri('/workspaces/$workspaceId/dev-settings'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({'trustedDevMode': trustedDevMode}),
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<List<Map<String, dynamic>>> listWorkspaceServices({
+    required String accessToken,
+    required String workspaceId,
+  }) async {
+    final response = await _send(
+      () => http.get(
+        _uri('/workspaces/$workspaceId/services'),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    final payload = _decodeObject(response);
+    return ((payload['items'] as List?) ?? [])
+        .cast<Map>()
+        .map((item) => item.cast<String, dynamic>())
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> createWorkspaceService({
+    required String accessToken,
+    required String workspaceId,
+    required Map<String, dynamic> body,
+  }) async {
+    final response = await _send(
+      () => http.post(
+        _uri('/workspaces/$workspaceId/services'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode(body),
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> updateService({
+    required String accessToken,
+    required String serviceId,
+    required Map<String, dynamic> body,
+  }) async {
+    final response = await _send(
+      () => http.patch(
+        _uri('/services/$serviceId'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode(body),
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> startService({
+    required String accessToken,
+    required String serviceId,
+  }) async {
+    final response = await _send(
+      () => http.post(
+        _uri('/services/$serviceId/start'),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> stopService({
+    required String accessToken,
+    required String serviceId,
+  }) async {
+    final response = await _send(
+      () => http.post(
+        _uri('/services/$serviceId/stop'),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> getServiceState({
+    required String accessToken,
+    required String serviceId,
+  }) async {
+    final response = await _send(
+      () => http.get(
+        _uri('/services/$serviceId/state'),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<List<Map<String, dynamic>>> listTunnels({
+    required String accessToken,
+    required String workspaceId,
+  }) async {
+    final response = await _send(
+      () => http.get(
+        _uri('/tunnels', queryParameters: {'workspaceId': workspaceId}),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    final payload = _decodeObject(response);
+    return ((payload['items'] as List?) ?? [])
+        .cast<Map>()
+        .map((item) => item.cast<String, dynamic>())
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> issueTunnelToken({
+    required String accessToken,
+    required String tunnelId,
+  }) async {
+    final response = await _send(
+      () => http.post(
+        _uri('/tunnels/$tunnelId/issue-token'),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> rotateTunnelToken({
+    required String accessToken,
+    required String tunnelId,
+  }) async {
+    final response = await _send(
+      () => http.post(
+        _uri('/tunnels/$tunnelId/rotate-token'),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> deleteTunnel({
+    required String accessToken,
+    required String tunnelId,
+  }) async {
+    final response = await _send(
+      () => http.delete(
+        _uri('/tunnels/$tunnelId'),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    return _decodeObject(response);
+  }
+
   WebSocketChannel openUserSocket(String accessToken) {
     final base = Uri.parse(baseUrl);
     final uri = base.replace(

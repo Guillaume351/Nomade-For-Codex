@@ -7,6 +7,7 @@ export interface SessionCreateMessage {
   agentId: string;
   command: string;
   cwd?: string;
+  env?: Record<string, string>;
 }
 
 export interface SessionInputMessage {
@@ -64,8 +65,56 @@ export interface TunnelHttpResponseMessage {
 export interface TunnelStatusMessage {
   type: "tunnel.status";
   tunnelId: string;
-  status: "open" | "closed" | "error";
+  status: "open" | "closed" | "error" | "starting" | "healthy" | "unhealthy" | "stopped";
   reason?: string;
+  detail?: string;
+  probeStatus?: "ok" | "error" | "unknown";
+  probeCode?: number;
+  probeAt?: string;
+}
+
+export interface TunnelWsOpenMessage {
+  type: "tunnel.ws.open";
+  requestId: string;
+  connectionId: string;
+  tunnelId: string;
+  path: string;
+  query?: string;
+  headers?: Record<string, string>;
+}
+
+export interface TunnelWsFrameMessage {
+  type: "tunnel.ws.frame";
+  connectionId: string;
+  dataBase64: string;
+  isBinary: boolean;
+}
+
+export interface TunnelWsCloseMessage {
+  type: "tunnel.ws.close";
+  connectionId: string;
+  code?: number;
+  reason?: string;
+}
+
+export interface TunnelWsOpenedMessage {
+  type: "tunnel.ws.opened";
+  requestId: string;
+  connectionId: string;
+}
+
+export interface TunnelWsClosedMessage {
+  type: "tunnel.ws.closed";
+  connectionId: string;
+  code?: number;
+  reason?: string;
+}
+
+export interface TunnelWsErrorMessage {
+  type: "tunnel.ws.error";
+  requestId?: string;
+  connectionId?: string;
+  error: string;
 }
 
 export interface ConversationTurnStartMessage {
@@ -152,6 +201,9 @@ export type MobileToAgentMessage =
   | SessionTerminateMessage
   | TunnelOpenMessage
   | TunnelHttpRequestMessage
+  | TunnelWsOpenMessage
+  | TunnelWsFrameMessage
+  | TunnelWsCloseMessage
   | ConversationTurnStartMessage
   | ConversationTurnInterruptMessage;
 
@@ -160,6 +212,10 @@ export type AgentToMobileMessage =
   | SessionStatusMessage
   | TunnelStatusMessage
   | TunnelHttpResponseMessage
+  | TunnelWsOpenedMessage
+  | TunnelWsFrameMessage
+  | TunnelWsClosedMessage
+  | TunnelWsErrorMessage
   | ConversationThreadStartedMessage
   | ConversationTurnStartedMessage
   | ConversationTurnDiffUpdatedMessage

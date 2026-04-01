@@ -65,10 +65,51 @@ export interface TunnelRecord {
   user_id: string;
   workspace_id: string;
   agent_id: string;
+  service_id: string | null;
   slug: string;
   target_port: number;
   access_token_hash: string;
+  token_required: boolean;
   status: string;
+  expires_at?: Date | null;
+  last_probe_at?: Date | null;
+  last_probe_status?: string | null;
+  last_probe_error?: string | null;
+  last_probe_code?: number | null;
+}
+
+export interface WorkspaceDevSettingsRecord {
+  workspace_id: string;
+  trusted_dev_mode: boolean;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DevServiceRecord {
+  id: string;
+  user_id: string;
+  workspace_id: string;
+  agent_id: string;
+  name: string;
+  role: string;
+  command: string;
+  cwd: string | null;
+  port: number;
+  health_path: string;
+  env_template: Record<string, string>;
+  depends_on: string[];
+  auto_tunnel: boolean;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DevServiceRuntimeRecord {
+  service_id: string;
+  session_id: string | null;
+  tunnel_id: string | null;
+  status: string;
+  last_error: string | null;
+  updated_at: Date;
 }
 
 export class Repositories {
@@ -331,6 +372,19 @@ export class Repositories {
     return result.rows;
   }
 
+  async getSessionById(sessionId: string): Promise<SessionRecord | null> {
+    const result = await this.pool.query<SessionRecord>(
+      `SELECT id, user_id, workspace_id, agent_id, name, status, cursor
+       FROM sessions
+       WHERE id = $1`,
+      [sessionId]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      return null;
+    }
+    return result.rows[0];
+  }
+
   async updateSessionStatus(sessionId: string, status: string): Promise<void> {
     await this.pool.query("UPDATE sessions SET status = $1, updated_at = NOW() WHERE id = $2", [status, sessionId]);
   }
@@ -531,26 +585,42 @@ export class Repositories {
     workspaceId: string;
     agentId: string;
     targetPort: number;
+    serviceId?: string | null;
+    tokenRequired?: boolean;
+    slug?: string;
+    accessToken?: string;
     ttlSec?: number;
   }): Promise<{ tunnel: TunnelRecord; accessToken: string }> {
     const id = newId();
-    const slug = randomSlug();
-    const accessToken = randomToken("tp");
+    const slug = params.slug ?? randomSlug();
+    const accessToken = params.accessToken ?? randomToken("tp");
     const expiresAt = params.ttlSec ? new Date(Date.now() + params.ttlSec * 1000) : null;
+    const tokenRequired = params.tokenRequired ?? true;
     const result = await this.pool.query<TunnelRecord>(
       `INSERT INTO tunnels (
-         id, user_id, workspace_id, agent_id, slug,
-         target_port, access_token_hash, status, expires_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8)
-       RETURNING id, user_id, workspace_id, agent_id, slug, target_port, access_token_hash, status`,
-      [id, params.userId, params.workspaceId, params.agentId, slug, params.targetPort, sha256(accessToken), expiresAt]
+         id, user_id, workspace_id, agent_id, service_id, slug,
+         target_port, access_token_hash, token_required, status, expires_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'open', $10)
+       RETURNING id, user_id, workspace_id, agent_id, service_id, slug, target_port, access_token_hash, token_required, status, expires_at, last_probe_at, last_probe_status, last_probe_error, last_probe_code`,
+      [
+        id,
+        params.userId,
+        params.workspaceId,
+        params.agentId,
+        params.serviceId ?? null,
+        slug,
+        params.targetPort,
+        sha256(accessToken),
+        tokenRequired,
+        expiresAt
+      ]
     );
     return { tunnel: result.rows[0], accessToken };
   }
 
   async listTunnels(userId: string, workspaceId: string): Promise<TunnelRecord[]> {
     const result = await this.pool.query<TunnelRecord>(
-      `SELECT id, user_id, workspace_id, agent_id, slug, target_port, access_token_hash, status
+      `SELECT id, user_id, workspace_id, agent_id, service_id, slug, target_port, access_token_hash, token_required, status, expires_at, last_probe_at, last_probe_status, last_probe_error, last_probe_code
        FROM tunnels
        WHERE user_id = $1 AND workspace_id = $2
        ORDER BY created_at DESC`,
@@ -559,9 +629,9 @@ export class Repositories {
     return result.rows;
   }
 
-  async findTunnelBySlug(slug: string): Promise<(TunnelRecord & { expires_at: Date | null }) | null> {
-    const result = await this.pool.query<TunnelRecord & { expires_at: Date | null }>(
-      `SELECT id, user_id, workspace_id, agent_id, slug, target_port, access_token_hash, status, expires_at
+  async findTunnelBySlug(slug: string): Promise<TunnelRecord | null> {
+    const result = await this.pool.query<TunnelRecord>(
+      `SELECT id, user_id, workspace_id, agent_id, service_id, slug, target_port, access_token_hash, token_required, status, expires_at, last_probe_at, last_probe_status, last_probe_error, last_probe_code
        FROM tunnels
        WHERE slug = $1`,
       [slug]
@@ -570,6 +640,327 @@ export class Repositories {
       return null;
     }
     return result.rows[0];
+  }
+
+  async findTunnelByIdForUser(userId: string, tunnelId: string): Promise<TunnelRecord | null> {
+    const result = await this.pool.query<TunnelRecord>(
+      `SELECT id, user_id, workspace_id, agent_id, service_id, slug, target_port, access_token_hash, token_required, status, expires_at, last_probe_at, last_probe_status, last_probe_error, last_probe_code
+       FROM tunnels
+       WHERE id = $1 AND user_id = $2`,
+      [tunnelId, userId]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      return null;
+    }
+    return result.rows[0];
+  }
+
+  async findOpenTunnelByService(serviceId: string): Promise<TunnelRecord | null> {
+    const result = await this.pool.query<TunnelRecord>(
+      `SELECT id, user_id, workspace_id, agent_id, service_id, slug, target_port, access_token_hash, token_required, status, expires_at, last_probe_at, last_probe_status, last_probe_error, last_probe_code
+       FROM tunnels
+       WHERE service_id = $1
+         AND status = 'open'
+         AND (expires_at IS NULL OR expires_at > NOW())
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [serviceId]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      return null;
+    }
+    return result.rows[0];
+  }
+
+  async updateTunnelToken(tunnelId: string, accessToken: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE tunnels
+       SET access_token_hash = $1, updated_at = NOW()
+       WHERE id = $2`,
+      [sha256(accessToken), tunnelId]
+    );
+  }
+
+  async updateTunnelStatus(tunnelId: string, status: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE tunnels
+       SET status = $1, updated_at = NOW()
+       WHERE id = $2`,
+      [status, tunnelId]
+    );
+  }
+
+  async updateTunnelProbe(params: {
+    tunnelId: string;
+    probeStatus: "ok" | "error" | "unknown";
+    probeCode?: number;
+    error?: string;
+  }): Promise<void> {
+    await this.pool.query(
+      `UPDATE tunnels
+       SET last_probe_at = NOW(),
+           last_probe_status = $1,
+           last_probe_code = $2,
+           last_probe_error = $3,
+           updated_at = NOW()
+       WHERE id = $4`,
+      [params.probeStatus, params.probeCode ?? null, params.error ?? null, params.tunnelId]
+    );
+  }
+
+  async deleteTunnel(tunnelId: string, userId: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `DELETE FROM tunnels
+       WHERE id = $1 AND user_id = $2`,
+      [tunnelId, userId]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async getWorkspaceDevSettings(userId: string, workspaceId: string): Promise<WorkspaceDevSettingsRecord | null> {
+    const workspace = await this.findWorkspaceById(userId, workspaceId);
+    if (!workspace) {
+      return null;
+    }
+    const result = await this.pool.query<WorkspaceDevSettingsRecord>(
+      `SELECT workspace_id, trusted_dev_mode, created_at, updated_at
+       FROM workspace_dev_settings
+       WHERE workspace_id = $1`,
+      [workspaceId]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      const inserted = await this.pool.query<WorkspaceDevSettingsRecord>(
+        `INSERT INTO workspace_dev_settings (workspace_id, trusted_dev_mode)
+         VALUES ($1, FALSE)
+         ON CONFLICT (workspace_id) DO UPDATE SET workspace_id = EXCLUDED.workspace_id
+         RETURNING workspace_id, trusted_dev_mode, created_at, updated_at`,
+        [workspaceId]
+      );
+      return inserted.rows[0] ?? null;
+    }
+    return result.rows[0];
+  }
+
+  async setWorkspaceDevSettings(params: {
+    userId: string;
+    workspaceId: string;
+    trustedDevMode: boolean;
+  }): Promise<WorkspaceDevSettingsRecord | null> {
+    const workspace = await this.findWorkspaceById(params.userId, params.workspaceId);
+    if (!workspace) {
+      return null;
+    }
+    const result = await this.pool.query<WorkspaceDevSettingsRecord>(
+      `INSERT INTO workspace_dev_settings (workspace_id, trusted_dev_mode)
+       VALUES ($1, $2)
+       ON CONFLICT (workspace_id) DO UPDATE
+       SET trusted_dev_mode = EXCLUDED.trusted_dev_mode,
+           updated_at = NOW()
+       RETURNING workspace_id, trusted_dev_mode, created_at, updated_at`,
+      [params.workspaceId, params.trustedDevMode]
+    );
+    return result.rows[0] ?? null;
+  }
+
+  async listDevServices(userId: string, workspaceId: string): Promise<DevServiceRecord[]> {
+    const workspace = await this.findWorkspaceById(userId, workspaceId);
+    if (!workspace) {
+      return [];
+    }
+    const result = await this.pool.query<
+      Omit<DevServiceRecord, "env_template" | "depends_on"> & {
+        env_template: Record<string, string> | null;
+        depends_on: string[] | null;
+      }
+    >(
+      `SELECT id, user_id, workspace_id, agent_id, name, role, command, cwd, port, health_path, env_template, depends_on, auto_tunnel, created_at, updated_at
+       FROM dev_services
+       WHERE user_id = $1 AND workspace_id = $2
+       ORDER BY created_at ASC`,
+      [userId, workspaceId]
+    );
+
+    return result.rows.map((row) => ({
+      ...row,
+      env_template: row.env_template ?? {},
+      depends_on: row.depends_on ?? []
+    }));
+  }
+
+  async findDevServiceById(userId: string, serviceId: string): Promise<DevServiceRecord | null> {
+    const result = await this.pool.query<
+      Omit<DevServiceRecord, "env_template" | "depends_on"> & {
+        env_template: Record<string, string> | null;
+        depends_on: string[] | null;
+      }
+    >(
+      `SELECT id, user_id, workspace_id, agent_id, name, role, command, cwd, port, health_path, env_template, depends_on, auto_tunnel, created_at, updated_at
+       FROM dev_services
+       WHERE id = $1 AND user_id = $2`,
+      [serviceId, userId]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      return null;
+    }
+    const row = result.rows[0];
+    return {
+      ...row,
+      env_template: row.env_template ?? {},
+      depends_on: row.depends_on ?? []
+    };
+  }
+
+  async createDevService(params: {
+    userId: string;
+    workspaceId: string;
+    agentId: string;
+    name: string;
+    role: string;
+    command: string;
+    cwd?: string | null;
+    port: number;
+    healthPath?: string;
+    envTemplate?: Record<string, string>;
+    dependsOn?: string[];
+    autoTunnel?: boolean;
+  }): Promise<DevServiceRecord> {
+    const id = newId();
+    const result = await this.pool.query<DevServiceRecord>(
+      `INSERT INTO dev_services (
+         id, user_id, workspace_id, agent_id, name, role, command, cwd, port,
+         health_path, env_template, depends_on, auto_tunnel
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13)
+       RETURNING id, user_id, workspace_id, agent_id, name, role, command, cwd, port, health_path, env_template, depends_on, auto_tunnel, created_at, updated_at`,
+      [
+        id,
+        params.userId,
+        params.workspaceId,
+        params.agentId,
+        params.name,
+        params.role,
+        params.command,
+        params.cwd ?? null,
+        params.port,
+        params.healthPath ?? "/",
+        JSON.stringify(params.envTemplate ?? {}),
+        JSON.stringify(params.dependsOn ?? []),
+        params.autoTunnel ?? true
+      ]
+    );
+    const runtime = await this.pool.query<DevServiceRuntimeRecord>(
+      `INSERT INTO dev_service_runtime (service_id, status)
+       VALUES ($1, 'stopped')
+       ON CONFLICT (service_id) DO NOTHING
+       RETURNING service_id, session_id, tunnel_id, status, last_error, updated_at`,
+      [id]
+    );
+    void runtime;
+    const created = result.rows[0];
+    return {
+      ...created,
+      env_template: (created.env_template as unknown as Record<string, string>) ?? {},
+      depends_on: (created.depends_on as unknown as string[]) ?? []
+    };
+  }
+
+  async updateDevService(params: {
+    userId: string;
+    serviceId: string;
+    name?: string;
+    role?: string;
+    command?: string;
+    cwd?: string | null;
+    port?: number;
+    healthPath?: string;
+    envTemplate?: Record<string, string>;
+    dependsOn?: string[];
+    autoTunnel?: boolean;
+  }): Promise<DevServiceRecord | null> {
+    const existing = await this.findDevServiceById(params.userId, params.serviceId);
+    if (!existing) {
+      return null;
+    }
+    const result = await this.pool.query<DevServiceRecord>(
+      `UPDATE dev_services
+       SET name = $1,
+           role = $2,
+           command = $3,
+           cwd = $4,
+           port = $5,
+           health_path = $6,
+           env_template = $7::jsonb,
+           depends_on = $8::jsonb,
+           auto_tunnel = $9,
+           updated_at = NOW()
+       WHERE id = $10 AND user_id = $11
+       RETURNING id, user_id, workspace_id, agent_id, name, role, command, cwd, port, health_path, env_template, depends_on, auto_tunnel, created_at, updated_at`,
+      [
+        params.name ?? existing.name,
+        params.role ?? existing.role,
+        params.command ?? existing.command,
+        params.cwd === undefined ? existing.cwd : params.cwd,
+        params.port ?? existing.port,
+        params.healthPath ?? existing.health_path,
+        JSON.stringify(params.envTemplate ?? existing.env_template),
+        JSON.stringify(params.dependsOn ?? existing.depends_on),
+        params.autoTunnel ?? existing.auto_tunnel,
+        params.serviceId,
+        params.userId
+      ]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      return null;
+    }
+    const updated = result.rows[0];
+    return {
+      ...updated,
+      env_template: (updated.env_template as unknown as Record<string, string>) ?? {},
+      depends_on: (updated.depends_on as unknown as string[]) ?? []
+    };
+  }
+
+  async getServiceRuntime(serviceId: string): Promise<DevServiceRuntimeRecord | null> {
+    const result = await this.pool.query<DevServiceRuntimeRecord>(
+      `SELECT service_id, session_id, tunnel_id, status, last_error, updated_at
+       FROM dev_service_runtime
+       WHERE service_id = $1`,
+      [serviceId]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      return null;
+    }
+    return result.rows[0];
+  }
+
+  async listServiceRuntimes(workspaceId: string): Promise<DevServiceRuntimeRecord[]> {
+    const result = await this.pool.query<DevServiceRuntimeRecord>(
+      `SELECT r.service_id, r.session_id, r.tunnel_id, r.status, r.last_error, r.updated_at
+       FROM dev_service_runtime r
+       JOIN dev_services s ON s.id = r.service_id
+       WHERE s.workspace_id = $1`,
+      [workspaceId]
+    );
+    return result.rows;
+  }
+
+  async upsertServiceRuntime(params: {
+    serviceId: string;
+    sessionId?: string | null;
+    tunnelId?: string | null;
+    status: string;
+    lastError?: string | null;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO dev_service_runtime (service_id, session_id, tunnel_id, status, last_error, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       ON CONFLICT (service_id) DO UPDATE
+       SET session_id = EXCLUDED.session_id,
+           tunnel_id = EXCLUDED.tunnel_id,
+           status = EXCLUDED.status,
+           last_error = EXCLUDED.last_error,
+           updated_at = NOW()`,
+      [params.serviceId, params.sessionId ?? null, params.tunnelId ?? null, params.status, params.lastError ?? null]
+    );
   }
 
   async writeAuditEvent(params: {
