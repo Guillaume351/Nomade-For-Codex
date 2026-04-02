@@ -98,6 +98,8 @@ export interface CodexRuntimeOptions {
   approvalPolicies: string[];
   sandboxModes: string[];
   reasoningEfforts: string[];
+  collaborationModes: Array<Record<string, unknown>>;
+  skills: Array<{ name: string; path: string }>;
   defaults: {
     model?: string;
     approvalPolicy?: string;
@@ -500,6 +502,31 @@ export class WsHub {
     ws.on("message", (raw) => {
       try {
         const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
+        if (msg.type === "conversation.server.response") {
+          const conversationId = String(msg.conversationId ?? "");
+          const turnId = String(msg.turnId ?? "");
+          const explicitAgentId = typeof msg.agentId === "string" ? msg.agentId : undefined;
+          const agentId = explicitAgentId ?? this.conversationAgent.get(conversationId);
+          if (!agentId) {
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                code: "conversation_unknown",
+                message: "Unknown conversation routing"
+              })
+            );
+            return;
+          }
+          if (turnId && conversationId) {
+            this.turnConversation.set(turnId, conversationId);
+          }
+          this.sendToAgent(agentId, {
+            ...msg,
+            agentId
+          });
+          return;
+        }
+
         if (msg.type === "session.create") {
           const agentId = String(msg.agentId ?? "");
           const sessionId = String(msg.sessionId ?? "");
@@ -813,12 +840,31 @@ export class WsHub {
       const toStringList = (value: unknown): string[] =>
         Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 
+      const collaborationModesRaw = Array.isArray(options.collaborationModes) ? options.collaborationModes : [];
+      const collaborationModes = collaborationModesRaw
+        .filter((entry) => typeof entry === "object" && entry !== null)
+        .map((entry) => entry as Record<string, unknown>);
+
+      const skillsRaw = Array.isArray(options.skills) ? options.skills : [];
+      const skills = skillsRaw
+        .filter((entry) => typeof entry === "object" && entry !== null)
+        .map((entry) => {
+          const value = entry as Record<string, unknown>;
+          return {
+            name: String(value.name ?? ""),
+            path: String(value.path ?? "")
+          };
+        })
+        .filter((entry) => entry.path.length > 0);
+
       const defaultsRaw = (options.defaults as Record<string, unknown> | undefined) ?? {};
       pending.resolve({
         models,
         approvalPolicies: toStringList(options.approvalPolicies),
         sandboxModes: toStringList(options.sandboxModes),
         reasoningEfforts: toStringList(options.reasoningEfforts),
+        collaborationModes,
+        skills,
         defaults: {
           model: typeof defaultsRaw.model === "string" ? defaultsRaw.model : undefined,
           approvalPolicy: typeof defaultsRaw.approvalPolicy === "string" ? defaultsRaw.approvalPolicy : undefined,
@@ -872,7 +918,7 @@ export class WsHub {
     }
 
     if (type === "conversation.turn.diff.updated") {
-      const conversationId = String(msg.conversationId ?? "");
+      const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
       const turnId = String(msg.turnId ?? "");
       const diff = String(msg.diff ?? "");
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
@@ -883,16 +929,36 @@ export class WsHub {
       return;
     }
 
-    if (type === "conversation.item.completed") {
-      const conversationId = String(msg.conversationId ?? "");
+    if (type === "conversation.item.started") {
       const turnId = String(msg.turnId ?? "");
+      const conversationId = String(msg.conversationId ?? this.turnConversation.get(turnId) ?? "");
       const itemId = String(msg.itemId ?? "");
       const itemType = String(msg.itemType ?? "unknown");
       const item = (msg.item as Record<string, unknown>) ?? {};
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
 
       if (turnId && itemId) {
-        void this.repositories.addConversationItem({
+        void this.repositories.upsertConversationItem({
+          turnId,
+          itemId,
+          itemType,
+          payload: item
+        });
+      }
+      this.broadcastToUser(userId, msg);
+      return;
+    }
+
+    if (type === "conversation.item.completed") {
+      const turnId = String(msg.turnId ?? "");
+      const conversationId = String(msg.conversationId ?? this.turnConversation.get(turnId) ?? "");
+      const itemId = String(msg.itemId ?? "");
+      const itemType = String(msg.itemType ?? "unknown");
+      const item = (msg.item as Record<string, unknown>) ?? {};
+      const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+
+      if (turnId && itemId) {
+        void this.repositories.upsertConversationItem({
           turnId,
           itemId,
           itemType,
@@ -904,14 +970,42 @@ export class WsHub {
     }
 
     if (type === "conversation.item.delta") {
-      const conversationId = String(msg.conversationId ?? "");
+      const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
+      const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+      this.broadcastToUser(userId, msg);
+      return;
+    }
+
+    if (type === "conversation.turn.plan.updated") {
+      const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
+      const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+      this.broadcastToUser(userId, msg);
+      return;
+    }
+
+    if (type === "conversation.thread.status.changed") {
+      const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
+      const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+      this.broadcastToUser(userId, msg);
+      return;
+    }
+
+    if (type === "conversation.thread.token_usage.updated") {
+      const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
+      const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+      this.broadcastToUser(userId, msg);
+      return;
+    }
+
+    if (type === "conversation.server.request" || type === "conversation.server.request.resolved") {
+      const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
       this.broadcastToUser(userId, msg);
       return;
     }
 
     if (type === "conversation.turn.completed") {
-      const conversationId = String(msg.conversationId ?? "");
+      const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
       const turnId = String(msg.turnId ?? "");
       const statusRaw = String(msg.status ?? "failed");
       const error = msg.error ? String(msg.error) : undefined;

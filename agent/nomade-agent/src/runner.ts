@@ -107,7 +107,15 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           conversationId: String(msg.conversationId ?? ""),
           turnId: String(msg.turnId ?? ""),
           threadId: msg.threadId ? String(msg.threadId) : undefined,
-          prompt: String(msg.prompt ?? ""),
+          prompt: msg.prompt ? String(msg.prompt) : undefined,
+          inputItems: Array.isArray(msg.inputItems)
+              ? msg.inputItems
+                  .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+              : undefined,
+          collaborationMode:
+            msg.collaborationMode && typeof msg.collaborationMode === "object"
+              ? (msg.collaborationMode as Record<string, unknown>)
+              : undefined,
           model: msg.model ? String(msg.model) : undefined,
           cwd: msg.cwd ? String(msg.cwd) : undefined,
           approvalPolicy: msg.approvalPolicy ? String(msg.approvalPolicy) as "untrusted" | "on-failure" | "on-request" | "never" : undefined,
@@ -115,6 +123,21 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
             msg.sandboxMode ? (String(msg.sandboxMode) as "read-only" | "workspace-write" | "danger-full-access") : undefined,
           effort:
             msg.effort ? (String(msg.effort) as "none" | "minimal" | "low" | "medium" | "high" | "xhigh") : undefined
+        });
+        return;
+      }
+
+      if (type === "conversation.server.response") {
+        const requestId = String(msg.requestId ?? "");
+        if (!requestId) {
+          return;
+        }
+        const error = typeof msg.error === "string" ? msg.error : undefined;
+        const result = msg.result;
+        conversationManager.resolveServerRequest({
+          requestId,
+          error,
+          result
         });
         return;
       }

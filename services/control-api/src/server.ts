@@ -51,6 +51,23 @@ const turnsNeedRepair = (
   return false;
 };
 
+const derivePromptFromInputItems = (inputItems: Array<Record<string, unknown>>): string => {
+  const textParts: string[] = [];
+  for (const item of inputItems) {
+    if (item.type !== "text") {
+      continue;
+    }
+    const text = typeof item.text === "string" ? item.text.trim() : "";
+    if (text.length > 0) {
+      textParts.push(text);
+    }
+  }
+  if (textParts.length > 0) {
+    return textParts.join("\n\n");
+  }
+  return "[non-text input]";
+};
+
 export const createServer = async (): Promise<http.Server> => {
   const config = loadConfig();
   const pool = createPool(config.databaseUrl);
@@ -867,14 +884,44 @@ export const createServer = async (): Promise<http.Server> => {
     const approvalPolicySchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
     const sandboxModeSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
     const reasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+    const inputItemSchema = z.discriminatedUnion("type", [
+      z.object({
+        type: z.literal("text"),
+        text: z.string().min(1)
+      }),
+      z.object({
+        type: z.literal("image"),
+        imageUrl: z.string().min(1),
+        detail: z.string().min(1).optional()
+      }),
+      z.object({
+        type: z.literal("local_image"),
+        path: z.string().min(1)
+      }),
+      z.object({
+        type: z.literal("skill"),
+        path: z.string().min(1),
+        name: z.string().min(1).optional()
+      }),
+      z.object({
+        type: z.literal("mention"),
+        path: z.string().min(1),
+        name: z.string().min(1).optional()
+      })
+    ]);
 
     const schema = z.object({
-      prompt: z.string().min(1),
+      prompt: z.string().min(1).optional(),
+      inputItems: z.array(inputItemSchema).min(1).optional(),
+      collaborationMode: z.record(z.unknown()).optional(),
       model: z.string().min(1).max(120).optional(),
       cwd: z.string().min(1).optional(),
       approvalPolicy: approvalPolicySchema.optional(),
       sandboxMode: sandboxModeSchema.optional(),
       effort: reasoningEffortSchema.optional()
+    }).refine((body) => Boolean(body.prompt || body.inputItems), {
+      message: "Either prompt or inputItems is required",
+      path: ["prompt"]
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -889,9 +936,12 @@ export const createServer = async (): Promise<http.Server> => {
     }
 
     const workspace = await repositories.findWorkspaceById(req.userId!, conversation.workspace_id);
+    const prompt = parsed.data.prompt?.trim();
+    const inputItems = parsed.data.inputItems as Array<Record<string, unknown>> | undefined;
+    const userPrompt = prompt && prompt.length > 0 ? prompt : derivePromptFromInputItems(inputItems ?? []);
     const turn = await repositories.createConversationTurn({
       conversationId: conversation.id,
-      prompt: parsed.data.prompt
+      prompt: userPrompt
     });
 
     wsHub.rememberConversationOwner(conversation.id, req.userId!, conversation.agent_id);
@@ -902,7 +952,9 @@ export const createServer = async (): Promise<http.Server> => {
       conversationId: conversation.id,
       turnId: turn.id,
       threadId: conversation.codex_thread_id ?? undefined,
-      prompt: parsed.data.prompt,
+      prompt: prompt,
+      inputItems,
+      collaborationMode: parsed.data.collaborationMode,
       model: parsed.data.model,
       cwd: parsed.data.cwd ?? workspace?.path,
       approvalPolicy: parsed.data.approvalPolicy,

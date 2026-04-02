@@ -556,12 +556,13 @@ export class Repositories {
     );
   }
 
-  async addConversationItem(params: {
+  async upsertConversationItem(params: {
     turnId: string;
     itemId: string;
     itemType: string;
     payload: Record<string, unknown>;
   }): Promise<void> {
+    const id = newId();
     await this.pool.query(
       `INSERT INTO conversation_items (id, turn_id, item_id, item_type, ordinal, payload)
        VALUES (
@@ -570,14 +571,36 @@ export class Repositories {
          $3,
          $4,
          (
-           SELECT COALESCE(MAX(ordinal), 0) + 1
-           FROM conversation_items
-           WHERE turn_id = $2
+           SELECT COALESCE(
+             (
+               SELECT ordinal
+               FROM conversation_items
+               WHERE turn_id = $2
+                 AND item_id = $3
+               LIMIT 1
+             ),
+             (
+               SELECT COALESCE(MAX(ordinal), 0) + 1
+               FROM conversation_items
+               WHERE turn_id = $2
+             )
+           )
          ),
          $5::jsonb
-       )`,
-      [newId(), params.turnId, params.itemId, params.itemType, JSON.stringify(params.payload)]
+       )
+       ON CONFLICT (turn_id, item_id)
+       DO UPDATE SET item_type = EXCLUDED.item_type, payload = EXCLUDED.payload`,
+      [id, params.turnId, params.itemId, params.itemType, JSON.stringify(params.payload)]
     );
+  }
+
+  async addConversationItem(params: {
+    turnId: string;
+    itemId: string;
+    itemType: string;
+    payload: Record<string, unknown>;
+  }): Promise<void> {
+    await this.upsertConversationItem(params);
   }
 
   async createTunnel(params: {

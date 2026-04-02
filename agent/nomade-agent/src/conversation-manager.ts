@@ -1,17 +1,23 @@
 import {
   CodexAppServerClient,
   type AppServerNotification,
+  type AppServerServerRequest,
+  type AppServerServerRequestResolution,
   type CodexApprovalPolicy,
+  type CodexCollaborationModeSummary,
   type CodexModelSummary,
   type CodexReasoningEffort,
-  type CodexSandboxMode
+  type CodexSandboxMode,
+  type CodexSkillSummary
 } from "./codex-app-server.js";
 
 interface ConversationTurnStartParams {
   conversationId: string;
   turnId: string;
   threadId?: string;
-  prompt: string;
+  prompt?: string;
+  inputItems?: Array<Record<string, unknown>>;
+  collaborationMode?: Record<string, unknown>;
   model?: string;
   cwd?: string;
   approvalPolicy?: CodexApprovalPolicy;
@@ -27,6 +33,14 @@ interface ConversationTurnInterruptParams {
 interface TurnContext {
   conversationId: string;
   turnId: string;
+}
+
+interface PendingServerRequest {
+  resolve: (value: AppServerServerRequestResolution) => void;
+  reject: (error: Error) => void;
+  context: TurnContext;
+  threadId: string;
+  codexTurnId: string;
 }
 
 export interface CodexThreadSummary {
@@ -65,6 +79,8 @@ export interface CodexRuntimeOptions {
   approvalPolicies: CodexApprovalPolicy[];
   sandboxModes: CodexSandboxMode[];
   reasoningEfforts: CodexReasoningEffort[];
+  collaborationModes: CodexCollaborationModeSummary[];
+  skills: CodexSkillSummary[];
   defaults: {
     model?: string;
     approvalPolicy?: CodexApprovalPolicy;
@@ -85,9 +101,13 @@ export class ConversationManager {
   private readonly turnByCodex = new Map<string, TurnContext>();
   private readonly codexByTurn = new Map<string, { threadId: string; codexTurnId: string }>();
   private readonly pendingTurnByThread = new Map<string, TurnContext>();
+  private readonly pendingServerRequests = new Map<string, PendingServerRequest>();
 
   constructor(private readonly emit: (payload: Record<string, unknown>) => void) {
-    this.codexClient = new CodexAppServerClient((notification) => this.onNotification(notification));
+    this.codexClient = new CodexAppServerClient(
+      (notification) => this.onNotification(notification),
+      (request) => this.onServerRequest(request)
+    );
   }
 
   async startTurn(params: ConversationTurnStartParams): Promise<void> {
@@ -122,6 +142,8 @@ export class ConversationManager {
           return await this.codexClient.turnStart({
             threadId,
             prompt: params.prompt,
+            inputItems: params.inputItems,
+            collaborationMode: params.collaborationMode,
             cwd: params.cwd,
             model: params.model,
             approvalPolicy: params.approvalPolicy,
@@ -196,6 +218,48 @@ export class ConversationManager {
       threadId: mapping.threadId,
       turnId: mapping.codexTurnId
     });
+  }
+
+  resolveServerRequest(params: {
+    requestId: string;
+    result?: unknown;
+    error?: string;
+  }): boolean {
+    const pending = this.pendingServerRequests.get(params.requestId);
+    if (!pending) {
+      return false;
+    }
+    this.pendingServerRequests.delete(params.requestId);
+    const resultRecord =
+      params.result && typeof params.result === "object"
+        ? (params.result as Record<string, unknown>)
+        : undefined;
+    const rawStatus = String(resultRecord?.status ?? resultRecord?.decision ?? "completed").toLowerCase();
+    const status = params.error
+      ? "failed"
+      : rawStatus === "declined"
+        ? "declined"
+        : rawStatus === "failed"
+          ? "failed"
+          : "completed";
+    this.emit({
+      type: "conversation.server.request.resolved",
+      conversationId: pending.context.conversationId,
+      turnId: pending.context.turnId,
+      threadId: pending.threadId,
+      codexTurnId: pending.codexTurnId,
+      requestId: params.requestId,
+      resolvedAt: new Date().toISOString(),
+      status,
+      result: params.result,
+      error: params.error
+    });
+    if (params.error && params.error.trim().length > 0) {
+      pending.resolve({ error: params.error });
+      return true;
+    }
+    pending.resolve({ result: params.result ?? {} });
+    return true;
   }
 
   async listThreads(params?: { limit?: number }): Promise<CodexThreadSummary[]> {
@@ -296,12 +360,14 @@ export class ConversationManager {
   async getRuntimeOptions(params?: { cwd?: string }): Promise<CodexRuntimeOptions> {
     await this.codexClient.start();
 
-    const [modelPage, config] = await Promise.all([
+    const [modelPage, config, collaborationModes, skills] = await Promise.all([
       this.codexClient.modelList({
         limit: 200,
         includeHidden: false
       }),
-      this.codexClient.configRead({ cwd: params?.cwd ?? null })
+      this.codexClient.configRead({ cwd: params?.cwd ?? null }),
+      this.codexClient.collaborationModeList({ cwd: params?.cwd ?? null }).catch(() => []),
+      params?.cwd ? this.codexClient.skillsList({ cwd: params.cwd }).catch(() => []) : Promise.resolve([])
     ]);
 
     const approvalRaw = config.approval_policy;
@@ -328,12 +394,85 @@ export class ConversationManager {
       approvalPolicies: codexApprovalPolicies,
       sandboxModes: codexSandboxModes,
       reasoningEfforts: codexReasoningEfforts,
+      collaborationModes,
+      skills,
       defaults
     };
   }
 
   close(): void {
+    for (const [requestId, pending] of this.pendingServerRequests.entries()) {
+      pending.reject(new Error(`server_request_cancelled:${requestId}`));
+    }
+    this.pendingServerRequests.clear();
     this.codexClient.close();
+  }
+
+  private onServerRequest(request: AppServerServerRequest): Promise<AppServerServerRequestResolution> {
+    const threadId = typeof request.params.threadId === "string" ? request.params.threadId : "";
+    const requestTurnId = typeof request.params.turnId === "string" ? request.params.turnId : "";
+    let inferredThreadId = "";
+
+    let context: TurnContext | undefined;
+    if (threadId && requestTurnId) {
+      context = this.turnByCodex.get(buildTurnKey(threadId, requestTurnId));
+    }
+    if (!context && threadId) {
+      context = this.pendingTurnByThread.get(threadId);
+    }
+    if (!context && requestTurnId) {
+      for (const [key, turnContext] of this.turnByCodex.entries()) {
+        const separator = key.indexOf(":");
+        if (separator <= 0) {
+          continue;
+        }
+        const candidateThreadId = key.substring(0, separator);
+        const candidateTurnId = key.substring(separator + 1);
+        if (candidateTurnId === requestTurnId) {
+          context = turnContext;
+          inferredThreadId = candidateThreadId;
+          break;
+        }
+      }
+    }
+
+    if (!context || context.conversationId.length === 0) {
+      return Promise.resolve({ error: "server_request_missing_turn_context" });
+    }
+
+    const mapping = this.codexByTurn.get(context.turnId);
+    const resolvedThreadId = threadId || mapping?.threadId || inferredThreadId;
+    const resolvedCodexTurnId = requestTurnId || mapping?.codexTurnId || "";
+    if (!resolvedThreadId || !resolvedCodexTurnId) {
+      return Promise.resolve({ error: "server_request_missing_runtime_context" });
+    }
+
+    const existing = this.pendingServerRequests.get(request.requestId);
+    if (existing) {
+      existing.reject(new Error(`server_request_replaced:${request.requestId}`));
+      this.pendingServerRequests.delete(request.requestId);
+    }
+
+    this.emit({
+      type: "conversation.server.request",
+      conversationId: context.conversationId,
+      turnId: context.turnId,
+      threadId: resolvedThreadId,
+      codexTurnId: resolvedCodexTurnId,
+      requestId: request.requestId,
+      method: request.method,
+      params: request.params
+    });
+
+    return new Promise<AppServerServerRequestResolution>((resolve, reject) => {
+      this.pendingServerRequests.set(request.requestId, {
+        resolve,
+        reject,
+        context,
+        threadId: resolvedThreadId,
+        codexTurnId: resolvedCodexTurnId
+      });
+    });
   }
 
   private onNotification(notification: AppServerNotification): void {
@@ -341,7 +480,12 @@ export class ConversationManager {
     const params = notification.params;
     const threadId = typeof params.threadId === "string" ? params.threadId : "";
     const codexTurnId = this.extractTurnId(method, params);
-    const context = threadId && codexTurnId ? this.turnByCodex.get(buildTurnKey(threadId, codexTurnId)) : undefined;
+    let context = threadId && codexTurnId ? this.turnByCodex.get(buildTurnKey(threadId, codexTurnId)) : undefined;
+    if (!context && threadId) {
+      context = this.pendingTurnByThread.get(threadId);
+    }
+    const mappedCodex = context ? this.codexByTurn.get(context.turnId) : undefined;
+    const effectiveCodexTurnId = codexTurnId || mappedCodex?.codexTurnId || "";
 
     if (method === "thread/started") {
       const thread = (params.thread as Record<string, unknown>) ?? {};
@@ -380,7 +524,7 @@ export class ConversationManager {
       return;
     }
 
-    if (!context || !threadId || !codexTurnId) {
+    if (!context || !threadId || !effectiveCodexTurnId) {
       return;
     }
 
@@ -390,8 +534,41 @@ export class ConversationManager {
         conversationId: context.conversationId,
         turnId: context.turnId,
         threadId,
-        codexTurnId,
+        codexTurnId: effectiveCodexTurnId,
         diff: String(params.diff ?? "")
+      });
+      return;
+    }
+
+    if (method === "turn/plan/updated") {
+      const plan = (params.plan as Record<string, unknown>) ?? {};
+      this.emit({
+        type: "conversation.turn.plan.updated",
+        conversationId: context.conversationId,
+        turnId: context.turnId,
+        threadId,
+        codexTurnId: effectiveCodexTurnId,
+        plan
+      });
+      return;
+    }
+
+    if (method === "item/started") {
+      const item = (params.item as Record<string, unknown>) ?? {};
+      const itemId = String(item.id ?? params.itemId ?? "");
+      const itemType = String(item.type ?? "unknown");
+      if (!itemId) {
+        return;
+      }
+      this.emit({
+        type: "conversation.item.started",
+        conversationId: context.conversationId,
+        turnId: context.turnId,
+        threadId,
+        codexTurnId: effectiveCodexTurnId,
+        itemId,
+        itemType,
+        item
       });
       return;
     }
@@ -408,7 +585,7 @@ export class ConversationManager {
         conversationId: context.conversationId,
         turnId: context.turnId,
         threadId,
-        codexTurnId,
+        codexTurnId: effectiveCodexTurnId,
         itemId,
         itemType,
         item
@@ -422,10 +599,13 @@ export class ConversationManager {
       method === "item/fileChange/outputDelta" ||
       method === "item/reasoning/textDelta" ||
       method === "item/reasoning/summaryTextDelta" ||
+      method === "item/reasoning/summaryPartAdded" ||
       method === "item/plan/delta"
     ) {
       const itemId = String(params.itemId ?? "");
-      const delta = String(params.delta ?? "");
+      const summaryPart = (params.part as Record<string, unknown> | undefined) ?? {};
+      const summaryPartText = typeof summaryPart.text === "string" ? summaryPart.text : "";
+      const delta = String(params.delta ?? summaryPartText);
       if (!itemId || !delta) {
         return;
       }
@@ -445,11 +625,62 @@ export class ConversationManager {
         conversationId: context.conversationId,
         turnId: context.turnId,
         threadId,
-        codexTurnId,
+        codexTurnId: effectiveCodexTurnId,
         itemId,
         stream,
         delta
       });
+      return;
+    }
+
+    if (method === "thread/status/changed") {
+      const thread = (params.thread as Record<string, unknown>) ?? {};
+      const status = String(params.status ?? thread.status ?? "unknown");
+      this.emit({
+        type: "conversation.thread.status.changed",
+        conversationId: context.conversationId,
+        turnId: context.turnId,
+        threadId,
+        codexTurnId: effectiveCodexTurnId,
+        status,
+        thread
+      });
+      return;
+    }
+
+    if (method === "thread/tokenUsage/updated") {
+      const tokenUsage = (params.tokenUsage as Record<string, unknown>) ?? {};
+      this.emit({
+        type: "conversation.thread.token_usage.updated",
+        conversationId: context.conversationId,
+        turnId: context.turnId,
+        threadId,
+        codexTurnId: effectiveCodexTurnId,
+        tokenUsage
+      });
+      return;
+    }
+
+    if (method === "serverRequest/resolved") {
+      const request = (params.request as Record<string, unknown>) ?? {};
+      const requestId = String(params.requestId ?? request.id ?? "");
+      const result = params.result;
+      const error = typeof params.error === "string" ? params.error : undefined;
+      const resolvedViaPending = requestId.length > 0 && this.resolveServerRequest({ requestId, result, error });
+      if (!resolvedViaPending) {
+        this.emit({
+          type: "conversation.server.request.resolved",
+          conversationId: context.conversationId,
+          turnId: context.turnId,
+          threadId,
+          codexTurnId: effectiveCodexTurnId,
+          requestId,
+          resolvedAt: new Date().toISOString(),
+          status: error ? "failed" : "completed",
+          result,
+          error
+        });
+      }
       return;
     }
 
@@ -467,7 +698,7 @@ export class ConversationManager {
         conversationId: context.conversationId,
         turnId: context.turnId,
         threadId,
-        codexTurnId,
+        codexTurnId: effectiveCodexTurnId,
         status,
         error: errorMessage
       });

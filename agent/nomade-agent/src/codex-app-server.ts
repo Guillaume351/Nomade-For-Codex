@@ -62,6 +62,14 @@ interface ModelListResult {
   nextCursor?: unknown;
 }
 
+interface CollaborationModeListResult {
+  data?: unknown;
+}
+
+interface SkillListResult {
+  data?: unknown;
+}
+
 interface ConfigReadResult {
   config?: unknown;
 }
@@ -69,6 +77,17 @@ interface ConfigReadResult {
 export interface AppServerNotification {
   method: string;
   params: Record<string, unknown>;
+}
+
+export interface AppServerServerRequest {
+  requestId: string;
+  method: string;
+  params: Record<string, unknown>;
+}
+
+export interface AppServerServerRequestResolution {
+  result?: unknown;
+  error?: string;
 }
 
 export type CodexApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
@@ -87,6 +106,18 @@ export interface CodexModelSummary {
     reasoningEffort: CodexReasoningEffort;
     description: string;
   }>;
+}
+
+export interface CodexCollaborationModeSummary {
+  slug: string;
+  label: string;
+  description: string;
+  value: Record<string, unknown>;
+}
+
+export interface CodexSkillSummary {
+  name: string;
+  path: string;
 }
 
 const toSandboxPolicy = (sandboxMode?: CodexSandboxMode): Record<string, unknown> | undefined => {
@@ -108,7 +139,12 @@ export class CodexAppServerClient {
   private readonly pending = new Map<number, PendingRequest>();
   private readonly threadStartLock = new Map<string, Promise<string>>();
 
-  constructor(private readonly onNotification: (notification: AppServerNotification) => void) {}
+  constructor(
+    private readonly onNotification: (notification: AppServerNotification) => void,
+    private readonly onServerRequest?: (
+      request: AppServerServerRequest
+    ) => Promise<AppServerServerRequestResolution>
+  ) {}
 
   async start(): Promise<void> {
     if (this.child) {
@@ -195,16 +231,29 @@ export class CodexAppServerClient {
 
   async turnStart(params: {
     threadId: string;
-    prompt: string;
+    prompt?: string;
+    inputItems?: Array<Record<string, unknown>>;
+    collaborationMode?: Record<string, unknown>;
     cwd?: string;
     model?: string;
     approvalPolicy?: CodexApprovalPolicy;
     sandboxMode?: CodexSandboxMode;
     effort?: CodexReasoningEffort;
   }): Promise<string> {
+    const inputItems =
+      Array.isArray(params.inputItems) && params.inputItems.length > 0
+        ? params.inputItems
+        : params.prompt
+          ? [{ type: "text", text: params.prompt }]
+          : [];
+    if (inputItems.length === 0) {
+      throw new Error("turn_start_missing_input");
+    }
+
     const response = (await this.request("turn/start", {
       threadId: params.threadId,
-      input: [{ type: "text", text: params.prompt }],
+      input: inputItems,
+      collaborationMode: params.collaborationMode,
       cwd: params.cwd,
       model: params.model,
       approvalPolicy: params.approvalPolicy ?? "never",
@@ -314,6 +363,44 @@ export class CodexAppServerClient {
     };
   }
 
+  async collaborationModeList(params?: { cwd?: string | null }): Promise<CodexCollaborationModeSummary[]> {
+    const response = (await this.request("collaborationMode/list", {
+      cwd: params?.cwd ?? null
+    })) as CollaborationModeListResult;
+    const rawModes = Array.isArray(response?.data) ? response.data : [];
+    return rawModes
+      .filter((entry) => typeof entry === "object" && entry !== null)
+      .map((entry) => {
+        const value = entry as Record<string, unknown>;
+        const rawSlug = typeof value.slug === "string" ? value.slug : "";
+        const rawLabel = typeof value.label === "string" ? value.label : rawSlug;
+        return {
+          slug: rawSlug,
+          label: rawLabel,
+          description: typeof value.description === "string" ? value.description : "",
+          value
+        };
+      })
+      .filter((entry) => entry.slug.length > 0);
+  }
+
+  async skillsList(params: { cwd: string }): Promise<CodexSkillSummary[]> {
+    const response = (await this.request("skills/list", {
+      cwd: params.cwd
+    })) as SkillListResult;
+    const rawSkills = Array.isArray(response?.data) ? response.data : [];
+    return rawSkills
+      .filter((entry) => typeof entry === "object" && entry !== null)
+      .map((entry) => {
+        const value = entry as Record<string, unknown>;
+        return {
+          name: typeof value.name === "string" ? value.name : "",
+          path: typeof value.path === "string" ? value.path : ""
+        };
+      })
+      .filter((entry) => entry.path.length > 0);
+  }
+
   async configRead(params?: { cwd?: string | null }): Promise<Record<string, unknown>> {
     const response = (await this.request("config/read", {
       cwd: params?.cwd ?? null,
@@ -361,15 +448,51 @@ export class CodexAppServerClient {
     }
 
     if (typeof idValue === "number" && typeof method === "string") {
-      // This is a server-initiated request; we currently don't support it.
-      this.writeJson({
-        jsonrpc: "2.0",
-        id: idValue,
-        error: {
-          code: -32601,
-          message: `Unsupported method: ${method}`
-        }
-      });
+      if (!this.onServerRequest) {
+        this.writeJson({
+          jsonrpc: "2.0",
+          id: idValue,
+          error: {
+            code: -32601,
+            message: `Unsupported method: ${method}`
+          }
+        });
+        return;
+      }
+
+      void this.onServerRequest({
+        requestId: String(idValue),
+        method,
+        params: (payload.params as Record<string, unknown>) ?? {}
+      })
+        .then((resolution) => {
+          if (resolution.error) {
+            this.writeJson({
+              jsonrpc: "2.0",
+              id: idValue,
+              error: {
+                code: -32000,
+                message: resolution.error
+              }
+            });
+            return;
+          }
+          this.writeJson({
+            jsonrpc: "2.0",
+            id: idValue,
+            result: resolution.result ?? {}
+          });
+        })
+        .catch((error) => {
+          this.writeJson({
+            jsonrpc: "2.0",
+            id: idValue,
+            error: {
+              code: -32000,
+              message: error instanceof Error ? error.message : "server_request_failed"
+            }
+          });
+        });
       return;
     }
 
