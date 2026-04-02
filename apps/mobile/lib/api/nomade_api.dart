@@ -313,14 +313,26 @@ class NomadeApi {
   Future<Map<String, dynamic>> createTurn({
     required String accessToken,
     required String conversationId,
-    required String prompt,
+    String? prompt,
+    List<Map<String, dynamic>>? inputItems,
+    Map<String, dynamic>? collaborationMode,
     String? model,
     String? cwd,
     String? approvalPolicy,
     String? sandboxMode,
     String? effort,
   }) async {
-    final body = <String, dynamic>{'prompt': prompt};
+    final body = <String, dynamic>{};
+    final trimmedPrompt = prompt?.trim() ?? '';
+    if (trimmedPrompt.isNotEmpty) {
+      body['prompt'] = trimmedPrompt;
+    }
+    if (inputItems != null && inputItems.isNotEmpty) {
+      body['inputItems'] = inputItems;
+    }
+    if (collaborationMode != null && collaborationMode.isNotEmpty) {
+      body['collaborationMode'] = collaborationMode;
+    }
     if (model != null && model.trim().isNotEmpty) {
       body['model'] = model.trim();
     }
@@ -335,6 +347,9 @@ class NomadeApi {
     }
     if (effort != null && effort.trim().isNotEmpty) {
       body['effort'] = effort.trim();
+    }
+    if (!body.containsKey('prompt') && !body.containsKey('inputItems')) {
+      throw ApiException('Either prompt or inputItems is required');
     }
 
     final response = await _send(
