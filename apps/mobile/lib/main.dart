@@ -36,7 +36,10 @@ class NomadeApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,
-      home: provider.isAuthenticated ? const HomeScreen() : const OnboardingScreen(),
+      themeMode: ThemeMode.system,
+      home: provider.isAuthenticated
+          ? const HomeScreen()
+          : const OnboardingScreen(),
     );
   }
 }
