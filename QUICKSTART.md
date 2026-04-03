@@ -2,7 +2,7 @@
 
 ## Fast path (one command)
 ```bash
-npm run dev:full -- you@example.com
+npm run dev:full
 ```
 - Starts Docker services
 - Authenticates your user
@@ -42,7 +42,7 @@ npm --workspace agent/nomade-agent run pair -- --server-url http://localhost:808
 npm run dev:agent:run
 ```
 
-Legacy API approval flow is still available only when `LEGACY_DEVICE_APPROVE_ENABLED=true`.
+In local dev, auth emails are logged by default (`AUTH_EMAIL_MODE=log`). Use Mailpit by setting `AUTH_EMAIL_MODE=smtp`, `AUTH_SMTP_HOST=mailpit`, `AUTH_SMTP_PORT=1025`.
 
 ## 4. Run Flutter app (macOS / iOS)
 ```bash

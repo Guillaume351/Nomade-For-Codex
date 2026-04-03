@@ -3,7 +3,7 @@
 ## Components
 - `services/control-api`:
   - Device code auth and refresh tokens
-  - Web activation/account UI, OIDC callback and Stripe webhook handling
+  - Web activation/account UI, Better Auth (`/api/auth/*`) and Stripe webhook handling
   - Agent pairing and registration
   - Workspaces, sessions, tunnels metadata in Postgres
   - Conversations + turns + items metadata in Postgres
@@ -23,7 +23,7 @@
 
 ## Data and control flow
 1. CLI starts device code login, shows user code + verification URL (QR-compatible).
-2. User approves code from web account session (`/web/activate`) backed by OIDC login.
+2. User approves code from web account session (`/web/activate`) backed by Better Auth login.
 3. CLI polls and stores access+refresh token.
 4. CLI requests pairing code; control-api enforces plan device limits.
 5. Agent registers with pairing code and receives `agentToken`.

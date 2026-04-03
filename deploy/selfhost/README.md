@@ -7,6 +7,10 @@ export INTERNAL_GATEWAY_SECRET="$(openssl rand -hex 32)"
 docker compose -f deploy/selfhost/docker-compose.yml up --build
 ```
 
+Auth rollout checklist (SMTP + Better Auth + DB migration):
+- `docs/auth-better-auth-checklist.md`
+- Manual SQL fallback: `deploy/selfhost/sql/2026-04-03-better-auth.sql`
+
 ## Pair an agent
 1. Login with device code (prints activation URL):
 ```bash

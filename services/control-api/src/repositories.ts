@@ -6,6 +6,14 @@ export interface User {
   email: string;
 }
 
+const defaultNameFromEmail = (email: string): string => {
+  const localPart = email.split("@")[0]?.trim() ?? "";
+  if (localPart.length > 0) {
+    return localPart.slice(0, 120);
+  }
+  return "Nomade User";
+};
+
 export interface UserEntitlements {
   userId: string;
   planCode: string;
@@ -246,8 +254,10 @@ export class Repositories {
     }
 
     const created = await this.pool.query<User>(
-      "INSERT INTO users (id, email) VALUES ($1, $2) RETURNING id, email",
-      [newId(), email]
+      `INSERT INTO users (id, email, name, email_verified, updated_at)
+       VALUES ($1, $2, $3, FALSE, NOW())
+       RETURNING id, email`,
+      [newId(), email, defaultNameFromEmail(email)]
     );
     await this.ensureUserBillingDefaults(created.rows[0].id);
     return created.rows[0];

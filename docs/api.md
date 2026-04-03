@@ -1,9 +1,9 @@
 # API Contract (v1)
 
 ## Public auth
+- `POST/GET /api/auth/*` Better Auth endpoints (email/password, email verification, password reset, magic link, optional social providers)
 - `POST /auth/device/start` -> `{ deviceCode, userCode, expiresAt, intervalSec, verificationUri, verificationUriComplete }`
 - `POST /auth/device/approve` body `{ userCode }` with authenticated web session (or Bearer token)
-  - legacy fallback body `{ userCode, email }` only when `LEGACY_DEVICE_APPROVE_ENABLED=true` (disabled by default)
 - `POST /auth/device/poll` body `{ deviceCode }` -> pending or `{ accessToken, refreshToken }`
 - `POST /auth/refresh` body `{ refreshToken }`
 - `POST /auth/logout` body `{ refreshToken }` (requires Bearer access token)

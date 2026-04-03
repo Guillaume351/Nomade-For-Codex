@@ -1,13 +1,15 @@
 import http from "node:http";
+import { type IncomingHttpHeaders } from "node:http";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
 import { sha256 } from "@nomade/shared";
+import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
 import { loadConfig } from "./config.js";
+import { createBetterAuthRuntime } from "./better-auth.js";
 import { createPool, ensureSchema } from "./db.js";
 import {
   DeviceLimitReachedError,
@@ -27,12 +29,8 @@ import {
   verifyStripeWebhookSignature
 } from "./billing.js";
 import {
-  clearSessionCookie,
-  createWebSessionToken,
   encodeHtml,
-  htmlPage,
-  readWebSession,
-  setSessionCookie
+  htmlPage
 } from "./web-session.js";
 import {
   buildTransportTunnelDiagnostic,
@@ -167,8 +165,6 @@ const derivePromptFromInputItems = (inputItems: Array<Record<string, unknown>>):
   return "[non-text input]";
 };
 
-const isSecureAppBaseUrl = (value: string): boolean => value.trim().toLowerCase().startsWith("https://");
-
 export const createServer = async (): Promise<http.Server> => {
   const config = loadConfig();
   const pool = createPool(config.databaseUrl);
@@ -176,24 +172,17 @@ export const createServer = async (): Promise<http.Server> => {
 
   const repositories = new Repositories(pool);
   const auth = new AuthService(config, repositories);
+  const betterAuthRuntime = createBetterAuthRuntime({ config, pool });
+  const betterAuthHandler = toNodeHandler(betterAuthRuntime.auth);
 
   const app = express();
   app.set("trust proxy", 1);
   app.use(helmet());
   app.use(cors());
+  app.all("/api/auth/*", async (req, res) => {
+    await betterAuthHandler(req, res);
+  });
   app.use(express.urlencoded({ extended: false }));
-
-  const webSessionCookieSecure = isSecureAppBaseUrl(config.appBaseUrl);
-  const oidcStateStore = new Map<string, { returnTo: string; createdAt: number }>();
-
-  const cleanOidcStates = (): void => {
-    const cutoff = Date.now() - 10 * 60 * 1000;
-    for (const [state, payload] of oidcStateStore.entries()) {
-      if (payload.createdAt < cutoff) {
-        oidcStateStore.delete(state);
-      }
-    }
-  };
 
   const readUserFromBearer = async (req: express.Request): Promise<{ userId: string; email: string } | null> => {
     const raw = req.header("authorization");
@@ -211,19 +200,20 @@ export const createServer = async (): Promise<http.Server> => {
   const readUserFromWebSession = async (
     req: express.Request
   ): Promise<{ userId: string; email: string } | null> => {
-    const claims = readWebSession({
-      req,
-      cookieName: config.webSessionCookieName,
-      jwtSecret: config.jwtSecret
-    });
-    if (!claims) {
+    try {
+      const session = await betterAuthRuntime.auth.api.getSession({
+        headers: fromNodeHeaders(req.headers as IncomingHttpHeaders),
+        query: {
+          disableRefresh: true
+        }
+      });
+      if (!session || !session.user?.id || !session.user.email) {
+        return null;
+      }
+      return { userId: session.user.id, email: session.user.email };
+    } catch {
       return null;
     }
-    const user = await repositories.getUserById(claims.sub);
-    if (!user) {
-      return null;
-    }
-    return { userId: user.id, email: user.email };
   };
 
   const resolveAnyUser = async (req: express.Request): Promise<{ userId: string; email: string } | null> => {
@@ -848,10 +838,15 @@ export const createServer = async (): Promise<http.Server> => {
     res.redirect("/web/account");
   });
 
+  const normalizeReturnTo = (input: unknown, fallback = "/web/account"): string => {
+    if (typeof input === "string" && input.startsWith("/")) {
+      return input;
+    }
+    return fallback;
+  };
+
   app.get("/web/login", async (req, res) => {
-    const returnTo = typeof req.query.returnTo === "string" && req.query.returnTo.startsWith("/")
-      ? req.query.returnTo
-      : "/web/account";
+    const returnTo = normalizeReturnTo(req.query.returnTo, "/web/account");
     const user = await readUserFromWebSession(req);
     if (user) {
       res.redirect(returnTo);
@@ -859,175 +854,354 @@ export const createServer = async (): Promise<http.Server> => {
     }
 
     const title = "Nomade Sign In";
-    if (config.oidcEnabled) {
-      const body = `
-        <h1>Sign in to Nomade</h1>
-        <p>Use your SSO account to continue.</p>
-        <div class="row">
-          <a href="/auth/oidc/start?returnTo=${encodeURIComponent(returnTo)}"><button>Continue with SSO</button></a>
-        </div>
-      `;
-      res.type("html").send(htmlPage({ title, body }));
-      return;
-    }
-
-    if (!config.devLoginEnabled) {
-      const body = `
-        <h1>Sign in unavailable</h1>
-        <p>OIDC is not configured on this deployment and development login is disabled.</p>
-      `;
-      res.status(503).type("html").send(htmlPage({ title, body }));
-      return;
-    }
-
+    const returnToEscaped = encodeHtml(returnTo);
+    const socialButtons = [
+      betterAuthRuntime.socialProviders.google
+        ? `<button type="button" data-social-provider="google">Continue with Google</button>`
+        : "",
+      betterAuthRuntime.socialProviders.apple
+        ? `<button type="button" data-social-provider="apple">Continue with Apple</button>`
+        : ""
+    ]
+      .filter((item) => item.length > 0)
+      .join("");
     const body = `
-      <h1>Development Login</h1>
-      <p>OIDC is not configured. This fallback is only enabled when <code>DEV_LOGIN_ENABLED=true</code>.</p>
-      <form method="post" action="/web/dev-login">
-        <input type="hidden" name="returnTo" value="${encodeHtml(returnTo)}" />
+      <h1>Sign in to Nomade</h1>
+      <p>Email verification is required before account access is granted.</p>
+      <form id="password-login-form">
+        <input type="hidden" name="returnTo" value="${returnToEscaped}" />
         <div class="row">
           <input type="email" name="email" placeholder="you@example.com" required />
+          <input type="password" name="password" placeholder="Password" required />
           <button type="submit">Sign in</button>
         </div>
       </form>
+      <p class="muted"><a href="/web/forgot-password">Forgot password?</a> · <a href="/web/signup?returnTo=${encodeURIComponent(returnTo)}">Create account</a></p>
+      <hr style="border:0;border-top:1px solid #e5e7eb;margin:18px 0;" />
+      <form id="magic-link-form">
+        <div class="row">
+          <input type="email" name="email" placeholder="you@example.com" required />
+          <button type="submit">Send magic link</button>
+        </div>
+      </form>
+      ${
+        socialButtons.length > 0
+          ? `<hr style="border:0;border-top:1px solid #e5e7eb;margin:18px 0;" />
+             <div class="row">${socialButtons}</div>`
+          : ""
+      }
+      <p id="auth-notice" class="muted" style="min-height:20px;"></p>
+      <script>
+        (() => {
+          const returnTo = ${JSON.stringify(returnTo)};
+          const notice = document.getElementById("auth-notice");
+          const setNotice = (message, isError = false) => {
+            notice.textContent = message;
+            notice.style.color = isError ? "#b91c1c" : "#6b7280";
+          };
+          const authPost = async (path, payload) => {
+            const response = await fetch(path, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              const message = typeof data.message === "string"
+                ? data.message
+                : typeof data.error === "string"
+                  ? data.error
+                  : "Authentication failed";
+              throw new Error(message);
+            }
+            return data;
+          };
+
+          document.getElementById("password-login-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const email = form.email.value.trim();
+            const password = form.password.value;
+            setNotice("Signing in...");
+            try {
+              await authPost("/api/auth/sign-in/email", {
+                email,
+                password,
+                callbackURL: new URL(returnTo, window.location.origin).toString(),
+                rememberMe: true
+              });
+              window.location.href = returnTo;
+            } catch (error) {
+              setNotice(error instanceof Error ? error.message : "Sign in failed", true);
+            }
+          });
+
+          document.getElementById("magic-link-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const email = form.email.value.trim();
+            setNotice("Sending magic link...");
+            try {
+              await authPost("/api/auth/sign-in/magic-link", {
+                email,
+                callbackURL: new URL(returnTo, window.location.origin).toString(),
+                errorCallbackURL: new URL("/web/login?returnTo=" + encodeURIComponent(returnTo), window.location.origin).toString()
+              });
+              setNotice("Magic link sent if the account exists.");
+            } catch (error) {
+              setNotice(error instanceof Error ? error.message : "Magic link failed", true);
+            }
+          });
+
+          document.querySelectorAll("[data-social-provider]").forEach((button) => {
+            button.addEventListener("click", async () => {
+              const provider = button.getAttribute("data-social-provider");
+              if (!provider) {
+                return;
+              }
+              setNotice("Redirecting...");
+              try {
+                const result = await authPost("/api/auth/sign-in/social", {
+                  provider,
+                  callbackURL: new URL(returnTo, window.location.origin).toString(),
+                  errorCallbackURL: new URL("/web/login?returnTo=" + encodeURIComponent(returnTo), window.location.origin).toString()
+                });
+                if (result.url) {
+                  window.location.href = result.url;
+                  return;
+                }
+                window.location.href = returnTo;
+              } catch (error) {
+                setNotice(error instanceof Error ? error.message : "Social sign-in failed", true);
+              }
+            });
+          });
+        })();
+      </script>
     `;
     res.type("html").send(htmlPage({ title, body }));
   });
 
-  app.post("/web/dev-login", async (req, res) => {
-    if (config.oidcEnabled || !config.devLoginEnabled) {
-      res.status(404).type("html").send(htmlPage({ title: "Not found", body: "<h1>Not found</h1>" }));
+  app.get("/web/signup", async (req, res) => {
+    const returnTo = normalizeReturnTo(req.query.returnTo, "/web/account");
+    const user = await readUserFromWebSession(req);
+    if (user) {
+      res.redirect(returnTo);
       return;
     }
-    const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
-    const returnTo =
-      typeof req.body.returnTo === "string" && req.body.returnTo.startsWith("/") ? req.body.returnTo : "/web/account";
-    if (!email || !email.includes("@")) {
-      res.status(400).type("html").send(htmlPage({ title: "Invalid email", body: "<h1>Invalid email</h1>" }));
-      return;
-    }
-    const user = await repositories.findOrCreateUserByEmail(email);
-    const sessionToken = createWebSessionToken({
-      userId: user.id,
-      email: user.email,
-      jwtSecret: config.jwtSecret,
-      ttlSec: config.webSessionTtlSec
-    });
-    setSessionCookie({
-      res,
-      cookieName: config.webSessionCookieName,
-      value: sessionToken,
-      ttlSec: config.webSessionTtlSec,
-      secure: webSessionCookieSecure
-    });
-    res.redirect(returnTo);
+    const body = `
+      <h1>Create your Nomade account</h1>
+      <p>Email verification is required before first sign-in.</p>
+      <form id="signup-form">
+        <div class="row">
+          <input type="text" name="name" placeholder="Full name" required />
+          <input type="email" name="email" placeholder="you@example.com" required />
+          <input type="password" name="password" placeholder="Password (8+ chars)" required />
+          <button type="submit">Create account</button>
+        </div>
+      </form>
+      <p class="muted"><a href="/web/login?returnTo=${encodeURIComponent(returnTo)}">Back to sign-in</a></p>
+      <p id="signup-notice" class="muted" style="min-height:20px;"></p>
+      <script>
+        (() => {
+          const returnTo = ${JSON.stringify(returnTo)};
+          const notice = document.getElementById("signup-notice");
+          const setNotice = (message, isError = false) => {
+            notice.textContent = message;
+            notice.style.color = isError ? "#b91c1c" : "#6b7280";
+          };
+          document.getElementById("signup-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            setNotice("Creating account...");
+            try {
+              const response = await fetch("/api/auth/sign-up/email", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  name: form.name.value.trim(),
+                  email: form.email.value.trim(),
+                  password: form.password.value,
+                  callbackURL: new URL(returnTo, window.location.origin).toString()
+                })
+              });
+              const data = await response.json().catch(() => ({}));
+              if (!response.ok) {
+                const message = typeof data.message === "string"
+                  ? data.message
+                  : typeof data.error === "string"
+                    ? data.error
+                    : "Unable to create account";
+                throw new Error(message);
+              }
+              setNotice("Account created. Check your email to verify your address.");
+            } catch (error) {
+              setNotice(error instanceof Error ? error.message : "Sign-up failed", true);
+            }
+          });
+        })();
+      </script>
+    `;
+    res.type("html").send(htmlPage({ title: "Nomade Sign Up", body }));
   });
 
-  app.get("/auth/oidc/start", (req, res) => {
-    if (!config.oidcEnabled) {
-      res.status(503).json({ error: "oidc_not_configured" });
-      return;
-    }
-    const returnTo = typeof req.query.returnTo === "string" && req.query.returnTo.startsWith("/")
-      ? req.query.returnTo
-      : "/web/account";
-    cleanOidcStates();
-    const state = randomBytes(16).toString("hex");
-    oidcStateStore.set(state, { returnTo, createdAt: Date.now() });
-
-    const authorizeUrl = new URL(config.oidcAuthorizationUrl!);
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("client_id", config.oidcClientId!);
-    authorizeUrl.searchParams.set("redirect_uri", config.oidcRedirectUrl!);
-    authorizeUrl.searchParams.set("scope", config.oidcScope);
-    authorizeUrl.searchParams.set("state", state);
-    res.redirect(authorizeUrl.toString());
+  app.get("/web/forgot-password", (_req, res) => {
+    const body = `
+      <h1>Forgot password</h1>
+      <p>Enter your email and we'll send a reset link.</p>
+      <form id="forgot-form">
+        <div class="row">
+          <input type="email" name="email" placeholder="you@example.com" required />
+          <button type="submit">Send reset link</button>
+        </div>
+      </form>
+      <p class="muted"><a href="/web/login">Back to sign-in</a></p>
+      <p id="forgot-notice" class="muted" style="min-height:20px;"></p>
+      <script>
+        (() => {
+          const notice = document.getElementById("forgot-notice");
+          const setNotice = (message, isError = false) => {
+            notice.textContent = message;
+            notice.style.color = isError ? "#b91c1c" : "#6b7280";
+          };
+          document.getElementById("forgot-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            setNotice("Sending reset link...");
+            try {
+              await fetch("/api/auth/request-password-reset", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  email: form.email.value.trim(),
+                  redirectTo: new URL("/web/reset-password", window.location.origin).toString()
+                })
+              });
+              setNotice("If the account exists, a reset link has been sent.");
+            } catch {
+              setNotice("If the account exists, a reset link has been sent.");
+            }
+          });
+        })();
+      </script>
+    `;
+    res.type("html").send(htmlPage({ title: "Forgot Password", body }));
   });
 
-  app.get("/auth/oidc/callback", async (req, res) => {
-    if (!config.oidcEnabled) {
-      res.status(503).json({ error: "oidc_not_configured" });
-      return;
-    }
-    const code = typeof req.query.code === "string" ? req.query.code : "";
-    const state = typeof req.query.state === "string" ? req.query.state : "";
-    const storedState = oidcStateStore.get(state);
-    oidcStateStore.delete(state);
+  app.get("/web/reset-password", (req, res) => {
+    const token = typeof req.query.token === "string" ? req.query.token : "";
+    const body = `
+      <h1>Reset password</h1>
+      <p>Choose a new password for your Nomade account.</p>
+      <form id="reset-form">
+        <input type="hidden" name="token" value="${encodeHtml(token)}" />
+        <div class="row">
+          <input type="password" name="newPassword" placeholder="New password" required />
+          <button type="submit">Update password</button>
+        </div>
+      </form>
+      <p class="muted"><a href="/web/login">Back to sign-in</a></p>
+      <p id="reset-notice" class="muted" style="min-height:20px;"></p>
+      <script>
+        (() => {
+          const notice = document.getElementById("reset-notice");
+          const setNotice = (message, isError = false) => {
+            notice.textContent = message;
+            notice.style.color = isError ? "#b91c1c" : "#6b7280";
+          };
+          document.getElementById("reset-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const token = form.token.value.trim();
+            if (!token) {
+              setNotice("Missing reset token.", true);
+              return;
+            }
+            setNotice("Updating password...");
+            try {
+              const response = await fetch("/api/auth/reset-password", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  token,
+                  newPassword: form.newPassword.value
+                })
+              });
+              const data = await response.json().catch(() => ({}));
+              if (!response.ok) {
+                const message = typeof data.message === "string"
+                  ? data.message
+                  : typeof data.error === "string"
+                    ? data.error
+                    : "Reset failed";
+                throw new Error(message);
+              }
+              window.location.href = "/web/login";
+            } catch (error) {
+              setNotice(error instanceof Error ? error.message : "Reset failed", true);
+            }
+          });
+        })();
+      </script>
+    `;
+    res.type("html").send(htmlPage({ title: "Reset Password", body }));
+  });
 
-    if (!code || !storedState) {
-      res.status(400).type("html").send(htmlPage({ title: "Invalid callback", body: "<h1>Invalid callback</h1>" }));
-      return;
-    }
-
-    try {
-      const tokenParams = new URLSearchParams();
-      tokenParams.set("grant_type", "authorization_code");
-      tokenParams.set("code", code);
-      tokenParams.set("redirect_uri", config.oidcRedirectUrl!);
-      tokenParams.set("client_id", config.oidcClientId!);
-      tokenParams.set("client_secret", config.oidcClientSecret!);
-
-      const tokenResponse = await fetch(config.oidcTokenUrl!, {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: tokenParams.toString()
-      });
-      if (!tokenResponse.ok) {
-        const detail = await tokenResponse.text();
-        throw new Error(`oidc_token_exchange_failed:${tokenResponse.status}:${detail}`);
-      }
-
-      const tokenPayload = (await tokenResponse.json()) as Record<string, unknown>;
-      const accessToken = typeof tokenPayload.access_token === "string" ? tokenPayload.access_token : "";
-      if (!accessToken) {
-        throw new Error("oidc_access_token_missing");
-      }
-
-      const userInfoResponse = await fetch(config.oidcUserInfoUrl!, {
-        headers: { authorization: `Bearer ${accessToken}` }
-      });
-      if (!userInfoResponse.ok) {
-        const detail = await userInfoResponse.text();
-        throw new Error(`oidc_userinfo_failed:${userInfoResponse.status}:${detail}`);
-      }
-      const userInfo = (await userInfoResponse.json()) as Record<string, unknown>;
-      const email = typeof userInfo.email === "string" ? userInfo.email.trim().toLowerCase() : "";
-
-      if (!email) {
-        throw new Error("oidc_email_missing_in_userinfo");
-      }
-
-      const user = await repositories.findOrCreateUserByEmail(email);
-      const sessionToken = createWebSessionToken({
-        userId: user.id,
-        email: user.email,
-        jwtSecret: config.jwtSecret,
-        ttlSec: config.webSessionTtlSec
-      });
-      setSessionCookie({
-        res,
-        cookieName: config.webSessionCookieName,
-        value: sessionToken,
-        ttlSec: config.webSessionTtlSec,
-        secure: webSessionCookieSecure
-      });
-      res.redirect(storedState.returnTo);
-    } catch (error) {
-      console.error("[control-api] oidc callback failed", error);
-      res
-        .status(500)
-        .type("html")
-        .send(htmlPage({ title: "Sign in failed", body: "<h1>Sign in failed</h1><p>Try again in a moment.</p>" }));
-    }
+  app.get("/web/verify-email", (req, res) => {
+    const token = typeof req.query.token === "string" ? req.query.token : "";
+    const returnTo = normalizeReturnTo(req.query.returnTo, "/web/account");
+    const body = `
+      <h1>Verify your email</h1>
+      <p>Verifying your email address...</p>
+      <p id="verify-notice" class="muted" style="min-height:20px;"></p>
+      <script>
+        (() => {
+          const token = ${JSON.stringify(token)};
+          const returnTo = ${JSON.stringify(returnTo)};
+          const notice = document.getElementById("verify-notice");
+          const setNotice = (message, isError = false) => {
+            notice.textContent = message;
+            notice.style.color = isError ? "#b91c1c" : "#6b7280";
+          };
+          if (!token) {
+            setNotice("Missing verification token.", true);
+            return;
+          }
+          const callbackURL = new URL(returnTo, window.location.origin).toString();
+          fetch("/api/auth/verify-email?token=" + encodeURIComponent(token) + "&callbackURL=" + encodeURIComponent(callbackURL))
+            .then(async (response) => {
+              const data = await response.json().catch(() => ({}));
+              if (!response.ok) {
+                const message = typeof data.message === "string"
+                  ? data.message
+                  : typeof data.error === "string"
+                    ? data.error
+                    : "Verification failed";
+                throw new Error(message);
+              }
+              window.location.href = returnTo;
+            })
+            .catch((error) => {
+              setNotice(error instanceof Error ? error.message : "Verification failed", true);
+            });
+        })();
+      </script>
+    `;
+    res.type("html").send(htmlPage({ title: "Verify Email", body }));
   });
 
   app.get("/web/logout", (_req, res) => {
-    clearSessionCookie({
-      res,
-      cookieName: config.webSessionCookieName,
-      secure: webSessionCookieSecure
-    });
-    res.redirect("/web/login");
+    const body = `
+      <h1>Signing out</h1>
+      <p>Ending your session...</p>
+      <script>
+        fetch("/api/auth/sign-out", { method: "POST" })
+          .finally(() => {
+            window.location.href = "/web/login";
+          });
+      </script>
+    `;
+    res.type("html").send(htmlPage({ title: "Sign out", body }));
   });
 
   app.get("/web/activate", async (req, res) => {
@@ -1254,8 +1428,7 @@ export const createServer = async (): Promise<http.Server> => {
       return;
     }
     const schema = z.object({
-      userCode: z.string().min(4),
-      email: z.string().email().optional()
+      userCode: z.string().min(4)
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -1263,12 +1436,7 @@ export const createServer = async (): Promise<http.Server> => {
       return;
     }
 
-    let user = await resolveAnyUser(req);
-    if (!user && config.legacyDeviceApproveEnabled && parsed.data.email) {
-      const fallback = await repositories.findOrCreateUserByEmail(parsed.data.email);
-      user = { userId: fallback.id, email: fallback.email };
-    }
-
+    const user = await resolveAnyUser(req);
     if (!user) {
       res.status(401).json({ error: "auth_required" });
       return;

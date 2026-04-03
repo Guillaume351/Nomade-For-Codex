@@ -17,7 +17,6 @@ need_cmd npm
 need_cmd fvm
 
 API_URL="${NOMADE_API_URL:-http://localhost:8080}"
-EMAIL="${1:-${NOMADE_DEV_EMAIL:-}}"
 DEVICE="${NOMADE_FLUTTER_DEVICE:-}"
 FORCE_PAIR="${NOMADE_FORCE_PAIR:-0}"
 CONFIG_PATH="${NOMADE_AGENT_CONFIG_PATH:-$HOME/.config/nomade-agent/config.json}"
@@ -25,12 +24,6 @@ DEV_DIR="$ROOT_DIR/.dev"
 AGENT_PID_FILE="$DEV_DIR/agent.pid"
 AGENT_LOG_FILE="$DEV_DIR/agent.log"
 AGENT_RESTARTED=0
-
-if [[ -z "$EMAIL" ]]; then
-  echo "Usage: npm run dev:full -- <email>" >&2
-  echo "or set NOMADE_DEV_EMAIL in your environment." >&2
-  exit 1
-fi
 
 root_tsx_bin="$ROOT_DIR/node_modules/.bin/tsx"
 agent_tsx_bin="$ROOT_DIR/agent/nomade-agent/node_modules/.bin/tsx"
@@ -64,8 +57,7 @@ if ! (
 fi
 
 echo "[dev:full] starting docker stack..."
-echo "[dev:full] enabling dev-only login fallbacks for local bootstrap..."
-DEV_LOGIN_ENABLED=1 LEGACY_DEVICE_APPROVE_ENABLED=1 npm run dev:up >/dev/null
+npm run dev:up >/dev/null
 
 echo "[dev:full] waiting for control API at $API_URL..."
 for _ in $(seq 1 90); do
@@ -79,18 +71,25 @@ if ! curl -sf "$API_URL/health" >/dev/null; then
   exit 1
 fi
 
-echo "[dev:full] authenticating as $EMAIL..."
+echo "[dev:full] starting browser-based login..."
 start_payload="$(curl -sfX POST "$API_URL/auth/device/start")"
 device_code="$(jq -r '.deviceCode // empty' <<<"$start_payload")"
 user_code="$(jq -r '.userCode // empty' <<<"$start_payload")"
+verification_url="$(jq -r '.verificationUriComplete // empty' <<<"$start_payload")"
 if [[ -z "$device_code" || -z "$user_code" ]]; then
   echo "Failed to start device code flow: $start_payload" >&2
   exit 1
 fi
 
-curl -sfX POST "$API_URL/auth/device/approve" \
-  -H 'content-type: application/json' \
-  -d "{\"userCode\":\"$user_code\",\"email\":\"$EMAIL\"}" >/dev/null
+echo "[dev:full] user code: $user_code"
+if [[ -n "$verification_url" ]]; then
+  echo "[dev:full] open this URL to approve login: $verification_url"
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$verification_url" >/dev/null 2>&1 || true
+  elif command -v open >/dev/null 2>&1; then
+    open "$verification_url" >/dev/null 2>&1 || true
+  fi
+fi
 
 access_token=""
 for _ in $(seq 1 45); do
@@ -226,7 +225,7 @@ fi
 
 if [[ -z "$DEVICE" ]]; then
   echo "No Flutter device found. Set NOMADE_FLUTTER_DEVICE and retry." >&2
-  echo "Example: NOMADE_FLUTTER_DEVICE=chrome npm run dev:full -- $EMAIL" >&2
+  echo "Example: NOMADE_FLUTTER_DEVICE=chrome npm run dev:full" >&2
   exit 1
 fi
 
@@ -234,6 +233,4 @@ echo "[dev:full] launching Flutter app on $DEVICE..."
 cd "$ROOT_DIR/apps/mobile"
 fvm flutter pub get >/dev/null
 exec fvm flutter run -d "$DEVICE" \
-  --dart-define="NOMADE_API_URL=$API_URL" \
-  --dart-define="NOMADE_DEV_EMAIL=$EMAIL" \
-  --dart-define="NOMADE_DEV_AUTO_LOGIN=true"
+  --dart-define="NOMADE_API_URL=$API_URL"

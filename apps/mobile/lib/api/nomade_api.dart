@@ -76,20 +76,6 @@ class NomadeApi {
     return _decodeObject(response);
   }
 
-  Future<Map<String, dynamic>> approveDeviceCode({
-    required String userCode,
-    required String email,
-  }) async {
-    final response = await _send(
-      () => http.post(
-        _uri('/auth/device/approve'),
-        headers: {'content-type': 'application/json'},
-        body: jsonEncode({'userCode': userCode, 'email': email}),
-      ),
-    );
-    return _decodeObject(response);
-  }
-
   Future<Map<String, dynamic>> approveScanSecure({
     required String accessToken,
     String? scanPayload,

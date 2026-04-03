@@ -2,10 +2,13 @@
 
 This guide explains how to use Nomade from your machine against a remote deployed server (not `localhost`).
 
+Auth deployment checklist (env + SMTP + DB migration):
+- [`docs/auth-better-auth-checklist.md`](./auth-better-auth-checklist.md)
+
 ## Prerequisites
 - Node.js 20+ and npm.
 - Network access to your deployed control API URL (for example `https://app.example.com`).
-- A user account on that deployed instance (OIDC or allowed login flow).
+- A user account on that deployed instance (Better Auth email/password or enabled social login).
 - No extra system package is required for QR display (rendered by the CLI itself).
 
 ## 1) Set the server URL
@@ -113,10 +116,6 @@ fvm flutter run -d <ios-device-id> --dart-define NOMADE_API_URL=https://app.exam
    - Create/select a workspace.
    - Create/select a conversation and send prompts.
 
-### Important auth note (current mobile build)
-Current mobile login screen calls `POST /auth/device/approve` with `{ userCode, email }`.
-This works only if:
-- `LEGACY_DEVICE_APPROVE_ENABLED=true`, or
-- mobile login is updated to an authenticated web/OIDC approval flow.
-
-With hardened SaaS defaults (`LEGACY_DEVICE_APPROVE_ENABLED=false`), current mobile login may fail until mobile auth is migrated.
+### Mobile auth note
+Mobile login opens `verificationUriComplete` in the browser and polls `/auth/device/poll` until approved.
+No legacy `{ userCode, email }` approve call is required.

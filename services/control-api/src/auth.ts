@@ -92,11 +92,6 @@ export class AuthService {
     }
   }
 
-  async approveDeviceCode(params: { userCode: string; email: string }): Promise<boolean> {
-    const user = await this.repositories.findOrCreateUserByEmail(params.email);
-    return this.repositories.approveDeviceCode(params.userCode, user.id);
-  }
-
   async pollDeviceCode(deviceCode: string): Promise<
     | { status: "pending" }
     | { status: "pending_scan" }

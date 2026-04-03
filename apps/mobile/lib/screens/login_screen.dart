@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../providers/nomade_provider.dart';
 import 'home_screen.dart';
@@ -13,26 +14,12 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final _emailController = TextEditingController();
   bool _isLoading = false;
   String? _userCode;
+  String? _verificationUri;
   bool _showCode = false;
 
-  @override
-  void dispose() {
-    _emailController.dispose();
-    super.dispose();
-  }
-
   Future<void> _handleLogin() async {
-    final email = _emailController.text.trim();
-    if (email.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter your account email first.')),
-      );
-      return;
-    }
-
     final provider = context.read<NomadeProvider>();
     setState(() => _isLoading = true);
 
@@ -44,11 +31,16 @@ class _LoginScreenState extends State<LoginScreen> {
 
       setState(() {
         _userCode = res['userCode'];
+        _verificationUri = res['verificationUriComplete'];
         _showCode = true;
-        _isLoading = false;
       });
 
-      await provider.approveAndPoll(email);
+      await _openVerificationPage();
+      await provider.waitForBrowserApproval();
+      if (!mounted) {
+        return;
+      }
+      setState(() => _isLoading = false);
 
       if (mounted && provider.isAuthenticated) {
         Navigator.pushReplacement(
@@ -64,6 +56,18 @@ class _LoginScreenState extends State<LoginScreen> {
         SnackBar(content: Text('Login failed: $e')),
       );
       setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _openVerificationPage() async {
+    final raw = _verificationUri?.trim() ?? '';
+    final uri = Uri.tryParse(raw);
+    if (uri == null) {
+      throw Exception('Invalid verification URL');
+    }
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!launched) {
+      throw Exception('Unable to open browser');
     }
   }
 
@@ -143,7 +147,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     duration: const Duration(milliseconds: 250),
                     child: _showCode
                         ? _buildCodeStep(context)
-                        : _buildEmailStep(context),
+                        : _buildStartStep(context),
                   ),
                 ),
               ),
@@ -154,7 +158,7 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  Widget _buildEmailStep(BuildContext context) {
+  Widget _buildStartStep(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final provider = context.watch<NomadeProvider>();
@@ -186,7 +190,7 @@ class _LoginScreenState extends State<LoginScreen> {
         ),
         const SizedBox(height: 10),
         Text(
-          'Enter the email linked to your account. You will receive a short login code to confirm access.',
+          'Open your browser to confirm login, then come back here while we complete authorization.',
           style: theme.textTheme.bodyMedium?.copyWith(
             color: scheme.onSurfaceVariant,
             height: 1.45,
@@ -209,18 +213,6 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
           ),
         const SizedBox(height: 22),
-        TextField(
-          controller: _emailController,
-          keyboardType: TextInputType.emailAddress,
-          textInputAction: TextInputAction.done,
-          onSubmitted: (_) => _isLoading ? null : _handleLogin(),
-          decoration: const InputDecoration(
-            labelText: 'Email address',
-            hintText: 'you@company.com',
-            prefixIcon: Icon(Icons.alternate_email_rounded),
-          ),
-        ),
-        const SizedBox(height: 18),
         FilledButton(
           onPressed: _isLoading ? null : _handleLogin,
           child: _isLoading
@@ -229,7 +221,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   width: 18,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
-              : const Text('Request login code'),
+              : const Text('Open browser login'),
         ),
         const SizedBox(height: 12),
         OutlinedButton.icon(
@@ -258,7 +250,7 @@ class _LoginScreenState extends State<LoginScreen> {
         ),
         const SizedBox(height: 10),
         Text(
-          'Use this temporary code in the authentication page opened by your browser.',
+          'Use this temporary code in your browser if prompted, then approve access.',
           style: theme.textTheme.bodyMedium?.copyWith(
             color: scheme.onSurfaceVariant,
             height: 1.45,
@@ -289,6 +281,11 @@ class _LoginScreenState extends State<LoginScreen> {
             color: scheme.onSurfaceVariant,
           ),
           textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 10),
+        OutlinedButton(
+          onPressed: _verificationUri == null ? null : _openVerificationPage,
+          child: const Text('Open browser again'),
         ),
         const SizedBox(height: 14),
         ClipRRect(

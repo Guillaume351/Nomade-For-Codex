@@ -2657,7 +2657,22 @@ class NomadeProvider with ChangeNotifier {
     final started = await api.startDeviceCode();
     deviceCode = started['deviceCode'] as String;
     userCode = started['userCode'] as String;
-    return {'userCode': userCode!, 'deviceCode': deviceCode!};
+    final verificationUriComplete =
+        started['verificationUriComplete']?.toString().trim() ?? '';
+    final verificationUri = started['verificationUri']?.toString().trim() ?? '';
+    final fallbackVerificationUri = verificationUri.isNotEmpty
+        ? verificationUri
+        : '${api.baseUrl.replaceAll(RegExp(r'/$'), '')}/web/activate';
+    final launchUrl = verificationUriComplete.isNotEmpty
+        ? verificationUriComplete
+        : '$fallbackVerificationUri?user_code=${Uri.encodeComponent(userCode!)}';
+    status = 'Awaiting browser authorization...';
+    notifyListeners();
+    return {
+      'userCode': userCode!,
+      'deviceCode': deviceCode!,
+      'verificationUriComplete': launchUrl,
+    };
   }
 
   Future<void> approveSecureScan({
@@ -2777,11 +2792,10 @@ class NomadeProvider with ChangeNotifier {
     throw Exception('scan_key_exchange_timeout');
   }
 
-  Future<void> approveAndPoll(String email) async {
-    if (userCode == null || deviceCode == null) return;
-
-    await api.approveDeviceCode(userCode: userCode!, email: email);
-
+  Future<void> waitForBrowserApproval() async {
+    if (deviceCode == null) {
+      throw Exception('device_code_missing');
+    }
     while (true) {
       final polled = await api.pollDeviceCode(deviceCode!);
       final pollStatus = polled['status'] as String? ?? 'pending';

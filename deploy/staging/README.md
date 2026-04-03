@@ -2,6 +2,9 @@
 
 This setup deploys prebuilt images from GHCR.
 
+Before deployment, complete:
+- `docs/auth-better-auth-checklist.md`
+
 ## 1) GitHub setup (once)
 - In GitHub: `Settings -> Actions -> General -> Workflow permissions`
 - Enable `Read and write permissions` (required for publishing to GHCR).
