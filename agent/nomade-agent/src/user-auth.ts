@@ -1,20 +1,37 @@
 import fs from "node:fs/promises";
 import { spawn } from "node:child_process";
+import os from "node:os";
+import { randomBytes } from "node:crypto";
 import QRCode from "qrcode";
+import {
+  deriveSharedSecret,
+  encryptScanBundle,
+  generateDeviceKeyMaterial,
+  generateExchangeKeyPair,
+  toBase64Url
+} from "@nomade/shared";
 import { z } from "zod";
 import { defaultSessionPath, readUserSession, writeUserSession, type UserSessionConfig } from "./config.js";
 
 const deviceStartSchema = z.object({
   deviceCode: z.string(),
   userCode: z.string(),
+  mode: z.enum(["legacy", "scan_secure"]).optional(),
   expiresAt: z.string(),
   intervalSec: z.number().int().positive().optional(),
   verificationUri: z.string().optional(),
-  verificationUriComplete: z.string().optional()
+  verificationUriComplete: z.string().optional(),
+  scanPayload: z.string().optional(),
+  scanShortCode: z.string().optional()
 });
 
 const devicePollSchema = z.object({
   status: z.string(),
+  mobileDeviceId: z.string().optional().nullable(),
+  mobileEncPublicKey: z.string().optional().nullable(),
+  mobileSignPublicKey: z.string().optional().nullable(),
+  mobileExchangePublicKey: z.string().optional().nullable(),
+  hostBundleReady: z.boolean().optional(),
   accessToken: z.string().optional(),
   refreshToken: z.string().optional(),
   expiresInSec: z.number().int().positive().optional()
@@ -131,6 +148,7 @@ const saveSession = async (params: {
   refreshToken: string;
   expiresInSec: number;
   email?: string;
+  e2e?: UserSessionConfig["e2e"];
 }): Promise<UserSessionConfig> => {
   const expiresAt = new Date(Date.now() + Math.max(60, params.expiresInSec) * 1000).toISOString();
   const value: UserSessionConfig = {
@@ -138,7 +156,8 @@ const saveSession = async (params: {
     accessToken: params.accessToken,
     refreshToken: params.refreshToken,
     expiresAt,
-    email: params.email
+    email: params.email,
+    e2e: params.e2e
   };
   await writeUserSession(params.sessionPath, value);
   return value;
@@ -171,7 +190,8 @@ export const ensureSession = async (params: {
     accessToken: refreshed.accessToken,
     refreshToken: refreshed.refreshToken,
     expiresInSec: refreshed.expiresInSec,
-    email: me?.email ?? session.email
+    email: me?.email ?? session.email,
+    e2e: session.e2e
   });
 };
 
@@ -182,7 +202,23 @@ export const loginWithDeviceCode = async (params: {
 }): Promise<void> => {
   const serverUrl = params.serverUrl.replace(/\/$/, "");
   const sessionPath = params.sessionPath ?? defaultSessionPath();
-  const startResponse = await fetch(`${serverUrl}/auth/device/start`, { method: "POST" });
+  const hostDevice = generateDeviceKeyMaterial();
+  const exchangeKeyPair = generateExchangeKeyPair();
+  const startResponse = await fetch(`${serverUrl}/auth/device/start`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      mode: "scan_secure",
+      hostDevice: {
+        deviceId: hostDevice.deviceId,
+        name: os.hostname(),
+        platform: process.platform,
+        encPublicKey: hostDevice.encPublicKey,
+        signPublicKey: hostDevice.signPublicKey,
+        exchangePublicKey: exchangeKeyPair.publicKey
+      }
+    })
+  });
   if (!startResponse.ok) {
     const err = await parseApiError(startResponse);
     throw new Error(`login_start_failed:${err.message}`);
@@ -191,16 +227,30 @@ export const loginWithDeviceCode = async (params: {
   const verificationUri = started.verificationUri ?? `${serverUrl}/web/activate`;
   const verificationUriComplete =
     started.verificationUriComplete ?? `${verificationUri}?user_code=${encodeURIComponent(started.userCode)}`;
+  const secureScanUri =
+    started.mode === "scan_secure" && started.scanPayload
+      ? `nomade://scan?server=${encodeURIComponent(serverUrl)}&scan_payload=${encodeURIComponent(started.scanPayload)}${
+          started.scanShortCode ? `&short_code=${encodeURIComponent(started.scanShortCode)}` : ""
+        }`
+      : verificationUriComplete;
 
   console.log("");
   console.log("Nomade device login");
   console.log("-------------------");
   console.log(`User code: ${started.userCode}`);
+  if (started.mode === "scan_secure") {
+    console.log("Scan the QR in the mobile app to approve and bootstrap E2E keys.");
+    if (started.scanShortCode) {
+      console.log(`Fallback short code: ${started.scanShortCode}`);
+    }
+  } else {
+    console.log(`Open this URL on any device: ${verificationUriComplete}`);
+  }
   console.log(`Open this URL on any device: ${verificationUriComplete}`);
   console.log(`Manual URL: ${verificationUri}`);
   console.log("");
   console.log("QR:");
-  await printLocalQr(verificationUriComplete);
+  await printLocalQr(secureScanUri);
   console.log("");
 
   if (params.openBrowser !== false) {
@@ -209,6 +259,15 @@ export const loginWithDeviceCode = async (params: {
 
   const intervalSec = started.intervalSec ?? 2;
   const expiresAtMs = Date.parse(started.expiresAt);
+  let hostRootKey: Uint8Array | null = null;
+  let hostBundleSent = false;
+  let mobilePeer:
+    | {
+        deviceId: string;
+        encPublicKey: string;
+        signPublicKey: string;
+      }
+    | undefined;
   while (true) {
     if (Number.isFinite(expiresAtMs) && Date.now() >= expiresAtMs) {
       throw new Error("device_code_expired");
@@ -233,6 +292,57 @@ export const loginWithDeviceCode = async (params: {
     if (polled.status === "pending") {
       continue;
     }
+    if (polled.status === "pending_scan") {
+      continue;
+    }
+    if (polled.status === "pending_key_exchange") {
+      if (
+        polled.mobileDeviceId &&
+        polled.mobileEncPublicKey &&
+        polled.mobileSignPublicKey
+      ) {
+        mobilePeer = {
+          deviceId: polled.mobileDeviceId,
+          encPublicKey: polled.mobileEncPublicKey,
+          signPublicKey: polled.mobileSignPublicKey
+        };
+      }
+      if (!hostBundleSent && polled.mobileExchangePublicKey) {
+        hostRootKey ??= randomBytes(32);
+        const sharedSecret = deriveSharedSecret({
+          privateKey: exchangeKeyPair.privateKey,
+          remotePublicKey: polled.mobileExchangePublicKey
+        });
+        const hostBundle = encryptScanBundle({
+          sharedSecret,
+          scope: `scan:${started.deviceCode}`,
+          payload: {
+            rootKey: toBase64Url(hostRootKey),
+            epoch: 1,
+            hostDevice: {
+              deviceId: hostDevice.deviceId,
+              encPublicKey: hostDevice.encPublicKey,
+              signPublicKey: hostDevice.signPublicKey
+            }
+          }
+        });
+        const hostCompleteResponse = await fetch(`${serverUrl}/auth/device/scan-host-complete`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            deviceCode: started.deviceCode,
+            hostBundle
+          })
+        });
+        if (!hostCompleteResponse.ok) {
+          const err = await parseApiError(hostCompleteResponse);
+          throw new Error(`login_scan_host_complete_failed:${err.message}`);
+        }
+        hostBundleSent = true;
+        console.log("Scan approved. Completing secure key exchange...");
+      }
+      continue;
+    }
     if (polled.status === "expired") {
       throw new Error("device_code_expired");
     }
@@ -249,7 +359,31 @@ export const loginWithDeviceCode = async (params: {
         accessToken: polled.accessToken,
         refreshToken: polled.refreshToken,
         expiresInSec: polled.expiresInSec,
-        email: me?.email
+        email: me?.email,
+        e2e:
+          hostRootKey && started.mode === "scan_secure"
+            ? {
+                epoch: 1,
+                rootKey: toBase64Url(hostRootKey),
+                device: {
+                  deviceId: hostDevice.deviceId,
+                  encPublicKey: hostDevice.encPublicKey,
+                  encPrivateKey: hostDevice.encPrivateKey,
+                  signPublicKey: hostDevice.signPublicKey,
+                  signPrivateKey: hostDevice.signPrivateKey,
+                  createdAt: hostDevice.createdAt
+                },
+                peers: mobilePeer
+                  ? {
+                      [mobilePeer.deviceId]: {
+                        ...mobilePeer,
+                        addedAt: new Date().toISOString()
+                      }
+                    }
+                  : {},
+                seqByScope: {}
+              }
+            : undefined
       });
       console.log(`Logged in${me?.email ? ` as ${me.email}` : ""}. Session saved to ${sessionPath}`);
       return;
@@ -336,7 +470,8 @@ export const createPairingCodeFromSession = async (params: {
         accessToken: refreshed.accessToken,
         refreshToken: refreshed.refreshToken,
         expiresInSec: refreshed.expiresInSec,
-        email: session.email
+        email: session.email,
+        e2e: session.e2e
       });
       return createPairingCodeFromSession({
         ...params,

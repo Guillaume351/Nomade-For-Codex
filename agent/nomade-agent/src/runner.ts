@@ -1,9 +1,10 @@
 import WebSocket from "ws";
 import { randomToken } from "@nomade/shared";
-import { defaultConfigPath, readConfig } from "./config.js";
+import { defaultConfigPath, defaultSessionPath, readConfig, readUserSession } from "./config.js";
 import { SessionManager } from "./session-manager.js";
 import { TunnelManager } from "./tunnel-manager.js";
 import { ConversationManager } from "./conversation-manager.js";
+import { createE2ERuntime } from "./e2e-runtime.js";
 
 interface RunArgs {
   configPath?: string;
@@ -90,6 +91,121 @@ const buildLocalHttpUrl = (host: string, targetPort: number, path: string, query
 const buildLocalWsUrl = (host: string, targetPort: number, path: string, query?: string): string => {
   const q = query ? `?${query}` : "";
   return `ws://${host}:${targetPort}${path}${q}`;
+};
+
+const parseEnvelope = (value: unknown):
+  | {
+      v: 1;
+      alg: "xchacha20poly1305";
+      epoch: number;
+      senderDeviceId: string;
+      seq: number;
+      nonce: string;
+      aad: string;
+      ciphertext: string;
+      sig: string;
+    }
+  | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  if (
+    raw.v !== 1 ||
+    raw.alg !== "xchacha20poly1305" ||
+    typeof raw.epoch !== "number" ||
+    typeof raw.senderDeviceId !== "string" ||
+    typeof raw.seq !== "number" ||
+    typeof raw.nonce !== "string" ||
+    typeof raw.aad !== "string" ||
+    typeof raw.ciphertext !== "string" ||
+    typeof raw.sig !== "string"
+  ) {
+    return null;
+  }
+  return {
+    v: 1,
+    alg: "xchacha20poly1305",
+    epoch: raw.epoch,
+    senderDeviceId: raw.senderDeviceId,
+    seq: raw.seq,
+    nonce: raw.nonce,
+    aad: raw.aad,
+    ciphertext: raw.ciphertext,
+    sig: raw.sig
+  };
+};
+
+const enrichConversationEventWithE2E = (
+  payload: Record<string, unknown>,
+  e2eRuntime: ReturnType<typeof createE2ERuntime>
+): Record<string, unknown> => {
+  if (!e2eRuntime) {
+    return payload;
+  }
+  const type = typeof payload.type === "string" ? payload.type : "";
+  if (!type.startsWith("conversation.")) {
+    return payload;
+  }
+  const conversationId = typeof payload.conversationId === "string" ? payload.conversationId : "";
+  if (!conversationId) {
+    return payload;
+  }
+  const scope = `conversation:${conversationId}`;
+
+  if (type === "conversation.turn.diff.updated" && typeof payload.diff === "string" && payload.diff.length > 0) {
+    return {
+      ...payload,
+      e2eEnvelope: e2eRuntime.encrypt(scope, JSON.stringify({ diff: payload.diff }))
+    };
+  }
+
+  if ((type === "conversation.item.started" || type === "conversation.item.completed") && payload.item) {
+    return {
+      ...payload,
+      e2eEnvelope: e2eRuntime.encrypt(scope, JSON.stringify({ item: payload.item }))
+    };
+  }
+
+  if (type === "conversation.item.delta" && typeof payload.delta === "string") {
+    return {
+      ...payload,
+      e2eEnvelope: e2eRuntime.encrypt(
+        scope,
+        JSON.stringify({ delta: payload.delta, stream: typeof payload.stream === "string" ? payload.stream : undefined })
+      )
+    };
+  }
+
+  if (type === "conversation.turn.plan.updated" && payload.plan) {
+    return {
+      ...payload,
+      e2eEnvelope: e2eRuntime.encrypt(scope, JSON.stringify({ plan: payload.plan }))
+    };
+  }
+
+  if (type === "conversation.server.request" && payload.params) {
+    return {
+      ...payload,
+      e2eEnvelope: e2eRuntime.encrypt(scope, JSON.stringify({ params: payload.params }))
+    };
+  }
+
+  if (type === "conversation.server.request.resolved") {
+    return {
+      ...payload,
+      e2eEnvelope: e2eRuntime.encrypt(
+        scope,
+        JSON.stringify({
+          status: payload.status,
+          result: payload.result,
+          error: payload.error
+        })
+      )
+    };
+  }
+
+  return payload;
 };
 
 const proxyLocalHttpWithFallback = async (params: {
@@ -198,6 +314,15 @@ const openLocalWsWithFallback = async (params: {
 export const runAgent = async (args: RunArgs): Promise<void> => {
   const config = await readConfig(args.configPath ?? defaultConfigPath());
   const tunnelManager = new TunnelManager();
+  let e2eRuntime: ReturnType<typeof createE2ERuntime> = null;
+  try {
+    const session = await readUserSession(defaultSessionPath());
+    if (session.controlHttpUrl.replace(/\/$/, "") === config.controlHttpUrl.replace(/\/$/, "")) {
+      e2eRuntime = createE2ERuntime(session.e2e);
+    }
+  } catch {
+    // no-op
+  }
 
   const wsUrl = `${config.controlWsUrl}?agent_token=${encodeURIComponent(config.agentToken)}`;
   const ws = new WebSocket(wsUrl);
@@ -207,18 +332,21 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
     }
   };
   const conversationManager = new ConversationManager((payload) => {
-    sendToControl(payload);
+    sendToControl(enrichConversationEventWithE2E(payload, e2eRuntime));
   });
 
   const sessionManager = new SessionManager({
     onOutput: (sessionId, stream, data, cursor) => {
+      const e2eEnvelope =
+        e2eRuntime && data.length > 0 ? e2eRuntime.encrypt(`session:${sessionId}`, data) : undefined;
       ws.send(
         JSON.stringify({
           type: "session.output",
           sessionId,
           stream,
           data,
-          cursor
+          cursor,
+          e2eEnvelope
         })
       );
     },
@@ -236,6 +364,9 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
 
   ws.on("open", () => {
     console.log("[agent] connected");
+    if (e2eRuntime) {
+      console.log("[agent] e2e runtime enabled");
+    }
     ws.send(JSON.stringify({ type: "agent.hello", agentId: config.agentId, name: config.name }));
 
     setInterval(() => {
@@ -257,9 +388,15 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
                 Object.entries(envRaw as Record<string, unknown>).map(([key, value]) => [key, String(value ?? "")])
               )
             : undefined;
+        const sessionId = String(msg.sessionId ?? "");
+        let command = String(msg.command ?? "");
+        const e2eCommandEnvelope = parseEnvelope(msg.e2eCommandEnvelope);
+        if (e2eCommandEnvelope && e2eRuntime) {
+          command = e2eRuntime.decrypt(`session:${sessionId}`, e2eCommandEnvelope);
+        }
         sessionManager.createSession({
-          sessionId: String(msg.sessionId),
-          command: String(msg.command),
+          sessionId,
+          command,
           cwd: msg.cwd ? String(msg.cwd) : undefined,
           env
         });
@@ -267,7 +404,13 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       }
 
       if (type === "session.input") {
-        sessionManager.input(String(msg.sessionId), String(msg.data ?? ""));
+        const sessionId = String(msg.sessionId);
+        let data = String(msg.data ?? "");
+        const e2eEnvelope = parseEnvelope(msg.e2eEnvelope);
+        if (e2eEnvelope && e2eRuntime) {
+          data = e2eRuntime.decrypt(`session:${sessionId}`, e2eEnvelope);
+        }
+        sessionManager.input(sessionId, data);
         return;
       }
 
@@ -289,15 +432,36 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       }
 
       if (type === "conversation.turn.start") {
+        const conversationId = String(msg.conversationId ?? "");
+        const turnId = String(msg.turnId ?? "");
+        let prompt = msg.prompt ? String(msg.prompt) : undefined;
+        let inputItems = Array.isArray(msg.inputItems)
+          ? msg.inputItems.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+          : undefined;
+        const e2ePromptEnvelope = parseEnvelope(msg.e2ePromptEnvelope);
+        if (e2ePromptEnvelope && e2eRuntime && conversationId) {
+          const decrypted = e2eRuntime.decrypt(`conversation:${conversationId}`, e2ePromptEnvelope);
+          try {
+            const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+            if (typeof parsed.prompt === "string" && parsed.prompt.trim().length > 0) {
+              prompt = parsed.prompt;
+            }
+            if (Array.isArray(parsed.inputItems)) {
+              inputItems = parsed.inputItems
+                .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"));
+            }
+          } catch {
+            if (decrypted.trim().length > 0) {
+              prompt = decrypted;
+            }
+          }
+        }
         await conversationManager.startTurn({
-          conversationId: String(msg.conversationId ?? ""),
-          turnId: String(msg.turnId ?? ""),
+          conversationId,
+          turnId,
           threadId: msg.threadId ? String(msg.threadId) : undefined,
-          prompt: msg.prompt ? String(msg.prompt) : undefined,
-          inputItems: Array.isArray(msg.inputItems)
-              ? msg.inputItems
-                  .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
-              : undefined,
+          prompt,
+          inputItems,
           collaborationMode:
             msg.collaborationMode && typeof msg.collaborationMode === "object"
               ? (msg.collaborationMode as Record<string, unknown>)
@@ -318,8 +482,21 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         if (!requestId) {
           return;
         }
-        const error = typeof msg.error === "string" ? msg.error : undefined;
-        const result = msg.result;
+        const conversationId = String(msg.conversationId ?? "");
+        let error = typeof msg.error === "string" ? msg.error : undefined;
+        let result = msg.result;
+        const e2eEnvelope = parseEnvelope(msg.e2eEnvelope);
+        if (e2eEnvelope && e2eRuntime && conversationId) {
+          const decrypted = e2eRuntime.decrypt(`conversation:${conversationId}`, e2eEnvelope);
+          try {
+            const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+            error = typeof parsed.error === "string" ? parsed.error : undefined;
+            result = parsed.result;
+          } catch {
+            error = "invalid_e2e_server_response";
+            result = undefined;
+          }
+        }
         conversationManager.resolveServerRequest({
           requestId,
           error,

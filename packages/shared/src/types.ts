@@ -1,11 +1,24 @@
 export type Role = "user" | "agent";
 
+export interface E2EEnvelope {
+  v: 1;
+  alg: "xchacha20poly1305";
+  epoch: number;
+  senderDeviceId: string;
+  seq: number;
+  nonce: string;
+  aad: string;
+  ciphertext: string;
+  sig: string;
+}
+
 export interface SessionCreateMessage {
   type: "session.create";
   sessionId: string;
   workspaceId: string;
   agentId: string;
   command: string;
+  e2eCommandEnvelope?: E2EEnvelope;
   cwd?: string;
   env?: Record<string, string>;
 }
@@ -14,6 +27,7 @@ export interface SessionInputMessage {
   type: "session.input";
   sessionId: string;
   data: string;
+  e2eEnvelope?: E2EEnvelope;
 }
 
 export interface SessionTerminateMessage {
@@ -27,6 +41,7 @@ export interface SessionOutputMessage {
   data: string;
   cursor: number;
   stream: "stdout" | "stderr";
+  e2eEnvelope?: E2EEnvelope;
 }
 
 export interface SessionStatusMessage {
@@ -131,6 +146,7 @@ export interface ConversationTurnStartMessage {
   turnId: string;
   threadId?: string;
   prompt?: string;
+  e2ePromptEnvelope?: E2EEnvelope;
   inputItems?: ConversationInputItem[];
   collaborationMode?: Record<string, unknown>;
   model?: string;
@@ -193,6 +209,7 @@ export interface ConversationTurnDiffUpdatedMessage {
   threadId: string;
   codexTurnId: string;
   diff: string;
+  e2eEnvelope?: E2EEnvelope;
 }
 
 export interface ConversationItemDeltaMessage {
@@ -204,6 +221,7 @@ export interface ConversationItemDeltaMessage {
   itemId: string;
   stream: "agentMessage" | "commandExecution" | "fileChange" | "reasoning" | "plan";
   delta: string;
+  e2eEnvelope?: E2EEnvelope;
 }
 
 export interface ConversationItemStartedMessage {
@@ -215,6 +233,7 @@ export interface ConversationItemStartedMessage {
   itemId: string;
   itemType: string;
   item: Record<string, unknown>;
+  e2eEnvelope?: E2EEnvelope;
 }
 
 export interface ConversationItemCompletedMessage {
@@ -226,6 +245,7 @@ export interface ConversationItemCompletedMessage {
   itemId: string;
   itemType: string;
   item: Record<string, unknown>;
+  e2eEnvelope?: E2EEnvelope;
 }
 
 export interface ConversationTurnPlanUpdatedMessage {
@@ -289,6 +309,7 @@ export interface ConversationServerResponseMessage {
   requestId: string;
   result?: unknown;
   error?: string;
+  e2eEnvelope?: E2EEnvelope;
 }
 
 export interface ConversationTurnCompletedMessage {

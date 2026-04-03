@@ -36,6 +36,84 @@ export class DeviceLimitReachedError extends Error {
   }
 }
 
+export type DeviceCodeStartMode = "legacy" | "scan_secure";
+
+export interface ScanStartHostDevice {
+  deviceId: string;
+  name: string;
+  platform: string;
+  encPublicKey: string;
+  signPublicKey: string;
+  exchangePublicKey: string;
+}
+
+export interface DeviceCodeCreateParams {
+  ttlSec: number;
+  mode: DeviceCodeStartMode;
+  hostDevice?: ScanStartHostDevice;
+}
+
+export interface DeviceCodeCreateResult {
+  deviceCode: string;
+  userCode: string;
+  expiresAt: Date;
+  mode: DeviceCodeStartMode;
+  scanId?: string;
+  scanShortCode?: string;
+}
+
+export interface DevicePollStatePending {
+  status: "pending";
+}
+
+export interface DevicePollStatePendingScan {
+  status: "pending_scan";
+}
+
+export interface DevicePollStatePendingKeyExchange {
+  status: "pending_key_exchange";
+  mobileExchangePublicKey?: string | null;
+  mobileDeviceId?: string | null;
+  mobileEncPublicKey?: string | null;
+  mobileSignPublicKey?: string | null;
+  hostBundleReady: boolean;
+}
+
+export interface DevicePollStateExpired {
+  status: "expired";
+}
+
+export interface DevicePollStateApproved {
+  status: "approved";
+  userId: string;
+}
+
+export type DevicePollState =
+  | DevicePollStatePending
+  | DevicePollStatePendingScan
+  | DevicePollStatePendingKeyExchange
+  | DevicePollStateExpired
+  | DevicePollStateApproved;
+
+export interface DeviceScanFlowRecord {
+  device_code_id: string;
+  mode: DeviceCodeStartMode;
+  scan_id: string | null;
+  scan_short_code: string | null;
+  status: string;
+  host_device_id: string | null;
+  host_enc_public_key: string | null;
+  host_sign_public_key: string | null;
+  host_exchange_public_key: string | null;
+  mobile_user_id: string | null;
+  mobile_device_id: string | null;
+  mobile_enc_public_key: string | null;
+  mobile_sign_public_key: string | null;
+  mobile_exchange_public_key: string | null;
+  host_bundle: Record<string, unknown> | null;
+  key_acked_at: Date | null;
+}
+
 export interface SessionRecord {
   id: string;
   user_id: string;
@@ -175,66 +253,386 @@ export class Repositories {
     return created.rows[0];
   }
 
-  async createDeviceCode(ttlSec: number): Promise<{ deviceCode: string; userCode: string; expiresAt: Date }> {
+  async createDeviceCode(params: DeviceCodeCreateParams): Promise<DeviceCodeCreateResult> {
+    const mode = params.mode;
+    const deviceCodeId = newId();
     const deviceCode = randomToken("dc");
     const userCode = randomCode(8);
-    const expiresAt = new Date(Date.now() + ttlSec * 1000);
+    const expiresAt = new Date(Date.now() + params.ttlSec * 1000);
+    const scanId = mode === "scan_secure" ? randomToken("scan") : undefined;
+    const scanShortCode = mode === "scan_secure" ? randomCode(8) : undefined;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO device_codes (id, device_code, user_code, status, expires_at)
+         VALUES ($1, $2, $3, 'pending', $4)`,
+        [deviceCodeId, deviceCode, userCode, expiresAt]
+      );
+      if (mode === "scan_secure") {
+        if (!params.hostDevice) {
+          throw new Error("scan_secure_missing_host_device");
+        }
+        await client.query(
+          `INSERT INTO device_scan_flows (
+             device_code_id,
+             mode,
+             scan_id,
+             scan_short_code,
+             status,
+             host_device_id,
+             host_enc_public_key,
+             host_sign_public_key,
+             host_exchange_public_key
+           )
+           VALUES ($1, 'scan_secure', $2, $3, 'pending_scan', $4, $5, $6, $7)`,
+          [
+            deviceCodeId,
+            scanId!,
+            scanShortCode!,
+            params.hostDevice.deviceId,
+            params.hostDevice.encPublicKey,
+            params.hostDevice.signPublicKey,
+            params.hostDevice.exchangePublicKey
+          ]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO device_scan_flows (device_code_id, mode, status)
+           VALUES ($1, 'legacy', 'pending')`,
+          [deviceCodeId]
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
 
-    await this.pool.query(
-      `INSERT INTO device_codes (id, device_code, user_code, status, expires_at)
-       VALUES ($1, $2, $3, 'pending', $4)`,
-      [newId(), deviceCode, userCode, expiresAt]
-    );
-
-    return { deviceCode, userCode, expiresAt };
+    return {
+      deviceCode,
+      userCode,
+      expiresAt,
+      mode,
+      scanId,
+      scanShortCode
+    };
   }
 
   async approveDeviceCode(userCode: string, userId: string): Promise<boolean> {
-    const result = await this.pool.query(
-      `UPDATE device_codes
-       SET status = 'approved', user_id = $1
-       WHERE user_code = $2
-         AND status = 'pending'
-         AND expires_at > NOW()`,
-      [userId, userCode]
-    );
-    return (result.rowCount ?? 0) > 0;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<{ id: string }>(
+        `UPDATE device_codes
+         SET status = 'approved', user_id = $1
+         WHERE user_code = $2
+           AND status IN ('pending', 'pending_key_exchange')
+           AND expires_at > NOW()
+         RETURNING id`,
+        [userId, userCode]
+      );
+      const row = result.rows[0];
+      if (!row) {
+        await client.query("ROLLBACK");
+        return false;
+      }
+      await client.query(
+        `UPDATE device_scan_flows
+         SET status = 'approved', key_acked_at = NOW(), updated_at = NOW()
+         WHERE device_code_id = $1`,
+        [row.id]
+      );
+      await client.query("COMMIT");
+      return true;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
-  async consumeApprovedDeviceCode(
-    deviceCode: string
-  ): Promise<{ userId: string } | { pending: true } | { expired: true } | null> {
+  async consumeDeviceCodePollState(deviceCode: string): Promise<DevicePollState | null> {
     const row = await this.pool.query<{
-      status: string;
+      id: string;
+      dc_status: string;
       user_id: string | null;
       expires_at: Date;
       consumed_at: Date | null;
+      flow_mode: string | null;
+      flow_status: string | null;
+      mobile_device_id: string | null;
+      mobile_enc_public_key: string | null;
+      mobile_sign_public_key: string | null;
+      mobile_exchange_public_key: string | null;
+      host_bundle: Record<string, unknown> | null;
     }>(
-      `SELECT status, user_id, expires_at, consumed_at
-       FROM device_codes
-       WHERE device_code = $1`,
+      `SELECT
+         dc.id,
+         dc.status AS dc_status,
+         dc.user_id,
+         dc.expires_at,
+         dc.consumed_at,
+         sf.mode AS flow_mode,
+         sf.status AS flow_status,
+         sf.mobile_device_id,
+         sf.mobile_enc_public_key,
+         sf.mobile_sign_public_key,
+         sf.mobile_exchange_public_key,
+         sf.host_bundle
+       FROM device_codes dc
+       LEFT JOIN device_scan_flows sf ON sf.device_code_id = dc.id
+       WHERE dc.device_code = $1`,
       [deviceCode]
     );
 
-    if ((row.rowCount ?? 0) === 0 || !row.rows[0]) {
+    const dc = row.rows[0];
+    if (!dc) {
       return null;
     }
-
-    const dc = row.rows[0];
     if (dc.expires_at.getTime() <= Date.now()) {
-      return { expired: true };
+      return { status: "expired" };
     }
-
-    if (dc.status === "pending") {
-      return { pending: true };
+    if (dc.dc_status === "pending_key_exchange") {
+      return {
+        status: "pending_key_exchange",
+        mobileDeviceId: dc.mobile_device_id,
+        mobileEncPublicKey: dc.mobile_enc_public_key,
+        mobileSignPublicKey: dc.mobile_sign_public_key,
+        mobileExchangePublicKey: dc.mobile_exchange_public_key,
+        hostBundleReady: Boolean(dc.host_bundle)
+      };
     }
-
+    if (dc.dc_status === "pending") {
+      if (dc.flow_mode === "scan_secure") {
+        return { status: "pending_scan" };
+      }
+      return { status: "pending" };
+    }
     if (!dc.user_id || dc.consumed_at) {
       return null;
     }
+    await this.pool.query("UPDATE device_codes SET consumed_at = NOW() WHERE id = $1", [dc.id]);
+    return { status: "approved", userId: dc.user_id };
+  }
 
-    await this.pool.query("UPDATE device_codes SET consumed_at = NOW() WHERE device_code = $1", [deviceCode]);
-    return { userId: dc.user_id };
+  async getScanFlowByScanId(scanId: string): Promise<
+    | (DeviceScanFlowRecord & {
+        device_code: string;
+        user_code: string;
+        expires_at: Date;
+        device_code_status: string;
+        device_user_id: string | null;
+      })
+    | null
+  > {
+    const result = await this.pool.query<
+      DeviceScanFlowRecord & {
+        device_code: string;
+        user_code: string;
+        expires_at: Date;
+        device_code_status: string;
+        device_user_id: string | null;
+      }
+    >(
+      `SELECT
+         sf.*,
+         dc.device_code,
+         dc.user_code,
+         dc.expires_at,
+         dc.status AS device_code_status,
+         dc.user_id AS device_user_id
+       FROM device_scan_flows sf
+       JOIN device_codes dc ON dc.id = sf.device_code_id
+       WHERE sf.scan_id = $1`,
+      [scanId]
+    );
+    return result.rows[0] ?? null;
+  }
+
+  async getScanFlowByDeviceCode(deviceCode: string): Promise<
+    | (DeviceScanFlowRecord & {
+        device_code: string;
+        user_code: string;
+        expires_at: Date;
+        device_code_status: string;
+        device_user_id: string | null;
+      })
+    | null
+  > {
+    const result = await this.pool.query<
+      DeviceScanFlowRecord & {
+        device_code: string;
+        user_code: string;
+        expires_at: Date;
+        device_code_status: string;
+        device_user_id: string | null;
+      }
+    >(
+      `SELECT
+         sf.*,
+         dc.device_code,
+         dc.user_code,
+         dc.expires_at,
+         dc.status AS device_code_status,
+         dc.user_id AS device_user_id
+       FROM device_scan_flows sf
+       JOIN device_codes dc ON dc.id = sf.device_code_id
+       WHERE dc.device_code = $1`,
+      [deviceCode]
+    );
+    return result.rows[0] ?? null;
+  }
+
+  async getScanFlowByShortCode(shortCode: string): Promise<
+    | (DeviceScanFlowRecord & {
+        device_code: string;
+        user_code: string;
+        expires_at: Date;
+        device_code_status: string;
+        device_user_id: string | null;
+      })
+    | null
+  > {
+    const result = await this.pool.query<
+      DeviceScanFlowRecord & {
+        device_code: string;
+        user_code: string;
+        expires_at: Date;
+        device_code_status: string;
+        device_user_id: string | null;
+      }
+    >(
+      `SELECT
+         sf.*,
+         dc.device_code,
+         dc.user_code,
+         dc.expires_at,
+         dc.status AS device_code_status,
+         dc.user_id AS device_user_id
+       FROM device_scan_flows sf
+       JOIN device_codes dc ON dc.id = sf.device_code_id
+       WHERE sf.scan_short_code = $1`,
+      [shortCode]
+    );
+    return result.rows[0] ?? null;
+  }
+
+  async approveScanByMobile(params: {
+    deviceCodeId: string;
+    userId: string;
+    deviceId: string;
+    name: string;
+    platform: string;
+    encPublicKey: string;
+    signPublicKey: string;
+    exchangePublicKey: string;
+  }): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO user_devices (
+           id, user_id, name, platform, enc_public_key, sign_public_key
+         ) VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (id) DO UPDATE
+         SET user_id = EXCLUDED.user_id,
+             name = EXCLUDED.name,
+             platform = EXCLUDED.platform,
+             enc_public_key = EXCLUDED.enc_public_key,
+             sign_public_key = EXCLUDED.sign_public_key,
+             revoked_at = NULL,
+             updated_at = NOW()`,
+        [
+          params.deviceId,
+          params.userId,
+          params.name,
+          params.platform,
+          params.encPublicKey,
+          params.signPublicKey
+        ]
+      );
+      await client.query(
+        `UPDATE device_scan_flows
+         SET status = 'pending_key_exchange',
+             mobile_user_id = $2,
+             mobile_device_id = $3,
+             mobile_enc_public_key = $4,
+             mobile_sign_public_key = $5,
+             mobile_exchange_public_key = $6,
+             updated_at = NOW()
+         WHERE device_code_id = $1`,
+        [
+          params.deviceCodeId,
+          params.userId,
+          params.deviceId,
+          params.encPublicKey,
+          params.signPublicKey,
+          params.exchangePublicKey
+        ]
+      );
+      await client.query(
+        `UPDATE device_codes
+         SET user_id = $2,
+             status = 'pending_key_exchange'
+         WHERE id = $1`,
+        [params.deviceCodeId, params.userId]
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async storeScanHostBundle(params: { deviceCodeId: string; hostBundle: Record<string, unknown> }): Promise<void> {
+    await this.pool.query(
+      `UPDATE device_scan_flows
+       SET host_bundle = $2::jsonb,
+           updated_at = NOW()
+       WHERE device_code_id = $1`,
+      [params.deviceCodeId, JSON.stringify(params.hostBundle)]
+    );
+  }
+
+  async acknowledgeScanKeyExchange(params: { deviceCodeId: string; userId: string }): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<{ device_code_id: string }>(
+        `UPDATE device_scan_flows
+         SET status = 'approved',
+             key_acked_at = NOW(),
+             updated_at = NOW()
+         WHERE device_code_id = $1
+           AND mobile_user_id = $2
+           AND host_bundle IS NOT NULL
+         RETURNING device_code_id`,
+        [params.deviceCodeId, params.userId]
+      );
+      if (!result.rows[0]) {
+        await client.query("ROLLBACK");
+        return false;
+      }
+      await client.query(
+        `UPDATE device_codes
+         SET status = 'approved', user_id = $2
+         WHERE id = $1`,
+        [params.deviceCodeId, params.userId]
+      );
+      await client.query("COMMIT");
+      return true;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async createRefreshToken(userId: string, token: string, ttlSec: number): Promise<void> {

@@ -269,6 +269,90 @@ export const createServer = async (): Promise<http.Server> => {
     return null;
   };
 
+  const resolveScanFlow = async (params: {
+    scanPayload?: string;
+    scanShortCode?: string;
+  }): Promise<
+    | {
+        deviceCodeId: string;
+        deviceCode: string;
+        userCode: string;
+        scanId: string;
+        expiresAt: Date;
+        deviceCodeStatus: string;
+        mobileUserId: string | null;
+        mobileDeviceId: string | null;
+        mobileEncPublicKey: string | null;
+        mobileSignPublicKey: string | null;
+        mobileExchangePublicKey: string | null;
+        hostDeviceId: string | null;
+        hostEncPublicKey: string | null;
+        hostSignPublicKey: string | null;
+        hostExchangePublicKey: string | null;
+        hostBundle: Record<string, unknown> | null;
+      }
+    | null
+  > => {
+    if (params.scanPayload) {
+      const parsed = auth.verifyScanPayload(params.scanPayload);
+      if (!parsed) {
+        return null;
+      }
+      const flow = await repositories.getScanFlowByScanId(parsed.scanId);
+      if (!flow) {
+        return null;
+      }
+      if (flow.device_code !== parsed.deviceCode || flow.user_code !== parsed.userCode) {
+        return null;
+      }
+      return {
+        deviceCodeId: flow.device_code_id,
+        deviceCode: flow.device_code,
+        userCode: flow.user_code,
+        scanId: parsed.scanId,
+        expiresAt: flow.expires_at,
+        deviceCodeStatus: flow.device_code_status,
+        mobileUserId: flow.mobile_user_id,
+        mobileDeviceId: flow.mobile_device_id,
+        mobileEncPublicKey: flow.mobile_enc_public_key,
+        mobileSignPublicKey: flow.mobile_sign_public_key,
+        mobileExchangePublicKey: flow.mobile_exchange_public_key,
+        hostDeviceId: flow.host_device_id,
+        hostEncPublicKey: flow.host_enc_public_key,
+        hostSignPublicKey: flow.host_sign_public_key,
+        hostExchangePublicKey: flow.host_exchange_public_key,
+        hostBundle: flow.host_bundle
+      };
+    }
+
+    const shortCode = params.scanShortCode?.trim().toUpperCase();
+    if (!shortCode) {
+      return null;
+    }
+    const flow = await repositories.getScanFlowByShortCode(shortCode);
+    if (!flow || !flow.scan_id) {
+      return null;
+    }
+    return {
+      deviceCodeId: flow.device_code_id,
+      deviceCode: flow.device_code,
+      userCode: flow.user_code,
+      scanId: flow.scan_id,
+      expiresAt: flow.expires_at,
+      deviceCodeStatus: flow.device_code_status,
+      mobileUserId: flow.mobile_user_id,
+      mobileDeviceId: flow.mobile_device_id,
+      mobileEncPublicKey: flow.mobile_enc_public_key,
+      mobileSignPublicKey: flow.mobile_sign_public_key,
+      mobileExchangePublicKey: flow.mobile_exchange_public_key,
+      hostDeviceId: flow.host_device_id,
+      hostEncPublicKey: flow.host_enc_public_key,
+      hostSignPublicKey: flow.host_sign_public_key,
+      hostExchangePublicKey: flow.host_exchange_public_key,
+      hostBundle: flow.host_bundle
+    };
+  };
+
   const deviceLimitPayload = (params: {
     currentAgents: number;
     maxAgents: number;
@@ -1118,14 +1202,42 @@ export const createServer = async (): Promise<http.Server> => {
     ) {
       return;
     }
-    const created = await auth.startDeviceCode();
+    const schema = z.object({
+      mode: z.enum(["legacy", "scan_secure"]).optional(),
+      hostDevice: z
+        .object({
+          deviceId: z.string().min(8),
+          name: z.string().min(1).max(120),
+          platform: z.string().min(1).max(60),
+          encPublicKey: z.string().min(20),
+          signPublicKey: z.string().min(20),
+          exchangePublicKey: z.string().min(20)
+        })
+        .optional()
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+    if (parsed.data.mode === "scan_secure" && !parsed.data.hostDevice) {
+      res.status(400).json({ error: "scan_secure_missing_host_device" });
+      return;
+    }
+    const created = await auth.startDeviceCode({
+      mode: parsed.data.mode ?? "legacy",
+      hostDevice: parsed.data.hostDevice
+    });
     res.json({
       deviceCode: created.deviceCode,
       userCode: created.userCode,
       expiresAt: created.expiresAt.toISOString(),
       intervalSec: created.intervalSec,
       verificationUri: created.verificationUri,
-      verificationUriComplete: created.verificationUriComplete
+      verificationUriComplete: created.verificationUriComplete,
+      mode: created.mode,
+      scanPayload: created.scanPayload,
+      scanShortCode: created.scanShortCode
     });
   });
 
@@ -1177,6 +1289,211 @@ export const createServer = async (): Promise<http.Server> => {
     res.json({ approved: true });
   });
 
+  app.post("/auth/device/scan-approve", requireUserAuth(auth), async (req, res) => {
+    if (
+      !(await enforceRateLimit({
+        req,
+        res,
+        namespace: "auth_device_scan_approve",
+        maxHits: 40,
+        windowSec: 60
+      }))
+    ) {
+      return;
+    }
+    const schema = z.object({
+      scanPayload: z.string().min(10).optional(),
+      scanShortCode: z.string().min(4).optional(),
+      mobileDevice: z.object({
+        deviceId: z.string().min(8),
+        name: z.string().min(1).max(120),
+        platform: z.string().min(1).max(60),
+        encPublicKey: z.string().min(20),
+        signPublicKey: z.string().min(20),
+        exchangePublicKey: z.string().min(20)
+      })
+    }).refine((value) => Boolean(value.scanPayload || value.scanShortCode), {
+      message: "scanPayload or scanShortCode is required",
+      path: ["scanPayload"]
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+    const flow = await resolveScanFlow({
+      scanPayload: parsed.data.scanPayload,
+      scanShortCode: parsed.data.scanShortCode
+    });
+    if (!flow) {
+      res.status(404).json({ error: "invalid_scan_payload" });
+      return;
+    }
+    if (flow.expiresAt.getTime() <= Date.now()) {
+      res.status(410).json({ error: "expired" });
+      return;
+    }
+    await repositories.approveScanByMobile({
+      deviceCodeId: flow.deviceCodeId,
+      userId: req.userId!,
+      deviceId: parsed.data.mobileDevice.deviceId,
+      name: parsed.data.mobileDevice.name,
+      platform: parsed.data.mobileDevice.platform,
+      encPublicKey: parsed.data.mobileDevice.encPublicKey,
+      signPublicKey: parsed.data.mobileDevice.signPublicKey,
+      exchangePublicKey: parsed.data.mobileDevice.exchangePublicKey
+    });
+    await repositories.writeAuditEvent({
+      userId: req.userId!,
+      actorType: "user",
+      actorId: req.userId!,
+      action: "auth.device_scan.approved",
+      metadata: {
+        deviceCodeId: flow.deviceCodeId,
+        scanId: flow.scanId,
+        mobileDeviceId: parsed.data.mobileDevice.deviceId
+      }
+    });
+    res.json({
+      status: "pending_key_exchange",
+      scanId: flow.scanId,
+      deviceCode: flow.deviceCode
+    });
+  });
+
+  app.post("/auth/device/scan-host-complete", async (req, res) => {
+    if (
+      !(await enforceRateLimit({
+        req,
+        res,
+        namespace: "auth_device_scan_host_complete",
+        maxHits: 80,
+        windowSec: 60
+      }))
+    ) {
+      return;
+    }
+    const schema = z.object({
+      deviceCode: z.string().min(10),
+      hostBundle: z.record(z.unknown())
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+    const state = await repositories.consumeDeviceCodePollState(parsed.data.deviceCode);
+    if (!state) {
+      res.status(404).json({ error: "invalid_device_code" });
+      return;
+    }
+    if (state.status === "expired") {
+      res.status(410).json({ error: "expired" });
+      return;
+    }
+    if (state.status !== "pending_key_exchange") {
+      res.status(409).json({ error: "pending_scan" });
+      return;
+    }
+    const flow = await repositories.getScanFlowByDeviceCode(parsed.data.deviceCode);
+    if (!flow || flow.mode !== "scan_secure") {
+      res.status(404).json({ error: "scan_flow_not_found" });
+      return;
+    }
+    if (flow.expires_at.getTime() <= Date.now()) {
+      res.status(410).json({ error: "expired" });
+      return;
+    }
+    await repositories.storeScanHostBundle({
+      deviceCodeId: flow.device_code_id,
+      hostBundle: parsed.data.hostBundle
+    });
+    res.json({ ok: true });
+  });
+
+  app.post("/auth/device/scan-mobile-ack", requireUserAuth(auth), async (req, res) => {
+    if (
+      !(await enforceRateLimit({
+        req,
+        res,
+        namespace: "auth_device_scan_mobile_ack",
+        maxHits: 80,
+        windowSec: 60
+      }))
+    ) {
+      return;
+    }
+    const schema = z.object({
+      scanPayload: z.string().min(10).optional(),
+      scanShortCode: z.string().min(4).optional(),
+      ack: z.boolean().optional()
+    }).refine((value) => Boolean(value.scanPayload || value.scanShortCode), {
+      message: "scanPayload or scanShortCode is required",
+      path: ["scanPayload"]
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+    const flow = await resolveScanFlow({
+      scanPayload: parsed.data.scanPayload,
+      scanShortCode: parsed.data.scanShortCode
+    });
+    if (!flow) {
+      res.status(404).json({ error: "invalid_scan_payload" });
+      return;
+    }
+    if (flow.expiresAt.getTime() <= Date.now()) {
+      res.status(410).json({ error: "expired" });
+      return;
+    }
+    if (flow.mobileUserId && flow.mobileUserId !== req.userId) {
+      res.status(403).json({ error: "scan_flow_forbidden" });
+      return;
+    }
+
+    if (parsed.data.ack === true) {
+      const approved = await repositories.acknowledgeScanKeyExchange({
+        deviceCodeId: flow.deviceCodeId,
+        userId: req.userId!
+      });
+      if (!approved) {
+        res.status(409).json({ error: "pending_key_exchange" });
+        return;
+      }
+      await repositories.writeAuditEvent({
+        userId: req.userId!,
+        actorType: "user",
+        actorId: req.userId!,
+        action: "auth.device_scan.key_acked",
+        metadata: {
+          deviceCodeId: flow.deviceCodeId,
+          scanId: flow.scanId
+        }
+      });
+      res.json({ approved: true });
+      return;
+    }
+
+    if (!flow.hostBundle) {
+      res.json({
+        status: "pending_key_exchange",
+        scanId: flow.scanId
+      });
+      return;
+    }
+    res.json({
+      status: "ready",
+      scanId: flow.scanId,
+      hostDeviceId: flow.hostDeviceId,
+      hostEncPublicKey: flow.hostEncPublicKey,
+      hostSignPublicKey: flow.hostSignPublicKey,
+      hostExchangePublicKey: flow.hostExchangePublicKey,
+      hostBundle: flow.hostBundle
+    });
+  });
+
   app.post("/auth/device/poll", async (req, res) => {
     if (
       !(await enforceRateLimit({
@@ -1199,6 +1516,21 @@ export const createServer = async (): Promise<http.Server> => {
     const status = await auth.pollDeviceCode(parsed.data.deviceCode);
     if (status.status === "pending") {
       res.json({ status: "pending" });
+      return;
+    }
+    if (status.status === "pending_scan") {
+      res.json({ status: "pending_scan" });
+      return;
+    }
+    if (status.status === "pending_key_exchange") {
+      res.json({
+        status: "pending_key_exchange",
+        mobileDeviceId: status.mobileDeviceId ?? null,
+        mobileEncPublicKey: status.mobileEncPublicKey ?? null,
+        mobileSignPublicKey: status.mobileSignPublicKey ?? null,
+        mobileExchangePublicKey: status.mobileExchangePublicKey ?? null,
+        hostBundleReady: status.hostBundleReady
+      });
       return;
     }
     if (status.status === "expired") {
@@ -1923,6 +2255,17 @@ export const createServer = async (): Promise<http.Server> => {
     const approvalPolicySchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
     const sandboxModeSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
     const reasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+    const e2eEnvelopeSchema = z.object({
+      v: z.literal(1),
+      alg: z.literal("xchacha20poly1305"),
+      epoch: z.number().int().positive(),
+      senderDeviceId: z.string().min(8),
+      seq: z.number().int().nonnegative(),
+      nonce: z.string().min(16),
+      aad: z.string().min(1),
+      ciphertext: z.string().min(1),
+      sig: z.string().min(20)
+    });
     const inputItemSchema = z.discriminatedUnion("type", [
       z.object({
         type: z.literal("text"),
@@ -1951,17 +2294,27 @@ export const createServer = async (): Promise<http.Server> => {
 
     const schema = z.object({
       prompt: z.string().min(1).optional(),
-      inputItems: z.array(inputItemSchema).min(1).optional(),
+      inputItems: z.array(inputItemSchema).optional(),
+      e2ePromptEnvelope: e2eEnvelopeSchema.optional(),
       collaborationMode: z.record(z.unknown()).optional(),
       model: z.string().min(1).max(120).optional(),
       cwd: z.string().min(1).optional(),
       approvalPolicy: approvalPolicySchema.optional(),
       sandboxMode: sandboxModeSchema.optional(),
       effort: reasoningEffortSchema.optional()
-    }).refine((body) => Boolean(body.prompt || body.inputItems), {
-      message: "Either prompt or inputItems is required",
-      path: ["prompt"]
-    });
+    }).refine(
+      (value) => {
+        if (value.e2ePromptEnvelope) {
+          return true;
+        }
+        const prompt = value.prompt?.trim() ?? "";
+        return prompt.length > 0 || (value.inputItems?.length ?? 0) > 0;
+      },
+      {
+        message: "prompt/inputItems or e2ePromptEnvelope is required",
+        path: ["prompt"]
+      }
+    );
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
@@ -1975,9 +2328,14 @@ export const createServer = async (): Promise<http.Server> => {
     }
 
     const workspace = await repositories.findWorkspaceById(req.userId!, conversation.workspace_id);
-    const prompt = parsed.data.prompt?.trim();
-    const inputItems = parsed.data.inputItems as Array<Record<string, unknown>> | undefined;
-    const userPrompt = prompt && prompt.length > 0 ? prompt : derivePromptFromInputItems(inputItems ?? []);
+    const normalizedPrompt = parsed.data.prompt?.trim() ?? "";
+    const userPrompt = parsed.data.e2ePromptEnvelope
+      ? JSON.stringify(parsed.data.e2ePromptEnvelope)
+      : normalizedPrompt.length > 0
+        ? normalizedPrompt
+        : JSON.stringify({
+            inputItems: parsed.data.inputItems ?? []
+          });
     const turn = await repositories.createConversationTurn({
       conversationId: conversation.id,
       prompt: userPrompt
@@ -1991,8 +2349,9 @@ export const createServer = async (): Promise<http.Server> => {
       conversationId: conversation.id,
       turnId: turn.id,
       threadId: conversation.codex_thread_id ?? undefined,
-      prompt: prompt,
-      inputItems,
+      prompt: normalizedPrompt.length > 0 ? normalizedPrompt : undefined,
+      inputItems: parsed.data.inputItems,
+      e2ePromptEnvelope: parsed.data.e2ePromptEnvelope,
       collaborationMode: parsed.data.collaborationMode,
       model: parsed.data.model,
       cwd: parsed.data.cwd ?? workspace?.path,
@@ -2047,13 +2406,28 @@ export const createServer = async (): Promise<http.Server> => {
   });
 
   app.post("/sessions", requireUserAuth(auth), async (req, res) => {
+    const e2eEnvelopeSchema = z.object({
+      v: z.literal(1),
+      alg: z.literal("xchacha20poly1305"),
+      epoch: z.number().int().positive(),
+      senderDeviceId: z.string().min(8),
+      seq: z.number().int().nonnegative(),
+      nonce: z.string().min(16),
+      aad: z.string().min(1),
+      ciphertext: z.string().min(1),
+      sig: z.string().min(20)
+    });
     const schema = z.object({
       workspaceId: z.string().min(6),
       agentId: z.string().min(6),
       name: z.string().min(1).max(120),
-      command: z.string().min(1),
+      command: z.string().min(1).optional(),
+      e2eCommandEnvelope: e2eEnvelopeSchema.optional(),
       cwd: z.string().optional(),
       env: z.record(z.string()).optional()
+    }).refine((value) => Boolean(value.command?.trim() || value.e2eCommandEnvelope), {
+      message: "command or e2eCommandEnvelope is required",
+      path: ["command"]
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -2074,7 +2448,8 @@ export const createServer = async (): Promise<http.Server> => {
       sessionId: session.id,
       workspaceId: parsed.data.workspaceId,
       agentId: parsed.data.agentId,
-      command: parsed.data.command,
+      command: parsed.data.command ?? "",
+      e2eCommandEnvelope: parsed.data.e2eCommandEnvelope,
       cwd: parsed.data.cwd,
       env: parsed.data.env
     });

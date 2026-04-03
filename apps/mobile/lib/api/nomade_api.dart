@@ -90,6 +90,62 @@ class NomadeApi {
     return _decodeObject(response);
   }
 
+  Future<Map<String, dynamic>> approveScanSecure({
+    required String accessToken,
+    String? scanPayload,
+    String? scanShortCode,
+    required Map<String, dynamic> mobileDevice,
+  }) async {
+    final body = <String, dynamic>{
+      'mobileDevice': mobileDevice,
+    };
+    if (scanPayload != null && scanPayload.trim().isNotEmpty) {
+      body['scanPayload'] = scanPayload.trim();
+    }
+    if (scanShortCode != null && scanShortCode.trim().isNotEmpty) {
+      body['scanShortCode'] = scanShortCode.trim().toUpperCase();
+    }
+    final response = await _send(
+      () => http.post(
+        _uri('/auth/device/scan-approve'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode(body),
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> scanMobileAck({
+    required String accessToken,
+    String? scanPayload,
+    String? scanShortCode,
+    bool ack = false,
+  }) async {
+    final body = <String, dynamic>{
+      'ack': ack,
+    };
+    if (scanPayload != null && scanPayload.trim().isNotEmpty) {
+      body['scanPayload'] = scanPayload.trim();
+    }
+    if (scanShortCode != null && scanShortCode.trim().isNotEmpty) {
+      body['scanShortCode'] = scanShortCode.trim().toUpperCase();
+    }
+    final response = await _send(
+      () => http.post(
+        _uri('/auth/device/scan-mobile-ack'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode(body),
+      ),
+    );
+    return _decodeObject(response);
+  }
+
   Future<Map<String, dynamic>> pollDeviceCode(String deviceCode) async {
     final response = await _send(
       () => http.post(
@@ -314,6 +370,7 @@ class NomadeApi {
     required String accessToken,
     required String conversationId,
     String? prompt,
+    Map<String, dynamic>? e2ePromptEnvelope,
     List<Map<String, dynamic>>? inputItems,
     Map<String, dynamic>? collaborationMode,
     String? model,
@@ -326,6 +383,9 @@ class NomadeApi {
     final trimmedPrompt = prompt?.trim() ?? '';
     if (trimmedPrompt.isNotEmpty) {
       body['prompt'] = trimmedPrompt;
+    }
+    if (e2ePromptEnvelope != null && e2ePromptEnvelope.isNotEmpty) {
+      body['e2ePromptEnvelope'] = e2ePromptEnvelope;
     }
     if (inputItems != null && inputItems.isNotEmpty) {
       body['inputItems'] = inputItems;
@@ -348,8 +408,10 @@ class NomadeApi {
     if (effort != null && effort.trim().isNotEmpty) {
       body['effort'] = effort.trim();
     }
-    if (!body.containsKey('prompt') && !body.containsKey('inputItems')) {
-      throw ApiException('Either prompt or inputItems is required');
+    if (!body.containsKey('prompt') &&
+        !body.containsKey('inputItems') &&
+        !body.containsKey('e2ePromptEnvelope')) {
+      throw ApiException('prompt/inputItems or e2ePromptEnvelope is required');
     }
 
     final response = await _send(

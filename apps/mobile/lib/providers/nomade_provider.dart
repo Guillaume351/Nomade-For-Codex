@@ -13,8 +13,11 @@ import '../models/dev_service.dart';
 import '../models/session_stream_chunk.dart';
 import '../models/tunnel.dart';
 import '../models/turn.dart';
+import '../models/turn_item.dart';
 import '../models/turn_timeline.dart';
 import '../models/workspace.dart';
+import '../services/mobile_e2e_runtime.dart';
+import '../services/secure_scan_parser.dart';
 
 class ConversationDebugEvent {
   ConversationDebugEvent({
@@ -65,6 +68,22 @@ class NomadeProvider with ChangeNotifier {
   static const _selectedCollaborationModeKey =
       'nomade.selected_collaboration_mode';
   static const _selectedSkillsKey = 'nomade.selected_skills_json';
+  static const _scanDeviceIdKey = 'nomade.scan.device_id';
+  static const _scanEncPublicKey = 'nomade.scan.enc_public_key';
+  static const _scanEncPrivateKey = 'nomade.scan.enc_private_key';
+  static const _scanSignPublicKey = 'nomade.scan.sign_public_key';
+  static const _scanSignPrivateKey = 'nomade.scan.sign_private_key';
+  static const _scanPendingPayloadKey = 'nomade.scan.pending_payload';
+  static const _scanPendingShortCodeKey = 'nomade.scan.pending_short_code';
+  static const _e2eSnapshotKey = 'nomade.e2e.snapshot_json';
+  static const _strictSecurityErrorKey = 'nomade.e2e.strict_error';
+
+  static const _keychainOptions = IOSOptions(
+    accessibility: KeychainAccessibility.first_unlock_this_device,
+  );
+  static const _androidOptions = AndroidOptions(
+    encryptedSharedPreferences: true,
+  );
 
   String status = 'Idle';
   String? accessToken;
@@ -87,6 +106,16 @@ class NomadeProvider with ChangeNotifier {
   bool loadingServices = false;
   bool loadingTunnels = false;
   String? selectedServiceId;
+  MobileE2ERuntime? _e2eRuntime;
+  String? _securityError;
+  String? _pendingScanPayload;
+  String? _pendingScanShortCode;
+  bool _strictFailureInProgress = false;
+
+  bool get e2eReady => _e2eRuntime?.isReady == true;
+  String? get securityError => _securityError;
+  String? get pendingScanPayload => _pendingScanPayload;
+  String? get pendingScanShortCode => _pendingScanShortCode;
 
   Agent? _selectedAgent;
   Agent? get selectedAgent => _selectedAgent;
@@ -348,31 +377,171 @@ class NomadeProvider with ChangeNotifier {
 
   bool get isAuthenticated => accessToken != null;
 
+  Future<String?> _readStorage(
+    String key, {
+    bool strictDeviceOnly = false,
+  }) {
+    return _storage.read(
+      key: key,
+      iOptions: strictDeviceOnly ? _keychainOptions : null,
+      aOptions: strictDeviceOnly ? _androidOptions : null,
+    );
+  }
+
+  Future<void> _writeStorage(
+    String key, {
+    required String? value,
+    bool strictDeviceOnly = false,
+  }) {
+    return _storage.write(
+      key: key,
+      value: value,
+      iOptions: strictDeviceOnly ? _keychainOptions : null,
+      aOptions: strictDeviceOnly ? _androidOptions : null,
+    );
+  }
+
+  Future<void> _deleteStorage(
+    String key, {
+    bool strictDeviceOnly = false,
+  }) {
+    return _storage.delete(
+      key: key,
+      iOptions: strictDeviceOnly ? _keychainOptions : null,
+      aOptions: strictDeviceOnly ? _androidOptions : null,
+    );
+  }
+
+  Future<void> _restoreE2ERuntime() async {
+    final raw = await _readStorage(_e2eSnapshotKey, strictDeviceOnly: true);
+    if (raw == null || raw.trim().isEmpty) {
+      _e2eRuntime = null;
+      return;
+    }
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        _e2eRuntime = null;
+        return;
+      }
+      final snapshot =
+          MobileE2ESnapshot.fromJson(decoded.cast<String, dynamic>());
+      _e2eRuntime = await MobileE2ERuntime.fromSnapshot(snapshot);
+    } catch (_) {
+      _e2eRuntime = null;
+    }
+  }
+
+  Future<void> _persistE2ERuntime() async {
+    final snapshot = _e2eRuntime?.snapshot();
+    if (snapshot == null) {
+      await _deleteStorage(_e2eSnapshotKey, strictDeviceOnly: true);
+      return;
+    }
+    await _writeStorage(
+      _e2eSnapshotKey,
+      value: jsonEncode(snapshot.toJson()),
+      strictDeviceOnly: true,
+    );
+  }
+
+  Future<void> _persistPendingScan() async {
+    await Future.wait([
+      _writeStorage(
+        _scanPendingPayloadKey,
+        value: _pendingScanPayload,
+        strictDeviceOnly: true,
+      ),
+      _writeStorage(
+        _scanPendingShortCodeKey,
+        value: _pendingScanShortCode,
+        strictDeviceOnly: true,
+      ),
+    ]);
+  }
+
+  Future<void> _setPendingScan({
+    String? scanPayload,
+    String? scanShortCode,
+  }) async {
+    _pendingScanPayload = scanPayload?.trim().isEmpty == true
+        ? null
+        : scanPayload?.trim();
+    _pendingScanShortCode = scanShortCode?.trim().isEmpty == true
+        ? null
+        : scanShortCode?.trim().toUpperCase();
+    await _persistPendingScan();
+  }
+
+  Future<void> clearPendingScan() => _setPendingScan();
+
+  Future<void> _setSecurityError(String? value) async {
+    _securityError = value?.trim().isEmpty == true ? null : value?.trim();
+    await _writeStorage(
+      _strictSecurityErrorKey,
+      value: _securityError,
+      strictDeviceOnly: true,
+    );
+  }
+
+  Future<void> _clearE2EState() async {
+    _e2eRuntime = null;
+    await Future.wait([
+      _deleteStorage(_e2eSnapshotKey, strictDeviceOnly: true),
+      _deleteStorage(_scanDeviceIdKey, strictDeviceOnly: true),
+      _deleteStorage(_scanEncPublicKey, strictDeviceOnly: true),
+      _deleteStorage(_scanEncPrivateKey, strictDeviceOnly: true),
+      _deleteStorage(_scanSignPublicKey, strictDeviceOnly: true),
+      _deleteStorage(_scanSignPrivateKey, strictDeviceOnly: true),
+    ]);
+  }
+
+  Future<void> _triggerStrictSecurityFailure(
+    String code, {
+    Object? cause,
+  }) async {
+    if (_strictFailureInProgress) {
+      return;
+    }
+    _strictFailureInProgress = true;
+    final message = cause == null ? code : '$code: $cause';
+    await _setSecurityError(message);
+    await _clearE2EState();
+    await _setPendingScan();
+    try {
+      await logout();
+    } finally {
+      status = 'Security lock: $code. Re-login with secure scan is required.';
+      notifyListeners();
+      _strictFailureInProgress = false;
+    }
+  }
+
   Future<void> startup() async {
     await restoreSession();
   }
 
   Future<void> restoreSession() async {
     try {
-      accessToken = await _storage.read(key: _accessTokenKey);
-      refreshToken = await _storage.read(key: _refreshTokenKey);
-      final expiry = await _storage.read(key: _accessTokenExpiryKey);
+      accessToken = await _readStorage(_accessTokenKey);
+      refreshToken = await _readStorage(_refreshTokenKey);
+      final expiry = await _readStorage(_accessTokenExpiryKey);
       accessTokenExpiresAt = expiry != null ? DateTime.tryParse(expiry) : null;
 
-      final storedAgentId = await _storage.read(key: _selectedAgentKey);
-      final storedWorkspaceId = await _storage.read(key: _selectedWorkspaceKey);
-      _selectedModel = await _storage.read(key: _selectedModelKey);
+      final storedAgentId = await _readStorage(_selectedAgentKey);
+      final storedWorkspaceId = await _readStorage(_selectedWorkspaceKey);
+      _selectedModel = await _readStorage(_selectedModelKey);
       _selectedApprovalPolicy =
-          await _storage.read(key: _selectedApprovalPolicyKey) ??
+          await _readStorage(_selectedApprovalPolicyKey) ??
               _selectedApprovalPolicy;
       _selectedSandboxMode =
-          await _storage.read(key: _selectedSandboxModeKey) ??
+          await _readStorage(_selectedSandboxModeKey) ??
               _selectedSandboxMode;
       _selectedEffort =
-          await _storage.read(key: _selectedEffortKey) ?? _selectedEffort;
+          await _readStorage(_selectedEffortKey) ?? _selectedEffort;
       _selectedCollaborationModeSlug =
-          await _storage.read(key: _selectedCollaborationModeKey);
-      final selectedSkillsRaw = await _storage.read(key: _selectedSkillsKey);
+          await _readStorage(_selectedCollaborationModeKey);
+      final selectedSkillsRaw = await _readStorage(_selectedSkillsKey);
       if (selectedSkillsRaw != null && selectedSkillsRaw.trim().isNotEmpty) {
         try {
           final decoded = jsonDecode(selectedSkillsRaw);
@@ -389,6 +558,13 @@ class NomadeProvider with ChangeNotifier {
           _selectedSkillPaths = [];
         }
       }
+      _pendingScanPayload =
+          await _readStorage(_scanPendingPayloadKey, strictDeviceOnly: true);
+      _pendingScanShortCode =
+          await _readStorage(_scanPendingShortCodeKey, strictDeviceOnly: true);
+      _securityError =
+          await _readStorage(_strictSecurityErrorKey, strictDeviceOnly: true);
+      await _restoreE2ERuntime();
 
       if (accessToken != null) {
         status = 'Restoring session...';
@@ -397,6 +573,11 @@ class NomadeProvider with ChangeNotifier {
         final ready = await ensureFreshToken();
         if (ready) {
           status = 'Authenticated';
+          try {
+            await approvePendingSecureScanIfAny();
+          } catch (_) {
+            // Keep authenticated session even if a stale pending scan cannot be resumed.
+          }
           await connectSocket();
           await bootstrapData(
             storedAgentId: storedAgentId,
@@ -420,30 +601,33 @@ class NomadeProvider with ChangeNotifier {
     try {
       if (accessToken == null) {
         await _storage.deleteAll();
+        _e2eRuntime = null;
+        _pendingScanPayload = null;
+        _pendingScanShortCode = null;
+        _securityError = null;
         return;
       }
 
       await Future.wait([
-        _storage.write(key: _accessTokenKey, value: accessToken),
-        _storage.write(key: _refreshTokenKey, value: refreshToken),
+        _writeStorage(_accessTokenKey, value: accessToken),
+        _writeStorage(_refreshTokenKey, value: refreshToken),
         if (accessTokenExpiresAt != null)
-          _storage.write(
-              key: _accessTokenExpiryKey,
+          _writeStorage(
+              _accessTokenExpiryKey,
               value: accessTokenExpiresAt!.toIso8601String()),
-        _storage.write(key: _selectedAgentKey, value: _selectedAgent?.id),
-        _storage.write(
-            key: _selectedWorkspaceKey, value: _selectedWorkspace?.id),
-        _storage.write(key: _selectedModelKey, value: _selectedModel),
-        _storage.write(
-            key: _selectedApprovalPolicyKey, value: _selectedApprovalPolicy),
-        _storage.write(
-            key: _selectedSandboxModeKey, value: _selectedSandboxMode),
-        _storage.write(key: _selectedEffortKey, value: _selectedEffort),
-        _storage.write(
-            key: _selectedCollaborationModeKey,
+        _writeStorage(_selectedAgentKey, value: _selectedAgent?.id),
+        _writeStorage(_selectedWorkspaceKey, value: _selectedWorkspace?.id),
+        _writeStorage(_selectedModelKey, value: _selectedModel),
+        _writeStorage(_selectedApprovalPolicyKey, value: _selectedApprovalPolicy),
+        _writeStorage(_selectedSandboxModeKey, value: _selectedSandboxMode),
+        _writeStorage(_selectedEffortKey, value: _selectedEffort),
+        _writeStorage(
+            _selectedCollaborationModeKey,
             value: _selectedCollaborationModeSlug),
-        _storage.write(
-            key: _selectedSkillsKey, value: jsonEncode(_selectedSkillPaths)),
+        _writeStorage(_selectedSkillsKey, value: jsonEncode(_selectedSkillPaths)),
+        _persistE2ERuntime(),
+        _persistPendingScan(),
+        _setSecurityError(_securityError),
       ]);
     } catch (e) {
       debugPrint('Persist session error: $e');
@@ -479,6 +663,10 @@ class NomadeProvider with ChangeNotifier {
     _selectedConversation = null;
     _selectedCollaborationModeSlug = null;
     _selectedSkillPaths = [];
+    _e2eRuntime = null;
+    _pendingScanPayload = null;
+    _pendingScanShortCode = null;
+    _securityError = null;
     activeTurnId = null;
     status = 'Logged out';
 
@@ -664,11 +852,20 @@ class NomadeProvider with ChangeNotifier {
     try {
       final loaded = await api.listConversationTurns(
           accessToken: accessToken!, conversationId: conversationId);
-      turns = loaded.map((e) => Turn.fromJson(e)).toList();
+      final decryptedTurns = <Turn>[];
+      for (final raw in loaded) {
+        final parsed = Turn.fromJson(raw);
+        decryptedTurns.add(_decryptTurnForUi(parsed));
+      }
+      turns = decryptedTurns;
       for (final turn in turns) {
         _hydrateTimelineFromTurn(turn);
       }
+      unawaited(_persistE2ERuntime());
       notifyListeners();
+    } on E2ERuntimeException catch (error) {
+      unawaited(_triggerStrictSecurityFailure('e2e_turn_hydration_failed',
+          cause: error));
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return;
@@ -1031,11 +1228,31 @@ class NomadeProvider with ChangeNotifier {
 
   void sendSessionInput(String sessionId, String data) {
     if (socket == null) return;
-    socket!.sink.add(jsonEncode({
-      'type': 'session.input',
-      'sessionId': sessionId,
-      'data': data,
-    }));
+    final runtime = _e2eRuntime;
+    if (runtime == null || !runtime.isReady) {
+      unawaited(_triggerStrictSecurityFailure('e2e_runtime_unavailable'));
+      return;
+    }
+    try {
+      final envelope = runtime.encryptEnvelope(
+        scope: 'session:$sessionId',
+        plaintext: data,
+      );
+      unawaited(_persistE2ERuntime());
+      socket!.sink.add(jsonEncode({
+        'type': 'session.input',
+        'sessionId': sessionId,
+        'data': '',
+        'e2eEnvelope': envelope,
+      }));
+    } catch (error) {
+      unawaited(
+        _triggerStrictSecurityFailure(
+          'e2e_session_input_encrypt_failed',
+          cause: error,
+        ),
+      );
+    }
   }
 
   void respondToServerRequest({
@@ -1048,14 +1265,36 @@ class NomadeProvider with ChangeNotifier {
     if (socket == null) {
       return;
     }
-    socket!.sink.add(jsonEncode({
-      'type': 'conversation.server.response',
-      'conversationId': conversationId,
-      'turnId': turnId,
-      'requestId': requestId,
-      if (result != null) 'result': result,
-      if (error != null && error.trim().isNotEmpty) 'error': error.trim(),
-    }));
+    final runtime = _e2eRuntime;
+    if (runtime == null || !runtime.isReady) {
+      unawaited(_triggerStrictSecurityFailure('e2e_runtime_unavailable'));
+      return;
+    }
+    try {
+      final envelope = runtime.encryptEnvelope(
+        scope: 'conversation:$conversationId',
+        plaintext: jsonEncode({
+          if (result != null) 'result': result,
+          if (error != null && error.trim().isNotEmpty) 'error': error.trim(),
+        }),
+      );
+      unawaited(_persistE2ERuntime());
+      socket!.sink.add(jsonEncode({
+        'type': 'conversation.server.response',
+        'conversationId': conversationId,
+        'turnId': turnId,
+        'requestId': requestId,
+        'e2eEnvelope': envelope,
+      }));
+    } catch (decryptError) {
+      unawaited(
+        _triggerStrictSecurityFailure(
+          'e2e_server_response_encrypt_failed',
+          cause: decryptError,
+        ),
+      );
+      return;
+    }
 
     final timeline = timelineForTurn(turnId);
     final item = timeline.upsertItem(
@@ -1153,6 +1392,249 @@ class NomadeProvider with ChangeNotifier {
     }
     runtime.eventsRendered += 1;
     runtime.unsupportedMethods.remove(method);
+  }
+
+  Map<String, dynamic>? _parseEnvelopeMap(dynamic value) {
+    if (value is! Map) {
+      return null;
+    }
+    final envelope = value.cast<String, dynamic>();
+    final v = (envelope['v'] as num?)?.toInt();
+    final alg = envelope['alg']?.toString();
+    final sender = envelope['senderDeviceId']?.toString() ?? '';
+    final nonce = envelope['nonce']?.toString() ?? '';
+    final aad = envelope['aad']?.toString() ?? '';
+    final ciphertext = envelope['ciphertext']?.toString() ?? '';
+    final sig = envelope['sig']?.toString() ?? '';
+    if (v != 1 ||
+        alg != 'xchacha20poly1305' ||
+        sender.isEmpty ||
+        nonce.isEmpty ||
+        aad.isEmpty ||
+        ciphertext.isEmpty ||
+        sig.isEmpty) {
+      return null;
+    }
+    return envelope;
+  }
+
+  Map<String, dynamic>? _tryParseJsonObject(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) {
+      return null;
+    }
+    try {
+      final decoded = jsonDecode(trimmed);
+      if (decoded is Map) {
+        return decoded.cast<String, dynamic>();
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _decryptEnvelopeToString({
+    required String scope,
+    required Map<String, dynamic> envelope,
+  }) {
+    final runtime = _e2eRuntime;
+    if (runtime == null || !runtime.isReady) {
+      throw const E2ERuntimeException('e2e_runtime_unavailable');
+    }
+    return runtime.decryptEnvelope(scope: scope, envelope: envelope);
+  }
+
+  Map<String, dynamic> _decryptEnvelopeToObject({
+    required String scope,
+    required Map<String, dynamic> envelope,
+  }) {
+    final plaintext =
+        _decryptEnvelopeToString(scope: scope, envelope: envelope).trim();
+    if (plaintext.isEmpty) {
+      return <String, dynamic>{};
+    }
+    final decoded = jsonDecode(plaintext);
+    if (decoded is! Map) {
+      throw const E2ERuntimeException('e2e_payload_invalid_json');
+    }
+    return decoded.cast<String, dynamic>();
+  }
+
+  bool _eventRequiresE2EEnvelope(String type) {
+    switch (type) {
+      case 'session.output':
+      case 'conversation.turn.diff.updated':
+      case 'conversation.item.started':
+      case 'conversation.item.delta':
+      case 'conversation.item.completed':
+      case 'conversation.turn.plan.updated':
+      case 'conversation.server.request':
+      case 'conversation.server.request.resolved':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  Turn _decryptTurnForUi(Turn turn) {
+    final scope = 'conversation:${turn.conversationId}';
+    var userPrompt = turn.userPrompt;
+    if (userPrompt.trim().isNotEmpty) {
+      final parsedPrompt = _tryParseJsonObject(userPrompt);
+      final promptEnvelope =
+          parsedPrompt == null ? null : _parseEnvelopeMap(parsedPrompt);
+      if (promptEnvelope == null) {
+        throw const E2ERuntimeException('e2e_turn_prompt_missing_envelope');
+      }
+      final promptPlain =
+          _decryptEnvelopeToString(scope: scope, envelope: promptEnvelope);
+      final promptParsed = _tryParseJsonObject(promptPlain);
+      if (promptParsed != null && promptParsed['prompt'] != null) {
+        userPrompt = promptParsed['prompt']?.toString() ?? '';
+      } else {
+        userPrompt = promptPlain;
+      }
+    }
+
+    var diff = turn.diff;
+    if (diff.trim().isNotEmpty) {
+      final parsedDiff = _tryParseJsonObject(diff);
+      final diffEnvelope = parsedDiff == null
+          ? null
+          : _parseEnvelopeMap(parsedDiff['e2eEnvelope']) ??
+              _parseEnvelopeMap(parsedDiff);
+      if (diffEnvelope == null) {
+        throw const E2ERuntimeException('e2e_turn_diff_missing_envelope');
+      }
+      final diffPayload =
+          _decryptEnvelopeToObject(scope: scope, envelope: diffEnvelope);
+      diff = diffPayload['diff']?.toString() ?? '';
+    }
+
+    final decryptedItems = <TurnItem>[];
+    for (final item in turn.items) {
+      final envelope = _parseEnvelopeMap(item.payload['e2eEnvelope']) ??
+          _parseEnvelopeMap(item.payload);
+      if (envelope == null) {
+        if (item.payload.isNotEmpty) {
+          throw const E2ERuntimeException('e2e_turn_item_missing_envelope');
+        }
+        decryptedItems.add(item);
+        continue;
+      }
+      final itemPayload =
+          _decryptEnvelopeToObject(scope: scope, envelope: envelope);
+      final value = itemPayload['item'];
+      final normalizedPayload = value is Map
+          ? value.cast<String, dynamic>()
+          : itemPayload.cast<String, dynamic>();
+      decryptedItems.add(
+        TurnItem(
+          id: item.id,
+          turnId: item.turnId,
+          itemId: item.itemId,
+          itemType: item.itemType,
+          ordinal: item.ordinal,
+          payload: normalizedPayload,
+          createdAt: item.createdAt,
+        ),
+      );
+    }
+
+    return Turn(
+      id: turn.id,
+      conversationId: turn.conversationId,
+      userPrompt: userPrompt,
+      codexTurnId: turn.codexTurnId,
+      status: turn.status,
+      diff: diff,
+      error: turn.error,
+      createdAt: turn.createdAt,
+      updatedAt: turn.updatedAt,
+      completedAt: turn.completedAt,
+      items: decryptedItems,
+    );
+  }
+
+  Map<String, dynamic> _decodeSocketEventStrict(Map<String, dynamic> event) {
+    final type = event['type']?.toString() ?? '';
+    if (!_eventRequiresE2EEnvelope(type)) {
+      return event;
+    }
+    final envelope = _parseEnvelopeMap(event['e2eEnvelope']);
+    if (envelope == null) {
+      throw const E2ERuntimeException('e2e_event_missing_envelope');
+    }
+
+    if (type == 'session.output') {
+      final sessionId = event['sessionId']?.toString() ?? '';
+      if (sessionId.isEmpty) {
+        throw const E2ERuntimeException('e2e_session_scope_missing');
+      }
+      event['data'] = _decryptEnvelopeToString(
+        scope: 'session:$sessionId',
+        envelope: envelope,
+      );
+      return event;
+    }
+
+    final conversationId = event['conversationId']?.toString() ?? '';
+    if (conversationId.isEmpty) {
+      throw const E2ERuntimeException('e2e_conversation_scope_missing');
+    }
+    final scope = 'conversation:$conversationId';
+    final payload = _decryptEnvelopeToObject(scope: scope, envelope: envelope);
+
+    if (type == 'conversation.turn.diff.updated') {
+      event['diff'] = payload['diff']?.toString() ?? '';
+      return event;
+    }
+    if (type == 'conversation.item.started' || type == 'conversation.item.completed') {
+      final item = payload['item'];
+      if (item is! Map) {
+        throw const E2ERuntimeException('e2e_event_item_missing');
+      }
+      event['item'] = item.cast<String, dynamic>();
+      return event;
+    }
+    if (type == 'conversation.item.delta') {
+      event['delta'] = payload['delta']?.toString() ?? '';
+      final stream = payload['stream']?.toString();
+      if (stream != null && stream.isNotEmpty) {
+        event['stream'] = stream;
+      }
+      return event;
+    }
+    if (type == 'conversation.turn.plan.updated') {
+      final plan = payload['plan'];
+      if (plan is! Map) {
+        throw const E2ERuntimeException('e2e_event_plan_missing');
+      }
+      event['plan'] = plan.cast<String, dynamic>();
+      return event;
+    }
+    if (type == 'conversation.server.request') {
+      final params = payload['params'];
+      if (params is! Map) {
+        throw const E2ERuntimeException('e2e_event_params_missing');
+      }
+      event['params'] = params.cast<String, dynamic>();
+      return event;
+    }
+    if (type == 'conversation.server.request.resolved') {
+      if (payload.containsKey('status')) {
+        event['status'] = payload['status'];
+      }
+      if (payload.containsKey('result')) {
+        event['result'] = payload['result'];
+      }
+      if (payload.containsKey('error')) {
+        event['error'] = payload['error'];
+      }
+      return event;
+    }
+    return event;
   }
 
   void _hydrateTimelineFromTurn(Turn turn) {
@@ -1281,7 +1763,19 @@ class NomadeProvider with ChangeNotifier {
   }
 
   void _onSocketEvent(dynamic raw) {
-    final event = jsonDecode(raw as String) as Map<String, dynamic>;
+    Map<String, dynamic> event;
+    try {
+      event = jsonDecode(raw as String) as Map<String, dynamic>;
+      event = _decodeSocketEventStrict(event);
+    } on E2ERuntimeException catch (error) {
+      unawaited(
+        _triggerStrictSecurityFailure('e2e_socket_event_rejected',
+            cause: error),
+      );
+      return;
+    } catch (_) {
+      return;
+    }
     final type = event['type'] as String?;
     final conversationIdFromEvent = event['conversationId']?.toString() ?? '';
     if (type != null &&
@@ -1863,6 +2357,11 @@ class NomadeProvider with ChangeNotifier {
       final requestedApproval = selectedApprovalPolicy;
       final requestedSandbox = selectedSandboxMode;
       final requestedEffort = selectedEffort;
+      final e2eRuntime = _e2eRuntime;
+      if (e2eRuntime == null || !e2eRuntime.isReady) {
+        await _triggerStrictSecurityFailure('e2e_runtime_unavailable');
+        return;
+      }
 
       _appendConversationDebugEvent(
         conversationId: conversationId,
@@ -1903,11 +2402,30 @@ class NomadeProvider with ChangeNotifier {
         }
       }
 
+      Map<String, dynamic> e2ePromptEnvelope;
+      try {
+        e2ePromptEnvelope = e2eRuntime.encryptEnvelope(
+          scope: 'conversation:$conversationId',
+          plaintext: jsonEncode({
+            'prompt': prompt,
+            'inputItems': inputItems,
+          }),
+        );
+      } on E2ERuntimeException catch (error) {
+        await _triggerStrictSecurityFailure('e2e_prompt_encrypt_failed',
+            cause: error);
+        return;
+      } catch (error) {
+        await _triggerStrictSecurityFailure('e2e_prompt_encrypt_failed',
+            cause: error);
+        return;
+      }
+      unawaited(_persistE2ERuntime());
+
       final turn = await api.createTurn(
         accessToken: accessToken!,
         conversationId: conversationId,
-        prompt: prompt,
-        inputItems: inputItems,
+        e2ePromptEnvelope: e2ePromptEnvelope,
         collaborationMode: collaborationMode,
         model: requestedModel,
         cwd: requestedCwd,
@@ -1996,11 +2514,267 @@ class NomadeProvider with ChangeNotifier {
   String? deviceCode;
   String? userCode;
 
+  Future<MobileDeviceIdentity> _ensureScanDeviceIdentity() async {
+    final existing = MobileDeviceIdentity(
+      deviceId:
+          await _readStorage(_scanDeviceIdKey, strictDeviceOnly: true) ?? '',
+      encPublicKey:
+          await _readStorage(_scanEncPublicKey, strictDeviceOnly: true) ?? '',
+      encPrivateKey:
+          await _readStorage(_scanEncPrivateKey, strictDeviceOnly: true) ?? '',
+      signPublicKey:
+          await _readStorage(_scanSignPublicKey, strictDeviceOnly: true) ?? '',
+      signPrivateKey:
+          await _readStorage(_scanSignPrivateKey, strictDeviceOnly: true) ?? '',
+      createdAt: DateTime.now().toUtc().toIso8601String(),
+    );
+    if (existing.deviceId.isNotEmpty &&
+        existing.encPublicKey.isNotEmpty &&
+        existing.encPrivateKey.isNotEmpty &&
+        existing.signPublicKey.isNotEmpty &&
+        existing.signPrivateKey.isNotEmpty) {
+      return existing;
+    }
+
+    final created = await MobileE2ERuntime.generateDeviceIdentity();
+    await Future.wait([
+      _writeStorage(
+        _scanDeviceIdKey,
+        value: created.deviceId,
+        strictDeviceOnly: true,
+      ),
+      _writeStorage(
+        _scanEncPublicKey,
+        value: created.encPublicKey,
+        strictDeviceOnly: true,
+      ),
+      _writeStorage(
+        _scanEncPrivateKey,
+        value: created.encPrivateKey,
+        strictDeviceOnly: true,
+      ),
+      _writeStorage(
+        _scanSignPublicKey,
+        value: created.signPublicKey,
+        strictDeviceOnly: true,
+      ),
+      _writeStorage(
+        _scanSignPrivateKey,
+        value: created.signPrivateKey,
+        strictDeviceOnly: true,
+      ),
+    ]);
+    return created;
+  }
+
+  String? _scanScopeFromPayload(String? scanPayload) {
+    final raw = scanPayload?.trim();
+    if (raw == null || raw.isEmpty) {
+      return null;
+    }
+    final parts = raw.split('.');
+    if (parts.length < 2) {
+      return null;
+    }
+    try {
+      final claims =
+          jsonDecode(utf8.decode(fromBase64Url(parts[1]))) as Map<String, dynamic>;
+      final deviceCode = claims['deviceCode']?.toString() ?? '';
+      if (deviceCode.isEmpty) {
+        return null;
+      }
+      return 'scan:$deviceCode';
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String? _scanScopeFromBundle(Map<String, dynamic> bundle) {
+    try {
+      final decodedAad = utf8.decode(fromBase64Url(bundle['aad']?.toString() ?? ''));
+      final aad = jsonDecode(decodedAad) as Map<String, dynamic>;
+      final scope = aad['scope']?.toString() ?? '';
+      return scope.isEmpty ? null : scope;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<ParsedSecureScan> stagePendingSecureScan(String rawInput) async {
+    final parsed = parseSecureScanInput(rawInput);
+    if (parsed == null || !parsed.hasData) {
+      throw Exception('invalid_scan_payload');
+    }
+    await stagePendingSecureScanData(
+      scanPayload: parsed.scanPayload,
+      scanShortCode: parsed.scanShortCode,
+      serverUrl: parsed.serverUrl,
+    );
+    return parsed;
+  }
+
+  Future<void> stagePendingSecureScanData({
+    String? scanPayload,
+    String? scanShortCode,
+    String? serverUrl,
+  }) async {
+    final normalizedServer = serverUrl?.trim();
+    if (normalizedServer != null && normalizedServer.isNotEmpty) {
+      final expected = api.baseUrl.replaceAll(RegExp(r'/$'), '');
+      final actual = normalizedServer.replaceAll(RegExp(r'/$'), '');
+      if (expected != actual) {
+        throw Exception('scan_server_mismatch:$actual');
+      }
+    }
+    if ((scanPayload == null || scanPayload.trim().isEmpty) &&
+        (scanShortCode == null || scanShortCode.trim().isEmpty)) {
+      throw Exception('invalid_scan_payload');
+    }
+    await _setPendingScan(
+      scanPayload: scanPayload,
+      scanShortCode: scanShortCode,
+    );
+    notifyListeners();
+  }
+
+  Future<void> approvePendingSecureScanIfAny() async {
+    if (accessToken == null) {
+      return;
+    }
+    final payload = _pendingScanPayload;
+    final shortCode = _pendingScanShortCode;
+    if ((payload == null || payload.trim().isEmpty) &&
+        (shortCode == null || shortCode.trim().isEmpty)) {
+      return;
+    }
+    await approveSecureScan(
+      scanPayload: payload,
+      scanShortCode: shortCode,
+    );
+  }
+
   Future<Map<String, String>> startLogin() async {
     final started = await api.startDeviceCode();
     deviceCode = started['deviceCode'] as String;
     userCode = started['userCode'] as String;
     return {'userCode': userCode!, 'deviceCode': deviceCode!};
+  }
+
+  Future<void> approveSecureScan({
+    String? scanPayload,
+    String? scanShortCode,
+  }) async {
+    if (accessToken == null) {
+      throw Exception('auth_required');
+    }
+    final normalizedPayload = scanPayload?.trim();
+    final normalizedShortCode = scanShortCode?.trim().toUpperCase();
+    if ((normalizedPayload == null || normalizedPayload.isEmpty) &&
+        (normalizedShortCode == null || normalizedShortCode.isEmpty)) {
+      throw Exception('scan_payload_or_short_code_required');
+    }
+
+    await _setPendingScan(
+      scanPayload: normalizedPayload,
+      scanShortCode: normalizedShortCode,
+    );
+
+    final identity = await _ensureScanDeviceIdentity();
+    final exchangeKeyPair =
+        await MobileE2ERuntime.generateOneTimeScanExchangeKeyPair();
+    await api.approveScanSecure(
+      accessToken: accessToken!,
+      scanPayload: normalizedPayload,
+      scanShortCode: normalizedShortCode,
+      mobileDevice: {
+        'deviceId': identity.deviceId,
+        'name': 'Nomade Mobile',
+        'platform': defaultTargetPlatform.name,
+        'encPublicKey': identity.encPublicKey,
+        'signPublicKey': identity.signPublicKey,
+        'exchangePublicKey': exchangeKeyPair.publicKey,
+      },
+    );
+
+    final startedAt = DateTime.now();
+    while (DateTime.now().difference(startedAt).inSeconds < 120) {
+      final state = await api.scanMobileAck(
+        accessToken: accessToken!,
+        scanPayload: normalizedPayload,
+        scanShortCode: normalizedShortCode,
+      );
+      final statusValue = state['status']?.toString() ?? 'pending';
+      if (statusValue == 'ready') {
+        final hostBundleRaw = state['hostBundle'];
+        if (hostBundleRaw is! Map) {
+          throw Exception('scan_host_bundle_missing');
+        }
+        final hostBundle = hostBundleRaw.cast<String, dynamic>();
+        final hostExchangePublicKey =
+            state['hostExchangePublicKey']?.toString() ?? '';
+        if (hostExchangePublicKey.isEmpty) {
+          throw Exception('scan_host_exchange_key_missing');
+        }
+        final scanScope = _scanScopeFromPayload(normalizedPayload) ??
+            _scanScopeFromBundle(hostBundle);
+        if (scanScope == null || scanScope.isEmpty) {
+          throw Exception('scan_scope_missing');
+        }
+        ScanBootstrapState bootstrap;
+        try {
+          bootstrap = await MobileE2ERuntime.decryptScanBootstrap(
+            hostBundle: hostBundle,
+            scanScope: scanScope,
+            mobileExchangePrivateKey: exchangeKeyPair.privateKey,
+            hostExchangePublicKey: hostExchangePublicKey,
+          );
+          final snapshot = MobileE2ESnapshot(
+            epoch: bootstrap.epoch,
+            rootKey: bootstrap.rootKey,
+            device: identity,
+            peers: {
+              bootstrap.hostDeviceId: MobilePeerDevice(
+                deviceId: bootstrap.hostDeviceId,
+                encPublicKey: bootstrap.hostEncPublicKey,
+                signPublicKey: bootstrap.hostSignPublicKey,
+                addedAt: DateTime.now().toUtc().toIso8601String(),
+              ),
+            },
+            seqByScope: const {},
+          );
+          _e2eRuntime = await MobileE2ERuntime.fromSnapshot(snapshot);
+          if (_e2eRuntime == null || !_e2eRuntime!.isReady) {
+            throw const E2ERuntimeException('e2e_runtime_init_failed');
+          }
+        } on E2ERuntimeException catch (error) {
+          await _triggerStrictSecurityFailure('e2e_scan_bootstrap_failed',
+              cause: error);
+          rethrow;
+        } catch (error) {
+          await _triggerStrictSecurityFailure('e2e_scan_bootstrap_failed',
+              cause: error);
+          rethrow;
+        }
+        await _setSecurityError(null);
+        await _persistE2ERuntime();
+        await api.scanMobileAck(
+          accessToken: accessToken!,
+          scanPayload: normalizedPayload,
+          scanShortCode: normalizedShortCode,
+          ack: true,
+        );
+        await clearPendingScan();
+        status = 'Secure scan approved';
+        notifyListeners();
+        return;
+      }
+      if (statusValue == 'pending_key_exchange' || statusValue == 'pending') {
+        await Future.delayed(const Duration(seconds: 1));
+        continue;
+      }
+      throw Exception('scan_state_unexpected:$statusValue');
+    }
+    throw Exception('scan_key_exchange_timeout');
   }
 
   Future<void> approveAndPoll(String email) async {
@@ -2015,6 +2789,11 @@ class NomadeProvider with ChangeNotifier {
         _setTokensFromPayload(polled);
         await persistSession();
         status = 'Authenticated';
+        try {
+          await approvePendingSecureScanIfAny();
+        } catch (_) {
+          // Continue account login even if secure scan resume fails.
+        }
         await connectSocket();
         await bootstrapData();
         break;

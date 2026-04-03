@@ -2,7 +2,12 @@ import jwt from "jsonwebtoken";
 import { randomToken } from "@nomade/shared";
 import type { UserClaims } from "@nomade/shared";
 import { type Config } from "./config.js";
-import { Repositories, type User } from "./repositories.js";
+import {
+  Repositories,
+  type User,
+  type DeviceCodeStartMode,
+  type ScanStartHostDevice
+} from "./repositories.js";
 
 export interface TokenPair {
   accessToken: string;
@@ -16,24 +21,75 @@ export class AuthService {
     private readonly repositories: Repositories
   ) {}
 
-  async startDeviceCode(): Promise<{
+  async startDeviceCode(params?: {
+    mode?: DeviceCodeStartMode;
+    hostDevice?: ScanStartHostDevice;
+  }): Promise<{
     deviceCode: string;
     userCode: string;
     expiresAt: Date;
     intervalSec: number;
     verificationUri: string;
     verificationUriComplete: string;
+    mode: DeviceCodeStartMode;
+    scanPayload?: string;
+    scanShortCode?: string;
   }> {
-    const created = await this.repositories.createDeviceCode(this.config.deviceCodeTtlSec);
+    const mode = params?.mode ?? "legacy";
+    const created = await this.repositories.createDeviceCode({
+      ttlSec: this.config.deviceCodeTtlSec,
+      mode,
+      hostDevice: params?.hostDevice
+    });
     const base = this.config.appBaseUrl.replace(/\/$/, "");
     const verificationUri = `${base}/web/activate`;
     const verificationUriComplete = `${verificationUri}?user_code=${encodeURIComponent(created.userCode)}`;
+    let scanPayload: string | undefined;
+    if (created.mode === "scan_secure" && created.scanId) {
+      scanPayload = jwt.sign(
+        {
+          kind: "scan_secure",
+          scanId: created.scanId,
+          deviceCode: created.deviceCode,
+          userCode: created.userCode
+        },
+        this.config.jwtSecret,
+        {
+          expiresIn: this.config.deviceCodeTtlSec,
+          issuer: "nomade-control-api"
+        }
+      );
+    }
     return {
       ...created,
       intervalSec: 2,
       verificationUri,
-      verificationUriComplete
+      verificationUriComplete,
+      scanPayload,
+      scanShortCode: created.scanShortCode
     };
+  }
+
+  verifyScanPayload(token: string): {
+    scanId: string;
+    deviceCode: string;
+    userCode: string;
+  } | null {
+    try {
+      const claims = jwt.verify(token, this.config.jwtSecret) as Record<string, unknown>;
+      if (claims.kind !== "scan_secure") {
+        return null;
+      }
+      const scanId = typeof claims.scanId === "string" ? claims.scanId : "";
+      const deviceCode = typeof claims.deviceCode === "string" ? claims.deviceCode : "";
+      const userCode = typeof claims.userCode === "string" ? claims.userCode : "";
+      if (!scanId || !deviceCode || !userCode) {
+        return null;
+      }
+      return { scanId, deviceCode, userCode };
+    } catch {
+      return null;
+    }
   }
 
   async approveDeviceCode(params: { userCode: string; email: string }): Promise<boolean> {
@@ -41,19 +97,45 @@ export class AuthService {
     return this.repositories.approveDeviceCode(params.userCode, user.id);
   }
 
-  async pollDeviceCode(deviceCode: string): Promise<{ status: "pending" } | { status: "expired" } | { status: "ok"; tokens: TokenPair }> {
-    const consumed = await this.repositories.consumeApprovedDeviceCode(deviceCode);
-    if (!consumed || "pending" in consumed || "expired" in consumed) {
-      if (consumed && "pending" in consumed) {
-        return { status: "pending" };
+  async pollDeviceCode(deviceCode: string): Promise<
+    | { status: "pending" }
+    | { status: "pending_scan" }
+    | {
+        status: "pending_key_exchange";
+        mobileDeviceId?: string | null;
+        mobileEncPublicKey?: string | null;
+        mobileSignPublicKey?: string | null;
+        mobileExchangePublicKey?: string | null;
+        hostBundleReady: boolean;
       }
-      if (consumed && "expired" in consumed) {
-        return { status: "expired" };
-      }
+    | { status: "expired" }
+    | { status: "ok"; tokens: TokenPair }
+  > {
+    const state = await this.repositories.consumeDeviceCodePollState(deviceCode);
+    if (!state) {
       return { status: "pending" };
     }
+    if (state.status === "pending") {
+      return { status: "pending" };
+    }
+    if (state.status === "pending_scan") {
+      return { status: "pending_scan" };
+    }
+    if (state.status === "pending_key_exchange") {
+      return {
+        status: "pending_key_exchange",
+        mobileDeviceId: state.mobileDeviceId,
+        mobileEncPublicKey: state.mobileEncPublicKey,
+        mobileSignPublicKey: state.mobileSignPublicKey,
+        mobileExchangePublicKey: state.mobileExchangePublicKey,
+        hostBundleReady: state.hostBundleReady
+      };
+    }
+    if (state.status === "expired") {
+      return { status: "expired" };
+    }
 
-    const user = await this.repositories.getUserById(consumed.userId);
+    const user = await this.repositories.getUserById(state.userId);
     if (!user) {
       return { status: "pending" };
     }

@@ -23,6 +23,39 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS user_devices (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      enc_public_key TEXT NOT NULL,
+      sign_public_key TEXT NOT NULL,
+      revoked_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS device_scan_flows (
+      device_code_id TEXT PRIMARY KEY REFERENCES device_codes(id) ON DELETE CASCADE,
+      mode TEXT NOT NULL DEFAULT 'legacy',
+      scan_id TEXT UNIQUE,
+      scan_short_code TEXT UNIQUE,
+      status TEXT NOT NULL DEFAULT 'pending_scan',
+      host_device_id TEXT,
+      host_enc_public_key TEXT,
+      host_sign_public_key TEXT,
+      host_exchange_public_key TEXT,
+      mobile_user_id TEXT REFERENCES users(id),
+      mobile_device_id TEXT,
+      mobile_enc_public_key TEXT,
+      mobile_sign_public_key TEXT,
+      mobile_exchange_public_key TEXT,
+      host_bundle JSONB,
+      key_acked_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS refresh_tokens (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id),
@@ -202,6 +235,12 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS system_flags (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS service_id TEXT;
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS token_required BOOLEAN NOT NULL DEFAULT TRUE;
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_at TIMESTAMPTZ;
@@ -236,5 +275,21 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_stripe_sub_id ON subscriptions (stripe_subscription_id)
       WHERE stripe_subscription_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_rate_limits_updated_at ON rate_limits (updated_at);
+    CREATE INDEX IF NOT EXISTS idx_user_devices_user_id ON user_devices (user_id);
+    CREATE INDEX IF NOT EXISTS idx_device_scan_flows_status ON device_scan_flows (status);
+    CREATE INDEX IF NOT EXISTS idx_device_scan_flows_mobile_user_id ON device_scan_flows (mobile_user_id);
+  `);
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM system_flags WHERE key = 'e2e_cutover_v15') THEN
+        DELETE FROM conversation_items;
+        DELETE FROM conversation_turns;
+        INSERT INTO system_flags (key, value)
+        VALUES ('e2e_cutover_v15', NOW()::text);
+      END IF;
+    END;
+    $$;
   `);
 };

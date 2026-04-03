@@ -30,7 +30,8 @@ describe("auth primitives", () => {
         createDeviceCode: async () => ({
           deviceCode: "dc_1",
           userCode: "ABCD1234",
-          expiresAt: new Date("2026-04-03T10:00:00.000Z")
+          expiresAt: new Date("2026-04-03T10:00:00.000Z"),
+          mode: "legacy"
         })
       } as any
     );

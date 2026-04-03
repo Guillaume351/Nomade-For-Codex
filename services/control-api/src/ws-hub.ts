@@ -941,7 +941,10 @@ export class WsHub {
     if (type === "conversation.turn.diff.updated") {
       const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
       const turnId = String(msg.turnId ?? "");
-      const diff = String(msg.diff ?? "");
+      const e2eEnvelope = msg.e2eEnvelope && typeof msg.e2eEnvelope === "object"
+        ? (msg.e2eEnvelope as Record<string, unknown>)
+        : null;
+      const diff = e2eEnvelope ? JSON.stringify({ e2eEnvelope }) : String(msg.diff ?? "");
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
       if (turnId) {
         void this.repositories.updateConversationTurnDiff(turnId, diff);
@@ -956,6 +959,10 @@ export class WsHub {
       const itemId = String(msg.itemId ?? "");
       const itemType = String(msg.itemType ?? "unknown");
       const item = (msg.item as Record<string, unknown>) ?? {};
+      const payload =
+        msg.e2eEnvelope && typeof msg.e2eEnvelope === "object"
+          ? { e2eEnvelope: msg.e2eEnvelope as Record<string, unknown> }
+          : item;
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
 
       if (turnId && itemId) {
@@ -963,7 +970,7 @@ export class WsHub {
           turnId,
           itemId,
           itemType,
-          payload: item
+          payload
         });
       }
       this.broadcastToUser(userId, msg);
@@ -976,6 +983,10 @@ export class WsHub {
       const itemId = String(msg.itemId ?? "");
       const itemType = String(msg.itemType ?? "unknown");
       const item = (msg.item as Record<string, unknown>) ?? {};
+      const payload =
+        msg.e2eEnvelope && typeof msg.e2eEnvelope === "object"
+          ? { e2eEnvelope: msg.e2eEnvelope as Record<string, unknown> }
+          : item;
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
 
       if (turnId && itemId) {
@@ -983,7 +994,7 @@ export class WsHub {
           turnId,
           itemId,
           itemType,
-          payload: item
+          payload
         });
       }
       this.broadcastToUser(userId, msg);

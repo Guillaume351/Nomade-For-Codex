@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../providers/nomade_provider.dart';
 import 'home_screen.dart';
+import 'secure_scan_camera_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -66,6 +67,39 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  Future<void> _handleScanInApp() async {
+    final result = await Navigator.of(context).push<SecureScanCameraResult>(
+      MaterialPageRoute(
+        builder: (_) => const SecureScanCameraScreen(),
+      ),
+    );
+    if (!mounted || result == null || !result.hasData) {
+      return;
+    }
+    try {
+      await context.read<NomadeProvider>().stagePendingSecureScanData(
+            scanPayload: result.scanPayload,
+            scanShortCode: result.scanShortCode,
+            serverUrl: result.serverUrl,
+          );
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Secure scan captured. Sign in to complete approval.'),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Invalid secure scan: $error')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -123,6 +157,10 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget _buildEmailStep(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final provider = context.watch<NomadeProvider>();
+    final hasPendingScan = (provider.pendingScanPayload?.trim().isNotEmpty ??
+            false) ||
+        (provider.pendingScanShortCode?.trim().isNotEmpty ?? false);
 
     return Column(
       key: const ValueKey('email-step'),
@@ -154,6 +192,22 @@ class _LoginScreenState extends State<LoginScreen> {
             height: 1.45,
           ),
         ),
+        const SizedBox(height: 12),
+        if (hasPendingScan)
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: scheme.primaryContainer.withValues(alpha: 0.44),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              'A secure scan is pending and will resume automatically after sign-in.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onPrimaryContainer,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
         const SizedBox(height: 22),
         TextField(
           controller: _emailController,
@@ -176,6 +230,12 @@ class _LoginScreenState extends State<LoginScreen> {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               : const Text('Request login code'),
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(
+          onPressed: _isLoading ? null : _handleScanInApp,
+          icon: const Icon(Icons.qr_code_scanner_rounded),
+          label: const Text('Scan secure login QR'),
         ),
       ],
     );

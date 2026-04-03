@@ -16,6 +16,28 @@ export interface UserSessionConfig {
   refreshToken: string;
   expiresAt: string;
   email?: string;
+  e2e?: {
+    epoch: number;
+    rootKey: string;
+    device: {
+      deviceId: string;
+      encPublicKey: string;
+      encPrivateKey: string;
+      signPublicKey: string;
+      signPrivateKey: string;
+      createdAt: string;
+    };
+    peers: Record<
+      string,
+      {
+        deviceId: string;
+        encPublicKey: string;
+        signPublicKey: string;
+        addedAt: string;
+      }
+    >;
+    seqByScope?: Record<string, number>;
+  };
 }
 
 export const defaultConfigPath = (): string => {

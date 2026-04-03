@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../models/conversation.dart';
 import '../models/workspace.dart';
 import '../providers/nomade_provider.dart';
+import 'secure_scan_camera_screen.dart';
 import '../widgets/chat_turn_widget.dart';
 import '../widgets/e2e_guide_sheet.dart';
 import '../widgets/sidebar.dart';
@@ -69,6 +70,41 @@ class _HomeScreenState extends State<HomeScreen> {
         curve: Curves.easeOutCubic,
       );
     });
+  }
+
+  Future<void> _startSecureScanApproval() async {
+    final messenger = ScaffoldMessenger.of(context);
+
+    final result = await Navigator.of(context).push<SecureScanCameraResult>(
+      MaterialPageRoute(
+        builder: (_) => const SecureScanCameraScreen(
+          title: 'Approve secure scan',
+        ),
+      ),
+    );
+    if (!mounted || result == null || !result.hasData) {
+      return;
+    }
+
+    final provider = context.read<NomadeProvider>();
+    try {
+      await provider.stagePendingSecureScanData(
+        scanPayload: result.scanPayload,
+        scanShortCode: result.scanShortCode,
+        serverUrl: result.serverUrl,
+      );
+      await provider.approveSecureScan(
+        scanPayload: result.scanPayload,
+        scanShortCode: result.scanShortCode,
+      );
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Secure scan approved')),
+      );
+    } catch (error) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Secure scan failed: $error')),
+      );
+    }
   }
 
   @override
@@ -231,6 +267,11 @@ class _HomeScreenState extends State<HomeScreen> {
               icon: Icons.menu_book_outlined,
               tooltip: 'Guide E2E',
               onPressed: () => showE2eGuideSheet(context),
+            ),
+            _buildTopAction(
+              icon: Icons.qr_code_scanner_rounded,
+              tooltip: 'Approve secure scan',
+              onPressed: _startSecureScanApproval,
             ),
             if (provider.selectedWorkspace != null)
               _buildTopAction(
@@ -1355,7 +1396,7 @@ class _OptionsSheet extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         DropdownButtonFormField<String>(
-          value: currentValue,
+          initialValue: currentValue,
           items: sanitizedItems
               .map((item) => DropdownMenuItem<String>(
                     value: item,
