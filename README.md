@@ -27,6 +27,7 @@ Fast one-command dev loop:
 
 Detailed local flow: [`QUICKSTART.md`](./QUICKSTART.md)  
 Troubleshooting: [`docs/troubleshooting.md`](./docs/troubleshooting.md)
+Deployed usage (SaaS/staging/self-host): [`docs/deployed-usage.md`](./docs/deployed-usage.md)
 
 ## Self-host
 Use [`deploy/selfhost/docker-compose.yml`](./deploy/selfhost/docker-compose.yml).
