@@ -89,3 +89,34 @@ npm --workspace agent/nomade-agent run pair -- --server-url https://app.example.
 - `invalid_token`: run `logout`, then `login` again.
 - `device_limit_reached`: remove device from account/devices or upgrade plan from account/billing page.
 - Agent appears offline: ensure `run` command is still active and machine can reach API/WebSocket.
+
+## 8) Use from Flutter app (iPhone / iPad) to control the paired machine
+The mobile app controls an already paired/running agent. Recommended order:
+
+1. On the host machine (the machine you want to control), complete:
+   - `login`
+   - `pair`
+   - `run`
+2. On your Mac (for iOS build), run Flutter app with deployed API URL:
+
+```bash
+cd apps/mobile
+fvm install
+fvm flutter pub get
+fvm flutter devices
+fvm flutter run -d <ios-device-id> --dart-define NOMADE_API_URL=https://app.example.com
+```
+
+3. In the app:
+   - Sign in.
+   - Open sidebar and select an online agent.
+   - Create/select a workspace.
+   - Create/select a conversation and send prompts.
+
+### Important auth note (current mobile build)
+Current mobile login screen calls `POST /auth/device/approve` with `{ userCode, email }`.
+This works only if:
+- `LEGACY_DEVICE_APPROVE_ENABLED=true`, or
+- mobile login is updated to an authenticated web/OIDC approval flow.
+
+With hardened SaaS defaults (`LEGACY_DEVICE_APPROVE_ENABLED=false`), current mobile login may fail until mobile auth is migrated.
