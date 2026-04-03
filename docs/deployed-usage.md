@@ -6,6 +6,7 @@ This guide explains how to use Nomade from your machine against a remote deploye
 - Node.js 20+ and npm.
 - Network access to your deployed control API URL (for example `https://app.example.com`).
 - A user account on that deployed instance (OIDC or allowed login flow).
+- No extra system package is required for QR display (rendered by the CLI itself).
 
 ## 1) Set the server URL
 You can pass `--server-url` to each command, or set it once:

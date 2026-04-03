@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import QRCode from "qrcode";
 import { z } from "zod";
 import { defaultSessionPath, readUserSession, writeUserSession, type UserSessionConfig } from "./config.js";
 
@@ -57,20 +58,18 @@ const openInBrowser = async (url: string): Promise<void> => {
   }
 };
 
-const printLocalQrIfAvailable = (value: string): void => {
-  const probe = spawnSync("qrencode", ["--help"], { stdio: "ignore" });
-  if (probe.status !== 0) {
-    console.log("QR rendering not available locally (`qrencode` not found).");
-    return;
-  }
-
-  const rendered = spawnSync("qrencode", ["-t", "ANSIUTF8", value], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"]
-  });
-  if (rendered.status === 0 && rendered.stdout) {
-    console.log(rendered.stdout.toString());
-    return;
+const printLocalQr = async (value: string): Promise<void> => {
+  try {
+    const rendered = await QRCode.toString(value, {
+      type: "terminal",
+      small: true
+    });
+    if (rendered) {
+      console.log(rendered);
+      return;
+    }
+  } catch {
+    // fallback below
   }
   console.log("QR rendering failed locally. Use the URL above.");
 };
@@ -200,8 +199,8 @@ export const loginWithDeviceCode = async (params: {
   console.log(`Open this URL on any device: ${verificationUriComplete}`);
   console.log(`Manual URL: ${verificationUri}`);
   console.log("");
-  console.log("QR (local generation):");
-  printLocalQrIfAvailable(verificationUriComplete);
+  console.log("QR:");
+  await printLocalQr(verificationUriComplete);
   console.log("");
 
   if (params.openBrowser !== false) {
