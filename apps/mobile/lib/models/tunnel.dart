@@ -1,3 +1,28 @@
+class TunnelDiagnostic {
+  TunnelDiagnostic({
+    required this.code,
+    required this.message,
+    required this.scope,
+    this.at,
+  });
+
+  factory TunnelDiagnostic.fromJson(Map<String, dynamic> json) {
+    return TunnelDiagnostic(
+      code: (json['code'] ?? '').toString(),
+      message: (json['message'] ?? '').toString(),
+      scope: (json['scope'] ?? 'transport').toString(),
+      at: json['timestamp'] != null
+          ? DateTime.tryParse(json['timestamp'].toString())
+          : null,
+    );
+  }
+
+  final String code;
+  final String message;
+  final String scope;
+  final DateTime? at;
+}
+
 class TunnelPreview {
   TunnelPreview({
     required this.id,
@@ -12,6 +37,7 @@ class TunnelPreview {
     this.lastProbeStatus,
     this.lastError,
     this.lastProbeCode,
+    this.diagnostic,
   });
 
   factory TunnelPreview.fromJson(Map<String, dynamic> json) {
@@ -30,6 +56,15 @@ class TunnelPreview {
       lastProbeStatus: json['lastProbeStatus']?.toString(),
       lastError: json['lastError']?.toString(),
       lastProbeCode: (json['lastProbeCode'] as num?)?.toInt(),
+      diagnostic: json['diagnostic'] is Map<String, dynamic>
+          ? TunnelDiagnostic.fromJson(
+              json['diagnostic'] as Map<String, dynamic>,
+            )
+          : json['diagnostic'] is Map
+              ? TunnelDiagnostic.fromJson(
+                  (json['diagnostic'] as Map).cast<String, dynamic>(),
+                )
+              : null,
     );
   }
 
@@ -45,6 +80,7 @@ class TunnelPreview {
   final String? lastProbeStatus;
   final String? lastError;
   final int? lastProbeCode;
+  final TunnelDiagnostic? diagnostic;
 
   TunnelPreview copyWith({
     String? status,
@@ -53,6 +89,8 @@ class TunnelPreview {
     String? lastError,
     int? lastProbeCode,
     DateTime? lastProbeAt,
+    TunnelDiagnostic? diagnostic,
+    bool replaceDiagnostic = false,
   }) {
     return TunnelPreview(
       id: id,
@@ -67,6 +105,7 @@ class TunnelPreview {
       lastProbeStatus: lastProbeStatus ?? this.lastProbeStatus,
       lastError: lastError ?? this.lastError,
       lastProbeCode: lastProbeCode ?? this.lastProbeCode,
+      diagnostic: replaceDiagnostic ? diagnostic : this.diagnostic,
     );
   }
 }

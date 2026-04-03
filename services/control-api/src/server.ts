@@ -3,19 +3,98 @@ import path from "node:path";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
 import { sha256 } from "@nomade/shared";
 import { loadConfig } from "./config.js";
 import { createPool, ensureSchema } from "./db.js";
-import { Repositories } from "./repositories.js";
+import { Repositories, type TunnelRecord } from "./repositories.js";
 import { AuthService } from "./auth.js";
 import { requireUserAuth } from "./http-auth.js";
 import { WsHub } from "./ws-hub.js";
 import { DevServiceManager } from "./service-manager.js";
+import { previewOriginForSlug } from "./preview-origin.js";
+import {
+  buildTransportTunnelDiagnostic,
+  classifyProxyResponseDiagnostic,
+  type TunnelDiagnostic
+} from "./tunnel-diagnostics.js";
 
 const jsonLimit = "2mb";
 const agentOnlineWindowMs = 30_000;
+const proxyResponseSecurityHeaders = [
+  "content-security-policy",
+  "cross-origin-opener-policy",
+  "cross-origin-resource-policy",
+  "origin-agent-cluster",
+  "referrer-policy",
+  "strict-transport-security",
+  "x-content-type-options",
+  "x-dns-prefetch-control",
+  "x-download-options",
+  "x-frame-options",
+  "x-permitted-cross-domain-policies",
+  "x-xss-protection"
+] as const;
+
+const clearSecurityHeadersForProxiedResponse = (res: express.Response): void => {
+  for (const header of proxyResponseSecurityHeaders) {
+    res.removeHeader(header);
+  }
+};
+
+const isValidWsCloseCode = (code: number): boolean => {
+  if (code >= 3000 && code <= 4999) {
+    return true;
+  }
+  if (code < 1000 || code > 1014) {
+    return false;
+  }
+  return code !== 1004 && code !== 1005 && code !== 1006;
+};
+
+const normalizeWsCloseCode = (code: number | undefined): number => {
+  if (typeof code === "number" && isValidWsCloseCode(code)) {
+    return code;
+  }
+  return 1000;
+};
+
+const sanitizeWsCloseReason = (reason: string): string => {
+  if (!reason) {
+    return "";
+  }
+  const encoded = Buffer.from(reason, "utf8");
+  if (encoded.length <= 123) {
+    return reason;
+  }
+  return encoded.subarray(0, 123).toString("utf8");
+};
+
+const closeWebSocketSafely = (socket: WebSocket, code: number | undefined, reason: string | undefined): void => {
+  if (socket.readyState === socket.CLOSED || socket.readyState === socket.CLOSING) {
+    return;
+  }
+  try {
+    if (socket.readyState === socket.CONNECTING) {
+      socket.terminate();
+      return;
+    }
+    const safeCode = normalizeWsCloseCode(code);
+    const safeReason = sanitizeWsCloseReason(reason ?? "");
+    if (safeReason.length > 0) {
+      socket.close(safeCode, safeReason);
+      return;
+    }
+    socket.close(safeCode);
+  } catch {
+    try {
+      socket.terminate();
+    } catch {
+      // no-op
+    }
+  }
+};
 
 const isTruthyQuery = (value: unknown): boolean => {
   if (typeof value !== "string") {
@@ -51,6 +130,23 @@ const turnsNeedRepair = (
   return false;
 };
 
+const derivePromptFromInputItems = (inputItems: Array<Record<string, unknown>>): string => {
+  const textParts: string[] = [];
+  for (const item of inputItems) {
+    if (item.type !== "text") {
+      continue;
+    }
+    const text = typeof item.text === "string" ? item.text.trim() : "";
+    if (text.length > 0) {
+      textParts.push(text);
+    }
+  }
+  if (textParts.length > 0) {
+    return textParts.join("\n\n");
+  }
+  return "[non-text input]";
+};
+
 export const createServer = async (): Promise<http.Server> => {
   const config = loadConfig();
   const pool = createPool(config.databaseUrl);
@@ -70,10 +166,20 @@ export const createServer = async (): Promise<http.Server> => {
 
   const server = http.createServer(app);
   const wsHub = new WsHub(auth, repositories, server);
-  const devServiceManager = new DevServiceManager(repositories, wsHub, config.previewBaseDomain);
+  const devServiceManager = new DevServiceManager(
+    repositories,
+    wsHub,
+    config.previewBaseDomain,
+    config.previewBaseOrigin
+  );
   const internalTunnelWsServer = new WebSocketServer({ noServer: true });
 
-  const previewOriginFor = (slug: string): string => `https://${slug}.${config.previewBaseDomain}`;
+  const previewOriginFor = (slug: string): string =>
+    previewOriginForSlug({
+      slug,
+      baseDomain: config.previewBaseDomain,
+      baseOrigin: config.previewBaseOrigin
+    });
 
   const renderPreviewUrl = (params: {
     slug: string;
@@ -88,6 +194,168 @@ export const createServer = async (): Promise<http.Server> => {
       return origin;
     }
     return `${origin}?nomade_token=${encodeURIComponent(params.token)}`;
+  };
+
+  const tunnelDiagnostics = new Map<string, TunnelDiagnostic>();
+
+  const tunnelStatusFromRecord = (
+    tunnel: TunnelRecord
+  ): "open" | "closed" | "error" | "healthy" | "unhealthy" => {
+    if (tunnel.status === "closed") {
+      return "closed";
+    }
+    if (tunnel.status !== "open") {
+      return "error";
+    }
+    if (tunnel.last_probe_status === "ok") {
+      return "healthy";
+    }
+    if (tunnel.last_probe_status === "error") {
+      return "unhealthy";
+    }
+    return "open";
+  };
+
+  const getTunnelDiagnostic = (tunnelId: string): TunnelDiagnostic | null => {
+    return tunnelDiagnostics.get(tunnelId) ?? null;
+  };
+
+  const sameDiagnostic = (
+    left: TunnelDiagnostic | null | undefined,
+    right: TunnelDiagnostic | null | undefined
+  ): boolean => {
+    if (!left && !right) {
+      return true;
+    }
+    if (!left || !right) {
+      return false;
+    }
+    return left.code === right.code && left.scope === right.scope && left.message === right.message;
+  };
+
+  const updateTunnelDiagnostic = (params: {
+    tunnel: TunnelRecord;
+    diagnostic: TunnelDiagnostic | null;
+    detail?: string;
+  }): void => {
+    const existing = getTunnelDiagnostic(params.tunnel.id);
+    if (sameDiagnostic(existing, params.diagnostic)) {
+      return;
+    }
+    if (params.diagnostic) {
+      tunnelDiagnostics.set(params.tunnel.id, params.diagnostic);
+    } else {
+      tunnelDiagnostics.delete(params.tunnel.id);
+    }
+    wsHub.publishTunnelStatus(params.tunnel.id, {
+      status: tunnelStatusFromRecord(params.tunnel),
+      detail: params.detail,
+      diagnostic: params.diagnostic
+    });
+  };
+
+  const tunnelAgentCandidates = (tunnel: TunnelRecord): string[] => {
+    const online = wsHub.listOnlineAgentIdsForUser(tunnel.user_id);
+    return [tunnel.agent_id, ...online.filter((agentId) => agentId !== tunnel.agent_id)];
+  };
+
+  const persistTunnelAgent = async (tunnel: TunnelRecord, agentId: string): Promise<void> => {
+    if (tunnel.agent_id === agentId) {
+      return;
+    }
+    try {
+      await repositories.updateTunnelAgent(tunnel.id, agentId);
+      tunnel.agent_id = agentId;
+    } catch {
+      // best effort only; request can still succeed
+    }
+  };
+
+  const ensureTunnelOpenOnAgent = (tunnel: TunnelRecord, agentId: string): boolean => {
+    return wsHub.sendToAgent(agentId, {
+      type: "tunnel.open",
+      tunnelId: tunnel.id,
+      slug: tunnel.slug,
+      targetPort: tunnel.target_port
+    });
+  };
+
+  const proxyTunnelThroughAvailableAgent = async (params: {
+    tunnel: TunnelRecord;
+    method: string;
+    path: string;
+    query?: string;
+    headers: Record<string, string>;
+    bodyBase64?: string;
+  }) => {
+    for (const agentId of tunnelAgentCandidates(params.tunnel)) {
+      if (!wsHub.isAgentOnline(agentId)) {
+        continue;
+      }
+      if (!ensureTunnelOpenOnAgent(params.tunnel, agentId)) {
+        continue;
+      }
+      try {
+        const proxied = await wsHub.proxyHttpThroughAgent({
+          agentId,
+          tunnelId: params.tunnel.id,
+          method: params.method,
+          path: params.path,
+          query: params.query,
+          headers: params.headers,
+          bodyBase64: params.bodyBase64
+        });
+        await persistTunnelAgent(params.tunnel, agentId);
+        return proxied;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "proxy_failed";
+        if (message === "agent_offline") {
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error("agent_offline");
+  };
+
+  const openTunnelWsThroughAvailableAgent = async (params: {
+    tunnel: TunnelRecord;
+    path: string;
+    query?: string;
+    headers?: Record<string, string>;
+    bridge: {
+      onFrame: (data: Buffer, isBinary: boolean) => void;
+      onClosed: (code?: number, reason?: string) => void;
+      onError: (error: string) => void;
+    };
+  }) => {
+    for (const agentId of tunnelAgentCandidates(params.tunnel)) {
+      if (!wsHub.isAgentOnline(agentId)) {
+        continue;
+      }
+      if (!ensureTunnelOpenOnAgent(params.tunnel, agentId)) {
+        continue;
+      }
+      try {
+        const connectionId = await wsHub.openTunnelWsThroughAgent({
+          agentId,
+          tunnelId: params.tunnel.id,
+          path: params.path,
+          query: params.query,
+          headers: params.headers,
+          bridge: params.bridge
+        });
+        await persistTunnelAgent(params.tunnel, agentId);
+        return connectionId;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "tunnel_ws_open_failed";
+        if (message === "agent_offline") {
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error("agent_offline");
   };
 
   server.on("upgrade", (req, socket, head) => {
@@ -132,33 +400,29 @@ export const createServer = async (): Promise<http.Server> => {
       internalTunnelWsServer.handleUpgrade(req, socket, head, (ws) => {
         let connectionId: string | null = null;
 
-        void wsHub
-          .openTunnelWsThroughAgent({
-            agentId: tunnel.agent_id,
-            tunnelId: tunnel.id,
-            path: url.searchParams.get("path") ?? "/",
-            query: url.searchParams.get("query") ?? undefined,
-            headers: {
-              origin: req.headers.origin?.toString() ?? ""
+        void openTunnelWsThroughAvailableAgent({
+          tunnel,
+          path: url.searchParams.get("path") ?? "/",
+          query: url.searchParams.get("query") ?? undefined,
+          headers: {
+            origin: req.headers.origin?.toString() ?? ""
+          },
+          bridge: {
+            onFrame: (data, isBinary) => {
+              if (ws.readyState === ws.OPEN) {
+                ws.send(data, { binary: isBinary });
+              }
             },
-            bridge: {
-              onFrame: (data, isBinary) => {
-                if (ws.readyState === ws.OPEN) {
-                  ws.send(data, { binary: isBinary });
-                }
-              },
-              onClosed: (code, reason) => {
-                if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) {
-                  ws.close(code, reason);
-                }
-              },
-              onError: (error) => {
-                if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) {
-                  ws.close(1011, error.slice(0, 120));
-                }
+            onClosed: (code, reason) => {
+              closeWebSocketSafely(ws, code, reason);
+            },
+            onError: (error) => {
+              if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) {
+                ws.close(1011, error.slice(0, 120));
               }
             }
-          })
+          }
+        })
           .then((openedConnectionId) => {
             connectionId = openedConnectionId;
           })
@@ -867,14 +1131,44 @@ export const createServer = async (): Promise<http.Server> => {
     const approvalPolicySchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
     const sandboxModeSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
     const reasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+    const inputItemSchema = z.discriminatedUnion("type", [
+      z.object({
+        type: z.literal("text"),
+        text: z.string().min(1)
+      }),
+      z.object({
+        type: z.literal("image"),
+        imageUrl: z.string().min(1),
+        detail: z.string().min(1).optional()
+      }),
+      z.object({
+        type: z.literal("local_image"),
+        path: z.string().min(1)
+      }),
+      z.object({
+        type: z.literal("skill"),
+        path: z.string().min(1),
+        name: z.string().min(1).optional()
+      }),
+      z.object({
+        type: z.literal("mention"),
+        path: z.string().min(1),
+        name: z.string().min(1).optional()
+      })
+    ]);
 
     const schema = z.object({
-      prompt: z.string().min(1),
+      prompt: z.string().min(1).optional(),
+      inputItems: z.array(inputItemSchema).min(1).optional(),
+      collaborationMode: z.record(z.unknown()).optional(),
       model: z.string().min(1).max(120).optional(),
       cwd: z.string().min(1).optional(),
       approvalPolicy: approvalPolicySchema.optional(),
       sandboxMode: sandboxModeSchema.optional(),
       effort: reasoningEffortSchema.optional()
+    }).refine((body) => Boolean(body.prompt || body.inputItems), {
+      message: "Either prompt or inputItems is required",
+      path: ["prompt"]
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -889,9 +1183,12 @@ export const createServer = async (): Promise<http.Server> => {
     }
 
     const workspace = await repositories.findWorkspaceById(req.userId!, conversation.workspace_id);
+    const prompt = parsed.data.prompt?.trim();
+    const inputItems = parsed.data.inputItems as Array<Record<string, unknown>> | undefined;
+    const userPrompt = prompt && prompt.length > 0 ? prompt : derivePromptFromInputItems(inputItems ?? []);
     const turn = await repositories.createConversationTurn({
       conversationId: conversation.id,
-      prompt: parsed.data.prompt
+      prompt: userPrompt
     });
 
     wsHub.rememberConversationOwner(conversation.id, req.userId!, conversation.agent_id);
@@ -902,7 +1199,9 @@ export const createServer = async (): Promise<http.Server> => {
       conversationId: conversation.id,
       turnId: turn.id,
       threadId: conversation.codex_thread_id ?? undefined,
-      prompt: parsed.data.prompt,
+      prompt: prompt,
+      inputItems,
+      collaborationMode: parsed.data.collaborationMode,
       model: parsed.data.model,
       cwd: parsed.data.cwd ?? workspace?.path,
       approvalPolicy: parsed.data.approvalPolicy,
@@ -1073,7 +1372,8 @@ export const createServer = async (): Promise<http.Server> => {
       isReachable: false,
       lastProbeAt: null,
       lastProbeStatus: null,
-      lastError: null
+      lastError: null,
+      diagnostic: getTunnelDiagnostic(created.tunnel.id)
     });
   });
 
@@ -1098,7 +1398,8 @@ export const createServer = async (): Promise<http.Server> => {
         lastProbeAt: tunnel.last_probe_at ? tunnel.last_probe_at.toISOString() : null,
         lastProbeStatus: tunnel.last_probe_status ?? null,
         lastError: tunnel.last_probe_error ?? null,
-        lastProbeCode: tunnel.last_probe_code ?? null
+        lastProbeCode: tunnel.last_probe_code ?? null,
+        diagnostic: getTunnelDiagnostic(tunnel.id)
       }))
     });
   });
@@ -1179,9 +1480,8 @@ export const createServer = async (): Promise<http.Server> => {
     }
 
     try {
-      const proxied = await wsHub.proxyHttpThroughAgent({
-        agentId: tunnel.agent_id,
-        tunnelId: tunnel.id,
+      const proxied = await proxyTunnelThroughAvailableAgent({
+        tunnel,
         method: parsed.data.method,
         path: parsed.data.path,
         query: parsed.data.query,
@@ -1189,6 +1489,35 @@ export const createServer = async (): Promise<http.Server> => {
         bodyBase64: parsed.data.bodyBase64
       });
 
+      const upstreamAppDiagnostic = classifyProxyResponseDiagnostic({
+        request: {
+          path: parsed.data.path,
+          query: parsed.data.query
+        },
+        response: {
+          headers: proxied.headers
+        }
+      });
+      if (upstreamAppDiagnostic) {
+        updateTunnelDiagnostic({
+          tunnel,
+          diagnostic: upstreamAppDiagnostic,
+          detail: upstreamAppDiagnostic.message
+        });
+      } else {
+        const existing = getTunnelDiagnostic(tunnel.id);
+        if (existing?.scope === "transport" || existing?.code === "vite_svg_react_not_transformed") {
+          updateTunnelDiagnostic({
+            tunnel,
+            diagnostic: null,
+            detail: "Tunnel diagnostic cleared after successful proxy response"
+          });
+        }
+      }
+
+      // This endpoint relays the local app response; drop control-api helmet headers
+      // so they do not override frontend dev-server CSP/HMR behavior.
+      clearSecurityHeadersForProxiedResponse(res);
       res.status(proxied.status);
       for (const [key, value] of Object.entries(proxied.headers)) {
         if (key.toLowerCase() === "transfer-encoding") {
@@ -1200,6 +1529,12 @@ export const createServer = async (): Promise<http.Server> => {
       res.send(body);
     } catch (error) {
       const message = error instanceof Error ? error.message : "proxy_failed";
+      const transportDiagnostic = buildTransportTunnelDiagnostic({ rawError: message });
+      updateTunnelDiagnostic({
+        tunnel,
+        diagnostic: transportDiagnostic,
+        detail: transportDiagnostic.message
+      });
       res.status(502).json({ error: message });
     }
   });

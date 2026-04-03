@@ -71,6 +71,14 @@ export interface TunnelStatusMessage {
   probeStatus?: "ok" | "error" | "unknown";
   probeCode?: number;
   probeAt?: string;
+  diagnostic?: TunnelDiagnostic | null;
+}
+
+export interface TunnelDiagnostic {
+  code: string;
+  message: string;
+  scope: "transport" | "upstream_app";
+  timestamp: string;
 }
 
 export interface TunnelWsOpenMessage {
@@ -122,10 +130,40 @@ export interface ConversationTurnStartMessage {
   conversationId: string;
   turnId: string;
   threadId?: string;
-  prompt: string;
+  prompt?: string;
+  inputItems?: ConversationInputItem[];
+  collaborationMode?: Record<string, unknown>;
   model?: string;
   cwd?: string;
+  approvalPolicy?: "untrusted" | "on-failure" | "on-request" | "never";
+  sandboxMode?: "read-only" | "workspace-write" | "danger-full-access";
+  effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 }
+
+export type ConversationInputItem =
+  | {
+      type: "text";
+      text: string;
+    }
+  | {
+      type: "image";
+      imageUrl: string;
+      detail?: string;
+    }
+  | {
+      type: "local_image";
+      path: string;
+    }
+  | {
+      type: "skill";
+      path: string;
+      name?: string;
+    }
+  | {
+      type: "mention";
+      path: string;
+      name?: string;
+    };
 
 export interface ConversationTurnInterruptMessage {
   type: "conversation.turn.interrupt";
@@ -168,6 +206,17 @@ export interface ConversationItemDeltaMessage {
   delta: string;
 }
 
+export interface ConversationItemStartedMessage {
+  type: "conversation.item.started";
+  conversationId: string;
+  turnId: string;
+  threadId: string;
+  codexTurnId: string;
+  itemId: string;
+  itemType: string;
+  item: Record<string, unknown>;
+}
+
 export interface ConversationItemCompletedMessage {
   type: "conversation.item.completed";
   conversationId: string;
@@ -177,6 +226,69 @@ export interface ConversationItemCompletedMessage {
   itemId: string;
   itemType: string;
   item: Record<string, unknown>;
+}
+
+export interface ConversationTurnPlanUpdatedMessage {
+  type: "conversation.turn.plan.updated";
+  conversationId: string;
+  turnId: string;
+  threadId: string;
+  codexTurnId: string;
+  plan: Record<string, unknown>;
+}
+
+export interface ConversationThreadStatusChangedMessage {
+  type: "conversation.thread.status.changed";
+  conversationId: string;
+  turnId: string;
+  threadId: string;
+  codexTurnId: string;
+  status: string;
+  thread?: Record<string, unknown>;
+}
+
+export interface ConversationThreadTokenUsageUpdatedMessage {
+  type: "conversation.thread.token_usage.updated";
+  conversationId: string;
+  turnId: string;
+  threadId: string;
+  codexTurnId: string;
+  tokenUsage: Record<string, unknown>;
+}
+
+export interface ConversationServerRequestMessage {
+  type: "conversation.server.request";
+  conversationId: string;
+  turnId: string;
+  threadId: string;
+  codexTurnId: string;
+  requestId: string;
+  method: string;
+  params: Record<string, unknown>;
+}
+
+export interface ConversationServerRequestResolvedMessage {
+  type: "conversation.server.request.resolved";
+  conversationId: string;
+  turnId: string;
+  threadId: string;
+  codexTurnId: string;
+  requestId: string;
+  resolvedAt: string;
+  status: "completed" | "declined" | "failed";
+  result?: unknown;
+  error?: string;
+}
+
+export interface ConversationServerResponseMessage {
+  type: "conversation.server.response";
+  conversationId: string;
+  turnId: string;
+  threadId?: string;
+  codexTurnId?: string;
+  requestId: string;
+  result?: unknown;
+  error?: string;
 }
 
 export interface ConversationTurnCompletedMessage {
@@ -205,7 +317,8 @@ export type MobileToAgentMessage =
   | TunnelWsFrameMessage
   | TunnelWsCloseMessage
   | ConversationTurnStartMessage
-  | ConversationTurnInterruptMessage;
+  | ConversationTurnInterruptMessage
+  | ConversationServerResponseMessage;
 
 export type AgentToMobileMessage =
   | SessionOutputMessage
@@ -220,7 +333,13 @@ export type AgentToMobileMessage =
   | ConversationTurnStartedMessage
   | ConversationTurnDiffUpdatedMessage
   | ConversationItemDeltaMessage
+  | ConversationItemStartedMessage
   | ConversationItemCompletedMessage
+  | ConversationTurnPlanUpdatedMessage
+  | ConversationThreadStatusChangedMessage
+  | ConversationThreadTokenUsageUpdatedMessage
+  | ConversationServerRequestMessage
+  | ConversationServerRequestResolvedMessage
   | ConversationTurnCompletedMessage
   | ErrorMessage;
 

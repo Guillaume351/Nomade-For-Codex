@@ -14,6 +14,6 @@ void main() {
       ),
     );
 
-    expect(find.text('Welcome to Nomade'), findsOneWidget);
+    expect(find.text('Nomade for Codex'), findsOneWidget);
   });
 }

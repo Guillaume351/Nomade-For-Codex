@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import 'login_screen.dart';
 
 class OnboardingScreen extends StatefulWidget {
@@ -12,90 +13,177 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
 
-  final List<OnboardingData> _data = [
+  final List<OnboardingData> _data = const [
     OnboardingData(
-      title: 'Welcome to Nomade',
+      title: 'A cleaner way to run Codex from anywhere',
       description:
-          'Your portable interface for Codex agents. Work from anywhere, seamlessly.',
-      icon: Icons.explore,
+          'Nomade keeps your conversations, workspaces, and local agents in sync across desktop and mobile.',
+      icon: Icons.explore_rounded,
     ),
     OnboardingData(
-      title: 'Collaborate with Agents',
+      title: 'Designed for live collaboration',
       description:
-          'Pair your local agents and run powerful AI workflows directly from your mobile.',
-      icon: Icons.smart_toy,
+          'Track execution status in real time, follow command logs, and manage your active services without context switching.',
+      icon: Icons.hub_rounded,
     ),
     OnboardingData(
-      title: 'Secure & Modular',
+      title: 'Secure by default, flexible for dev',
       description:
-          'Built with security first. Your agents, your data, your control.',
-      icon: Icons.security,
+          'Use protected tunnel links in production and trusted mode for fast local previews when you control the network.',
+      icon: Icons.verified_user_rounded,
     ),
   ];
 
   @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final isWide = MediaQuery.of(context).size.width >= 700;
+
     return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: PageView.builder(
-                controller: _pageController,
-                itemCount: _data.length,
-                onPageChanged: (index) => setState(() => _currentPage = index),
-                itemBuilder: (context, index) =>
-                    _OnboardingPage(data: _data[index]),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: List.generate(
-                      _data.length,
-                      (index) => AnimatedContainer(
-                        duration: const Duration(milliseconds: 300),
-                        margin: const EdgeInsets.symmetric(horizontal: 4),
-                        height: 8,
-                        width: _currentPage == index ? 24 : 8,
-                        decoration: BoxDecoration(
-                          color: _currentPage == index
-                              ? Theme.of(context).primaryColor
-                              : Colors.grey.withValues(alpha: 0.3),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
+      body: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              scheme.primary.withValues(
+                  alpha: theme.brightness == Brightness.dark ? 0.22 : 0.12),
+              theme.scaffoldBackgroundColor,
+              scheme.tertiary.withValues(
+                  alpha: theme.brightness == Brightness.dark ? 0.16 : 0.09),
+            ],
+          ),
+        ),
+        child: SafeArea(
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+                child: Row(
+                  children: [
+                    Container(
+                      height: 34,
+                      width: 34,
+                      decoration: BoxDecoration(
+                        color: scheme.primary,
+                        borderRadius: BorderRadius.circular(11),
+                      ),
+                      alignment: Alignment.center,
+                      child: const Icon(
+                        Icons.auto_awesome_rounded,
+                        size: 18,
+                        color: Colors.white,
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 32),
-                  ElevatedButton(
-                    onPressed: () {
-                      if (_currentPage < _data.length - 1) {
-                        _pageController.nextPage(
-                          duration: const Duration(milliseconds: 400),
-                          curve: Curves.easeInOut,
-                        );
-                      } else {
-                        Navigator.pushReplacement(
-                          context,
-                          MaterialPageRoute(
-                              builder: (_) => const LoginScreen()),
-                        );
-                      }
-                    },
-                    child: Text(_currentPage == _data.length - 1
-                        ? 'Get Started'
-                        : 'Next'),
-                  ),
-                ],
+                    const SizedBox(width: 10),
+                    Text(
+                      'Nomade for Codex',
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const Spacer(),
+                    if (_currentPage < _data.length - 1)
+                      TextButton(
+                        onPressed: _goToLogin,
+                        child: const Text('Skip'),
+                      ),
+                  ],
+                ),
               ),
-            ),
-          ],
+              Expanded(
+                child: PageView.builder(
+                  controller: _pageController,
+                  itemCount: _data.length,
+                  onPageChanged: (index) =>
+                      setState(() => _currentPage = index),
+                  itemBuilder: (context, index) => _OnboardingPage(
+                    data: _data[index],
+                    isWide: isWide,
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 620),
+                  child: Container(
+                    padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+                    decoration: BoxDecoration(
+                      color: scheme.surface.withValues(alpha: 0.9),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                          color: scheme.outlineVariant.withValues(alpha: 0.7)),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: List.generate(
+                            _data.length,
+                            (index) => AnimatedContainer(
+                              duration: const Duration(milliseconds: 250),
+                              margin: const EdgeInsets.symmetric(horizontal: 4),
+                              height: 7,
+                              width: _currentPage == index ? 28 : 7,
+                              decoration: BoxDecoration(
+                                color: _currentPage == index
+                                    ? scheme.primary
+                                    : scheme.outlineVariant,
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        FilledButton.icon(
+                          onPressed: _advance,
+                          icon: Icon(
+                            _currentPage == _data.length - 1
+                                ? Icons.rocket_launch_rounded
+                                : Icons.arrow_forward_rounded,
+                          ),
+                          label: Text(
+                            _currentPage == _data.length - 1
+                                ? 'Get started'
+                                : 'Continue',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
+    );
+  }
+
+  void _advance() {
+    if (_currentPage < _data.length - 1) {
+      _pageController.nextPage(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+      );
+      return;
+    }
+    _goToLogin();
+  }
+
+  void _goToLogin() {
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
     );
   }
 }
@@ -105,36 +193,89 @@ class OnboardingData {
   final String description;
   final IconData icon;
 
-  OnboardingData(
-      {required this.title, required this.description, required this.icon});
+  const OnboardingData({
+    required this.title,
+    required this.description,
+    required this.icon,
+  });
 }
 
 class _OnboardingPage extends StatelessWidget {
-  final OnboardingData data;
+  const _OnboardingPage({
+    required this.data,
+    required this.isWide,
+  });
 
-  const _OnboardingPage({required this.data});
+  final OnboardingData data;
+  final bool isWide;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(40.0),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(data.icon, size: 120, color: Theme.of(context).primaryColor),
-          const SizedBox(height: 40),
-          Text(
-            data.title,
-            style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
-            textAlign: TextAlign.center,
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Center(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: isWide ? 760 : 540),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 8),
+          child: Container(
+            padding: EdgeInsets.symmetric(
+              horizontal: isWide ? 42 : 24,
+              vertical: isWide ? 36 : 26,
+            ),
+            decoration: BoxDecoration(
+              color: scheme.surface.withValues(alpha: 0.86),
+              borderRadius: BorderRadius.circular(26),
+              border: Border.all(
+                  color: scheme.outlineVariant.withValues(alpha: 0.66)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.06),
+                  blurRadius: 24,
+                  offset: const Offset(0, 10),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(
+                  height: isWide ? 90 : 80,
+                  width: isWide ? 90 : 80,
+                  decoration: BoxDecoration(
+                    color: scheme.primary.withValues(alpha: 0.14),
+                    shape: BoxShape.circle,
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(
+                    data.icon,
+                    size: isWide ? 42 : 36,
+                    color: scheme.primary,
+                  ),
+                ),
+                const SizedBox(height: 28),
+                Text(
+                  data.title,
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.4,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  data.description,
+                  style: theme.textTheme.bodyLarge?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                    height: 1.5,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
           ),
-          const SizedBox(height: 20),
-          Text(
-            data.description,
-            style: TextStyle(fontSize: 16, color: Colors.grey[600]),
-            textAlign: TextAlign.center,
-          ),
-        ],
+        ),
       ),
     );
   }

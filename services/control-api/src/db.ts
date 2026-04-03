@@ -178,7 +178,15 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_error TEXT;
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_code INT;
 
+    -- Keep one row per (turn_id, item_id) for idempotent upserts.
+    DELETE FROM conversation_items newer
+    USING conversation_items older
+    WHERE newer.turn_id = older.turn_id
+      AND newer.item_id = older.item_id
+      AND newer.created_at > older.created_at;
+
     CREATE INDEX IF NOT EXISTS idx_dev_services_workspace_id ON dev_services (workspace_id);
     CREATE INDEX IF NOT EXISTS idx_tunnels_service_id ON tunnels (service_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_items_turn_item ON conversation_items (turn_id, item_id);
   `);
 };

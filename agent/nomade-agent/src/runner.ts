@@ -9,6 +9,192 @@ interface RunArgs {
   configPath?: string;
 }
 
+const loopbackHosts = ["127.0.0.1", "localhost", "[::1]"] as const;
+const loopbackConnectivityCodes = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND"
+]);
+
+const extractNetworkCodeFromError = (error: unknown): string | undefined => {
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+  const errorRecord = error as Record<string, unknown>;
+  if (typeof errorRecord.code === "string" && errorRecord.code.trim().length > 0) {
+    return errorRecord.code.trim().toUpperCase();
+  }
+  const cause = errorRecord.cause;
+  if (cause && typeof cause === "object") {
+    const causeCode = (cause as Record<string, unknown>).code;
+    if (typeof causeCode === "string" && causeCode.trim().length > 0) {
+      return causeCode.trim().toUpperCase();
+    }
+  }
+  return undefined;
+};
+
+const hasLoopbackConnectivityPattern = (input: string): boolean => {
+  return /\b(ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ENOTFOUND)\b/i.test(input);
+};
+
+export const normalizeTunnelHttpProxyError = (entries: Array<{ message: string; code?: string }>): string => {
+  for (const entry of entries) {
+    const normalizedCode = entry.code?.toUpperCase();
+    if (normalizedCode && loopbackConnectivityCodes.has(normalizedCode)) {
+      return "local_service_unreachable";
+    }
+    if (hasLoopbackConnectivityPattern(entry.message)) {
+      return "local_service_unreachable";
+    }
+  }
+  return "local_fetch_failed";
+};
+
+export const normalizeTunnelWsOpenError = (entries: Array<{ message: string; code?: string }>): string => {
+  for (const entry of entries) {
+    const match = /\btunnel_ws_unexpected_response_(\d{3})\b/i.exec(entry.message);
+    if (match && match[1]) {
+      return `tunnel_ws_unexpected_response_${match[1]}`;
+    }
+  }
+  for (const entry of entries) {
+    if (/\btunnel_ws_open_timeout\b/i.test(entry.message)) {
+      return "tunnel_ws_open_timeout";
+    }
+  }
+  for (const entry of entries) {
+    if (/\btunnel_ws_closed_before_open\b/i.test(entry.message)) {
+      return "tunnel_ws_closed_before_open";
+    }
+  }
+  for (const entry of entries) {
+    const normalizedCode = entry.code?.toUpperCase();
+    if (normalizedCode && loopbackConnectivityCodes.has(normalizedCode)) {
+      return "local_service_unreachable";
+    }
+    if (hasLoopbackConnectivityPattern(entry.message)) {
+      return "local_service_unreachable";
+    }
+  }
+  return "tunnel_ws_open_failed";
+};
+
+const buildLocalHttpUrl = (host: string, targetPort: number, path: string, query?: string): string => {
+  const q = query ? `?${query}` : "";
+  return `http://${host}:${targetPort}${path}${q}`;
+};
+
+const buildLocalWsUrl = (host: string, targetPort: number, path: string, query?: string): string => {
+  const q = query ? `?${query}` : "";
+  return `ws://${host}:${targetPort}${path}${q}`;
+};
+
+const proxyLocalHttpWithFallback = async (params: {
+  targetPort: number;
+  method: string;
+  path: string;
+  query?: string;
+  headers: Record<string, string>;
+  body?: Buffer;
+}): Promise<Response> => {
+  const errors: Array<{ message: string; code?: string }> = [];
+  for (const host of loopbackHosts) {
+    const localUrl = buildLocalHttpUrl(host, params.targetPort, params.path, params.query);
+    try {
+      return await fetch(localUrl, {
+        method: params.method,
+        headers: params.headers,
+        body: params.body && params.body.length ? new Uint8Array(params.body) : undefined
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "local_fetch_failed";
+      const code = extractNetworkCodeFromError(error);
+      errors.push({ message: `${host}:${message}`, code });
+    }
+  }
+  throw new Error(normalizeTunnelHttpProxyError(errors));
+};
+
+const connectLocalWebSocket = (url: string, headers: Record<string, string>): Promise<WebSocket> => {
+  return new Promise<WebSocket>((resolve, reject) => {
+    const socket = new WebSocket(url, { headers });
+    // Keep at least one error listener to avoid unhandled ws errors during races.
+    socket.on("error", () => {
+      // no-op
+    });
+    let settled = false;
+    let timeout: NodeJS.Timeout | null = null;
+
+    const cleanup = (): void => {
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+      socket.off("open", onOpen);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+      socket.off("unexpected-response", onUnexpectedResponse);
+    };
+
+    const settle = (fn: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      fn();
+    };
+
+    const onOpen = (): void => {
+      settle(() => resolve(socket));
+    };
+
+    const onError = (error: Error): void => {
+      settle(() => reject(error));
+    };
+
+    const onClose = (): void => {
+      settle(() => reject(new Error("tunnel_ws_closed_before_open")));
+    };
+
+    const onUnexpectedResponse = (_request: unknown, response: import("http").IncomingMessage): void => {
+      const status = response.statusCode ?? 0;
+      settle(() => reject(new Error(`tunnel_ws_unexpected_response_${status}`)));
+    };
+
+    socket.on("open", onOpen);
+    socket.on("error", onError);
+    socket.on("close", onClose);
+    socket.on("unexpected-response", onUnexpectedResponse);
+    timeout = setTimeout(() => {
+      settle(() => reject(new Error("tunnel_ws_open_timeout")));
+    }, 3_000);
+  });
+};
+
+const openLocalWsWithFallback = async (params: {
+  targetPort: number;
+  path: string;
+  query?: string;
+  headers: Record<string, string>;
+}): Promise<WebSocket> => {
+  const errors: Array<{ message: string; code?: string }> = [];
+  for (const host of loopbackHosts) {
+    const localWsUrl = buildLocalWsUrl(host, params.targetPort, params.path, params.query);
+    try {
+      return await connectLocalWebSocket(localWsUrl, params.headers);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "tunnel_ws_open_failed";
+      const code = extractNetworkCodeFromError(error);
+      errors.push({ message: `${host}:${message}`, code });
+    }
+  }
+  throw new Error(normalizeTunnelWsOpenError(errors));
+};
+
 export const runAgent = async (args: RunArgs): Promise<void> => {
   const config = await readConfig(args.configPath ?? defaultConfigPath());
   const tunnelManager = new TunnelManager();
@@ -107,7 +293,15 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           conversationId: String(msg.conversationId ?? ""),
           turnId: String(msg.turnId ?? ""),
           threadId: msg.threadId ? String(msg.threadId) : undefined,
-          prompt: String(msg.prompt ?? ""),
+          prompt: msg.prompt ? String(msg.prompt) : undefined,
+          inputItems: Array.isArray(msg.inputItems)
+              ? msg.inputItems
+                  .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+              : undefined,
+          collaborationMode:
+            msg.collaborationMode && typeof msg.collaborationMode === "object"
+              ? (msg.collaborationMode as Record<string, unknown>)
+              : undefined,
           model: msg.model ? String(msg.model) : undefined,
           cwd: msg.cwd ? String(msg.cwd) : undefined,
           approvalPolicy: msg.approvalPolicy ? String(msg.approvalPolicy) as "untrusted" | "on-failure" | "on-request" | "never" : undefined,
@@ -115,6 +309,21 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
             msg.sandboxMode ? (String(msg.sandboxMode) as "read-only" | "workspace-write" | "danger-full-access") : undefined,
           effort:
             msg.effort ? (String(msg.effort) as "none" | "minimal" | "low" | "medium" | "high" | "xhigh") : undefined
+        });
+        return;
+      }
+
+      if (type === "conversation.server.response") {
+        const requestId = String(msg.requestId ?? "");
+        if (!requestId) {
+          return;
+        }
+        const error = typeof msg.error === "string" ? msg.error : undefined;
+        const result = msg.result;
+        conversationManager.resolveServerRequest({
+          requestId,
+          error,
+          result
         });
         return;
       }
@@ -236,20 +445,23 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           return;
         }
 
-        const query = msg.query ? `?${String(msg.query)}` : "";
-        const localUrl = `http://127.0.0.1:${targetPort}${String(msg.path)}${query}`;
         const method = String(msg.method ?? "GET");
         const requestHeaders = (msg.headers as Record<string, string>) ?? {};
         delete requestHeaders.host;
         delete requestHeaders["content-length"];
+        const path = String(msg.path ?? "/");
+        const query = msg.query ? String(msg.query) : undefined;
 
         const body = msg.bodyBase64 ? Buffer.from(String(msg.bodyBase64), "base64") : undefined;
 
         try {
-          const response = await fetch(localUrl, {
+          const response = await proxyLocalHttpWithFallback({
+            targetPort,
             method,
+            path,
+            query,
             headers: requestHeaders,
-            body: body && body.length ? body : undefined
+            body
           });
           const responseHeaders: Record<string, string> = {};
           response.headers.forEach((value, key) => {
@@ -301,23 +513,57 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           return;
         }
 
-        const query = msg.query ? `?${String(msg.query)}` : "";
-        const localWsUrl = `ws://127.0.0.1:${targetPort}${String(msg.path ?? "/")}${query}`;
+        const path = String(msg.path ?? "/");
+        const query = msg.query ? String(msg.query) : undefined;
         const requestHeaders = (msg.headers as Record<string, string> | undefined) ?? {};
-        const socket = new WebSocket(localWsUrl, {
-          headers: requestHeaders
-        });
-        tunnelManager.bindSocket(connectionId, socket);
+        delete requestHeaders.host;
+        delete requestHeaders.Host;
+        delete requestHeaders["content-length"];
+        delete requestHeaders["Content-Length"];
+        delete requestHeaders.origin;
+        delete requestHeaders.Origin;
+        delete requestHeaders.connection;
+        delete requestHeaders.Connection;
+        delete requestHeaders.upgrade;
+        delete requestHeaders.Upgrade;
+        delete requestHeaders["sec-websocket-key"];
+        delete requestHeaders["Sec-WebSocket-Key"];
+        delete requestHeaders["sec-websocket-version"];
+        delete requestHeaders["Sec-WebSocket-Version"];
+        delete requestHeaders["sec-websocket-extensions"];
+        delete requestHeaders["Sec-WebSocket-Extensions"];
+        delete requestHeaders["sec-websocket-protocol"];
+        delete requestHeaders["Sec-WebSocket-Protocol"];
 
-        socket.on("open", () => {
+        let socket: WebSocket;
+        try {
+          socket = await openLocalWsWithFallback({
+            targetPort,
+            path,
+            query,
+            headers: requestHeaders
+          });
+        } catch (error) {
           ws.send(
             JSON.stringify({
-              type: "tunnel.ws.opened",
+              type: "tunnel.ws.error",
               requestId,
-              connectionId
+              connectionId,
+              error: error instanceof Error ? error.message : "tunnel_ws_open_failed"
             })
           );
-        });
+          return;
+        }
+
+        tunnelManager.bindSocket(connectionId, socket);
+
+        ws.send(
+          JSON.stringify({
+            type: "tunnel.ws.opened",
+            requestId,
+            connectionId
+          })
+        );
 
         socket.on("message", (data, isBinary) => {
           const payload = Buffer.isBuffer(data)

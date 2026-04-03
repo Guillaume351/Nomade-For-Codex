@@ -313,14 +313,26 @@ class NomadeApi {
   Future<Map<String, dynamic>> createTurn({
     required String accessToken,
     required String conversationId,
-    required String prompt,
+    String? prompt,
+    List<Map<String, dynamic>>? inputItems,
+    Map<String, dynamic>? collaborationMode,
     String? model,
     String? cwd,
     String? approvalPolicy,
     String? sandboxMode,
     String? effort,
   }) async {
-    final body = <String, dynamic>{'prompt': prompt};
+    final body = <String, dynamic>{};
+    final trimmedPrompt = prompt?.trim() ?? '';
+    if (trimmedPrompt.isNotEmpty) {
+      body['prompt'] = trimmedPrompt;
+    }
+    if (inputItems != null && inputItems.isNotEmpty) {
+      body['inputItems'] = inputItems;
+    }
+    if (collaborationMode != null && collaborationMode.isNotEmpty) {
+      body['collaborationMode'] = collaborationMode;
+    }
     if (model != null && model.trim().isNotEmpty) {
       body['model'] = model.trim();
     }
@@ -335,6 +347,9 @@ class NomadeApi {
     }
     if (effort != null && effort.trim().isNotEmpty) {
       body['effort'] = effort.trim();
+    }
+    if (!body.containsKey('prompt') && !body.containsKey('inputItems')) {
+      throw ApiException('Either prompt or inputItems is required');
     }
 
     final response = await _send(
@@ -502,6 +517,38 @@ class NomadeApi {
         .cast<Map>()
         .map((item) => item.cast<String, dynamic>())
         .toList();
+  }
+
+  Future<Map<String, dynamic>> createTunnel({
+    required String accessToken,
+    required String workspaceId,
+    required String agentId,
+    required int targetPort,
+    String? serviceId,
+    int? ttlSec,
+  }) async {
+    final body = <String, dynamic>{
+      'workspaceId': workspaceId,
+      'agentId': agentId,
+      'targetPort': targetPort,
+    };
+    if (serviceId != null && serviceId.trim().isNotEmpty) {
+      body['serviceId'] = serviceId.trim();
+    }
+    if (ttlSec != null && ttlSec > 0) {
+      body['ttlSec'] = ttlSec;
+    }
+    final response = await _send(
+      () => http.post(
+        _uri('/tunnels'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode(body),
+      ),
+    );
+    return _decodeObject(response);
   }
 
   Future<Map<String, dynamic>> issueTunnelToken({
