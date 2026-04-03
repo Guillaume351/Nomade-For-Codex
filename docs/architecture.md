@@ -3,6 +3,7 @@
 ## Components
 - `services/control-api`:
   - Device code auth and refresh tokens
+  - Web activation/account UI, OIDC callback and Stripe webhook handling
   - Agent pairing and registration
   - Workspaces, sessions, tunnels metadata in Postgres
   - Conversations + turns + items metadata in Postgres
@@ -21,9 +22,11 @@
   - Flutter scaffold for device code login and agent pairing code generation
 
 ## Data and control flow
-1. Mobile starts device code, then approves and polls for access token.
-2. Mobile requests pairing code.
-3. Agent registers with pairing code and receives `agentToken`.
+1. CLI starts device code login, shows user code + verification URL (QR-compatible).
+2. User approves code from web account session (`/web/activate`) backed by OIDC login.
+3. CLI polls and stores access+refresh token.
+4. CLI requests pairing code; control-api enforces plan device limits.
+5. Agent registers with pairing code and receives `agentToken`.
 4. Agent opens WS connection to `/ws?agent_token=...`.
 5. Mobile creates conversations/sessions/tunnels via REST; control-api pushes commands to agent WS.
 6. Agent streams output/status/Codex turn events over WS.

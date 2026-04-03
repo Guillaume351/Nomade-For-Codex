@@ -1,16 +1,22 @@
 # API Contract (v1)
 
 ## Public auth
-- `POST /auth/device/start` -> `{ deviceCode, userCode, expiresAt, intervalSec }`
-- `POST /auth/device/approve` body `{ userCode, email }`
+- `POST /auth/device/start` -> `{ deviceCode, userCode, expiresAt, intervalSec, verificationUri, verificationUriComplete }`
+- `POST /auth/device/approve` body `{ userCode }` with authenticated web session (or Bearer token)
+  - legacy fallback body `{ userCode, email }` only when `LEGACY_DEVICE_APPROVE_ENABLED=true` (disabled by default)
 - `POST /auth/device/poll` body `{ deviceCode }` -> pending or `{ accessToken, refreshToken }`
 - `POST /auth/refresh` body `{ refreshToken }`
 - `POST /auth/logout` body `{ refreshToken }` (requires Bearer access token)
 
 ## User endpoints (Bearer access token)
 - `GET /me`
+- `GET /me/entitlements` -> `{ planCode, maxAgents, currentAgents, limitReached, ... }`
+- `POST /billing/checkout-session` -> `{ id, url }` (Stripe Checkout)
+- `POST /billing/portal-session` -> `{ id, url }` (Stripe Customer Portal)
 - `POST /agents/pair`
+  - returns `403 { error: "device_limit_reached", ... }` when free plan quota is reached
 - `GET /agents` (sorted online first; each item includes `display_name`, `is_online`, `last_seen_at`, `created_at`)
+  - response includes `entitlements`
 - `POST /agents/:agentId/codex/import` body `{ limit? }`
   - imports threads from Codex app-server into Nomade workspaces/conversations (default limit `500`)
   - response counters include `threads_scanned`, `imported`, `skipped`, `hydrated_or_repaired`
@@ -38,6 +44,10 @@
 - `POST /internal/tunnels/:slug/proxy`
 - Requires `x-gateway-secret`.
 - Body: `{ method, path, query?, headers, bodyBase64?, token }`.
+
+## Billing webhook
+- `POST /billing/webhook`
+- Expects Stripe signature header `Stripe-Signature`.
 
 ## WebSocket protocol (`/ws`)
 ### Auth

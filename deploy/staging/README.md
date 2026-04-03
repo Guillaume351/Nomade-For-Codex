@@ -43,33 +43,16 @@ docker compose logs -f control-api
 curl -i http://<STAGING_HOST_OR_IP>:8080/health
 ```
 
-## 5) Pair + run your local agent against staging
-1. Start auth flow:
+## 5) Login + pair + run your local agent against staging
+1. Login (prints code + activation URL):
 ```bash
-curl -sX POST http://<STAGING_HOST_OR_IP>:8080/auth/device/start | jq
+npm --workspace agent/nomade-agent run login -- --server-url http://<STAGING_HOST_OR_IP>:8080
 ```
-2. Approve code:
+2. Pair the agent (auto-requests pairing code):
 ```bash
-curl -sX POST http://<STAGING_HOST_OR_IP>:8080/auth/device/approve \
-  -H 'content-type: application/json' \
-  -d '{"userCode":"<USER_CODE>","email":"you@example.com"}'
+npm --workspace agent/nomade-agent run pair -- --server-url http://<STAGING_HOST_OR_IP>:8080
 ```
-3. Poll token:
-```bash
-curl -sX POST http://<STAGING_HOST_OR_IP>:8080/auth/device/poll \
-  -H 'content-type: application/json' \
-  -d '{"deviceCode":"<DEVICE_CODE>"}' | jq
-```
-4. Create pairing code:
-```bash
-curl -sX POST http://<STAGING_HOST_OR_IP>:8080/agents/pair \
-  -H "authorization: Bearer <ACCESS_TOKEN>" | jq
-```
-5. Pair the agent:
-```bash
-npm run dev:agent:pair -- --server-url http://<STAGING_HOST_OR_IP>:8080 --pairing-code <PAIRING_CODE>
-```
-6. Run the agent:
+3. Run the agent:
 ```bash
 npm run dev:agent:run
 ```

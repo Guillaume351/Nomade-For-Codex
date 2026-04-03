@@ -26,6 +26,22 @@ export const pairAgent = async (args: PairArgs): Promise<void> => {
 
   if (!response.ok) {
     const text = await response.text();
+    if (response.status === 403) {
+      let payload: Record<string, unknown> | null = null;
+      try {
+        payload = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        payload = null;
+      }
+      if (payload?.error === "device_limit_reached") {
+        const upgradeUrl = typeof payload.upgradeUrl === "string" ? payload.upgradeUrl : "";
+        throw new Error(
+          `Pairing blocked: device_limit_reached (${payload.currentAgents ?? "?"}/${payload.maxAgents ?? "?"}). ${
+            upgradeUrl ? `Upgrade: ${upgradeUrl}` : ""
+          }`
+        );
+      }
+    }
     throw new Error(`Pairing failed (${response.status}): ${text}`);
   }
 

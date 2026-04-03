@@ -17,10 +17,26 @@ services:
     environment:
       PORT: 8080
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/nomade
-      JWT_SECRET: ${JWT_SECRET:-change-me}
-      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:-gateway-dev-secret}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:?set INTERNAL_GATEWAY_SECRET}
       PREVIEW_BASE_DOMAIN: ${PREVIEW_BASE_DOMAIN:-preview.localhost}
       PREVIEW_BASE_ORIGIN: ${PREVIEW_BASE_ORIGIN:-https://preview.localhost}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
+      FREE_MAX_AGENTS: ${FREE_MAX_AGENTS:-1}
+      PAID_MAX_AGENTS: ${PAID_MAX_AGENTS:-10}
+      DEV_LOGIN_ENABLED: ${DEV_LOGIN_ENABLED:-false}
+      LEGACY_DEVICE_APPROVE_ENABLED: ${LEGACY_DEVICE_APPROVE_ENABLED:-false}
+      OIDC_AUTHORIZATION_URL: ${OIDC_AUTHORIZATION_URL:-}
+      OIDC_TOKEN_URL: ${OIDC_TOKEN_URL:-}
+      OIDC_USERINFO_URL: ${OIDC_USERINFO_URL:-}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
+      OIDC_SCOPE: ${OIDC_SCOPE:-openid profile email}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRO_PRICE_ID: ${STRIPE_PRO_PRICE_ID:-}
     depends_on:
       - postgres
     ports:
@@ -33,7 +49,7 @@ services:
     environment:
       PORT: 8081
       CONTROL_API_URL: http://control-api:8080
-      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:-gateway-dev-secret}
+      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:?set INTERNAL_GATEWAY_SECRET}
       PREVIEW_BASE_DOMAIN: ${PREVIEW_BASE_DOMAIN:-preview.localhost}
     depends_on:
       - control-api

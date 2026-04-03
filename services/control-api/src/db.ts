@@ -32,6 +32,30 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS billing_customers (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      stripe_customer_id TEXT NOT NULL UNIQUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      plan_code TEXT NOT NULL DEFAULT 'free',
+      status TEXT NOT NULL DEFAULT 'active',
+      stripe_subscription_id TEXT UNIQUE,
+      current_period_end TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS device_entitlements (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      max_agents INT NOT NULL DEFAULT 1,
+      source TEXT NOT NULL DEFAULT 'free',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS pairings (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id),
@@ -171,12 +195,33 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      key TEXT PRIMARY KEY,
+      window_started_at TIMESTAMPTZ NOT NULL,
+      hit_count INT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS service_id TEXT;
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS token_required BOOLEAN NOT NULL DEFAULT TRUE;
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_at TIMESTAMPTZ;
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_status TEXT;
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_error TEXT;
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_code INT;
+    ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT;
+    ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMPTZ;
+
+    INSERT INTO subscriptions (user_id, plan_code, status)
+    SELECT u.id, 'free', 'active'
+    FROM users u
+    LEFT JOIN subscriptions s ON s.user_id = u.id
+    WHERE s.user_id IS NULL;
+
+    INSERT INTO device_entitlements (user_id, max_agents, source)
+    SELECT u.id, 1, 'free'
+    FROM users u
+    LEFT JOIN device_entitlements e ON e.user_id = u.id
+    WHERE e.user_id IS NULL;
 
     -- Keep one row per (turn_id, item_id) for idempotent upserts.
     DELETE FROM conversation_items newer
@@ -188,5 +233,8 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
     CREATE INDEX IF NOT EXISTS idx_dev_services_workspace_id ON dev_services (workspace_id);
     CREATE INDEX IF NOT EXISTS idx_tunnels_service_id ON tunnels (service_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_items_turn_item ON conversation_items (turn_id, item_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_stripe_sub_id ON subscriptions (stripe_subscription_id)
+      WHERE stripe_subscription_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_rate_limits_updated_at ON rate_limits (updated_at);
   `);
 };

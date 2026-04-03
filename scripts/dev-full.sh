@@ -64,7 +64,8 @@ if ! (
 fi
 
 echo "[dev:full] starting docker stack..."
-npm run dev:up >/dev/null
+echo "[dev:full] enabling dev-only login fallbacks for local bootstrap..."
+DEV_LOGIN_ENABLED=1 LEGACY_DEVICE_APPROVE_ENABLED=1 npm run dev:up >/dev/null
 
 echo "[dev:full] waiting for control API at $API_URL..."
 for _ in $(seq 1 90); do

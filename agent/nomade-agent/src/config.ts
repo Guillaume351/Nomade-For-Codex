@@ -10,8 +10,20 @@ export interface AgentConfig {
   name: string;
 }
 
+export interface UserSessionConfig {
+  controlHttpUrl: string;
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: string;
+  email?: string;
+}
+
 export const defaultConfigPath = (): string => {
   return path.join(os.homedir(), ".config", "nomade-agent", "config.json");
+};
+
+export const defaultSessionPath = (): string => {
+  return path.join(os.homedir(), ".config", "nomade-agent", "session.json");
 };
 
 export const readConfig = async (filePath: string): Promise<AgentConfig> => {
@@ -22,4 +34,15 @@ export const readConfig = async (filePath: string): Promise<AgentConfig> => {
 export const writeConfig = async (filePath: string, config: AgentConfig): Promise<void> => {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, JSON.stringify(config, null, 2));
+};
+
+export const readUserSession = async (filePath: string): Promise<UserSessionConfig> => {
+  const raw = await fs.readFile(filePath, "utf8");
+  return JSON.parse(raw) as UserSessionConfig;
+};
+
+export const writeUserSession = async (filePath: string, config: UserSessionConfig): Promise<void> => {
+  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  await fs.writeFile(filePath, JSON.stringify(config, null, 2), { mode: 0o600 });
+  await fs.chmod(filePath, 0o600);
 };

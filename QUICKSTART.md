@@ -17,6 +17,10 @@ npm run dev:stop
 
 ## 1. Install and build
 ```bash
+# set strong secrets first (example)
+export JWT_SECRET="$(openssl rand -hex 32)"
+export INTERNAL_GATEWAY_SECRET="$(openssl rand -hex 32)"
+
 npm install
 npm run build
 npm test
@@ -30,27 +34,15 @@ npm run dev:logs
 
 ## 3. Login and pair agent
 ```bash
-# device code start
-curl -sX POST http://localhost:8080/auth/device/start | jq
+# login (opens activation URL and prints code + QR link)
+npm --workspace agent/nomade-agent run login -- --server-url http://localhost:8080
 
-# approve user code
-curl -sX POST http://localhost:8080/auth/device/approve \
-  -H 'content-type: application/json' \
-  -d '{"userCode":"<USER_CODE>","email":"you@example.com"}'
-
-# poll for access token
-curl -sX POST http://localhost:8080/auth/device/poll \
-  -H 'content-type: application/json' \
-  -d '{"deviceCode":"<DEVICE_CODE>"}' | jq
-
-# create pairing code
-curl -sX POST http://localhost:8080/agents/pair \
-  -H "authorization: Bearer <ACCESS_TOKEN>" | jq
-
-# pair + run agent
-npm run dev:agent:pair -- --server-url http://localhost:8080 --pairing-code <PAIRING_CODE>
+# pair (auto-requests pairing code from your account session)
+npm --workspace agent/nomade-agent run pair -- --server-url http://localhost:8080
 npm run dev:agent:run
 ```
+
+Legacy API approval flow is still available only when `LEGACY_DEVICE_APPROVE_ENABLED=true`.
 
 ## 4. Run Flutter app (macOS / iOS)
 ```bash

@@ -2,36 +2,21 @@
 
 ## Start
 ```bash
+export JWT_SECRET="$(openssl rand -hex 32)"
+export INTERNAL_GATEWAY_SECRET="$(openssl rand -hex 32)"
 docker compose -f deploy/selfhost/docker-compose.yml up --build
 ```
 
 ## Pair an agent
-1. Create a user device code:
+1. Login with device code (prints activation URL):
 ```bash
-curl -sX POST http://localhost:8080/auth/device/start | jq
+npm --workspace agent/nomade-agent run login -- --server-url http://localhost:8080
 ```
-2. Approve with your email:
+2. Pair local agent (auto-requests pairing code):
 ```bash
-curl -sX POST http://localhost:8080/auth/device/approve \
-  -H 'content-type: application/json' \
-  -d '{"userCode":"<USER_CODE>","email":"you@example.com"}'
+npm --workspace agent/nomade-agent run pair -- --server-url http://localhost:8080
 ```
-3. Poll for access token:
-```bash
-curl -sX POST http://localhost:8080/auth/device/poll \
-  -H 'content-type: application/json' \
-  -d '{"deviceCode":"<DEVICE_CODE>"}' | jq
-```
-4. Request pairing code:
-```bash
-curl -sX POST http://localhost:8080/agents/pair \
-  -H "authorization: Bearer <ACCESS_TOKEN>" | jq
-```
-5. Pair local agent:
-```bash
-npm --workspace agent/nomade-agent run dev -- pair --server-url http://localhost:8080 --pairing-code <PAIRING_CODE>
-```
-6. Run agent:
+3. Run agent:
 ```bash
 npm --workspace agent/nomade-agent run dev -- run
 ```

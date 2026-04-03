@@ -16,11 +16,23 @@ export class AuthService {
     private readonly repositories: Repositories
   ) {}
 
-  async startDeviceCode(): Promise<{ deviceCode: string; userCode: string; expiresAt: Date; intervalSec: number }> {
+  async startDeviceCode(): Promise<{
+    deviceCode: string;
+    userCode: string;
+    expiresAt: Date;
+    intervalSec: number;
+    verificationUri: string;
+    verificationUriComplete: string;
+  }> {
     const created = await this.repositories.createDeviceCode(this.config.deviceCodeTtlSec);
+    const base = this.config.appBaseUrl.replace(/\/$/, "");
+    const verificationUri = `${base}/web/activate`;
+    const verificationUriComplete = `${verificationUri}?user_code=${encodeURIComponent(created.userCode)}`;
     return {
       ...created,
-      intervalSec: 2
+      intervalSec: 2,
+      verificationUri,
+      verificationUriComplete
     };
   }
 

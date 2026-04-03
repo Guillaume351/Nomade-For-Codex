@@ -1,5 +1,6 @@
 import http from "node:http";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -8,12 +9,31 @@ import { z } from "zod";
 import { sha256 } from "@nomade/shared";
 import { loadConfig } from "./config.js";
 import { createPool, ensureSchema } from "./db.js";
-import { Repositories, type TunnelRecord } from "./repositories.js";
+import {
+  DeviceLimitReachedError,
+  Repositories,
+  type BillingSubscriptionUpdate,
+  type TunnelRecord
+} from "./repositories.js";
 import { AuthService } from "./auth.js";
 import { requireUserAuth } from "./http-auth.js";
 import { WsHub } from "./ws-hub.js";
 import { DevServiceManager } from "./service-manager.js";
 import { previewOriginForSlug } from "./preview-origin.js";
+import {
+  createStripeCheckoutSession,
+  createStripeCustomer,
+  createStripePortalSession,
+  verifyStripeWebhookSignature
+} from "./billing.js";
+import {
+  clearSessionCookie,
+  createWebSessionToken,
+  encodeHtml,
+  htmlPage,
+  readWebSession,
+  setSessionCookie
+} from "./web-session.js";
 import {
   buildTransportTunnelDiagnostic,
   classifyProxyResponseDiagnostic,
@@ -147,6 +167,8 @@ const derivePromptFromInputItems = (inputItems: Array<Record<string, unknown>>):
   return "[non-text input]";
 };
 
+const isSecureAppBaseUrl = (value: string): boolean => value.trim().toLowerCase().startsWith("https://");
+
 export const createServer = async (): Promise<http.Server> => {
   const config = loadConfig();
   const pool = createPool(config.databaseUrl);
@@ -156,8 +178,237 @@ export const createServer = async (): Promise<http.Server> => {
   const auth = new AuthService(config, repositories);
 
   const app = express();
+  app.set("trust proxy", 1);
   app.use(helmet());
   app.use(cors());
+  app.use(express.urlencoded({ extended: false }));
+
+  const webSessionCookieSecure = isSecureAppBaseUrl(config.appBaseUrl);
+  const oidcStateStore = new Map<string, { returnTo: string; createdAt: number }>();
+
+  const cleanOidcStates = (): void => {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [state, payload] of oidcStateStore.entries()) {
+      if (payload.createdAt < cutoff) {
+        oidcStateStore.delete(state);
+      }
+    }
+  };
+
+  const readUserFromBearer = async (req: express.Request): Promise<{ userId: string; email: string } | null> => {
+    const raw = req.header("authorization");
+    if (!raw || !raw.startsWith("Bearer ")) {
+      return null;
+    }
+    const token = raw.slice("Bearer ".length);
+    const claims = await auth.verifyAccessTokenWithUser(token);
+    if (!claims) {
+      return null;
+    }
+    return { userId: claims.sub, email: claims.email };
+  };
+
+  const readUserFromWebSession = async (
+    req: express.Request
+  ): Promise<{ userId: string; email: string } | null> => {
+    const claims = readWebSession({
+      req,
+      cookieName: config.webSessionCookieName,
+      jwtSecret: config.jwtSecret
+    });
+    if (!claims) {
+      return null;
+    }
+    const user = await repositories.getUserById(claims.sub);
+    if (!user) {
+      return null;
+    }
+    return { userId: user.id, email: user.email };
+  };
+
+  const resolveAnyUser = async (req: express.Request): Promise<{ userId: string; email: string } | null> => {
+    const fromBearer = await readUserFromBearer(req);
+    if (fromBearer) {
+      return fromBearer;
+    }
+    return readUserFromWebSession(req);
+  };
+
+  const enforceRateLimit = async (params: {
+    req: express.Request;
+    res: express.Response;
+    namespace: string;
+    keySuffix?: string;
+    maxHits: number;
+    windowSec: number;
+  }): Promise<boolean> => {
+    const source = params.keySuffix ?? params.req.ip ?? "unknown";
+    const limit = await repositories.consumeRateLimit({
+      key: `${params.namespace}:${source}`,
+      maxHits: params.maxHits,
+      windowSec: params.windowSec
+    });
+    if (limit.allowed) {
+      return true;
+    }
+    params.res.setHeader("Retry-After", String(limit.retryAfterSec));
+    params.res.status(429).json({ error: "rate_limited", retryAfterSec: limit.retryAfterSec });
+    return false;
+  };
+
+  const ensureWebUser = async (
+    req: express.Request,
+    res: express.Response
+  ): Promise<{ userId: string; email: string } | null> => {
+    const sessionUser = await readUserFromWebSession(req);
+    if (sessionUser) {
+      return sessionUser;
+    }
+    const returnTo = encodeURIComponent(req.originalUrl || "/web/account");
+    res.redirect(`/web/login?returnTo=${returnTo}`);
+    return null;
+  };
+
+  const deviceLimitPayload = (params: {
+    currentAgents: number;
+    maxAgents: number;
+    planCode: string;
+  }): Record<string, unknown> => ({
+    error: "device_limit_reached",
+    currentAgents: params.currentAgents,
+    maxAgents: params.maxAgents,
+    planCode: params.planCode,
+    upgradeUrl: `${config.appBaseUrl.replace(/\/$/, "")}/web/account`
+  });
+
+  const mapStripePriceToPlan = (priceId: string | null | undefined): { planCode: string; maxAgents: number } => {
+    if (priceId && config.stripeProPriceId && priceId === config.stripeProPriceId) {
+      return { planCode: "pro", maxAgents: config.paidMaxAgents };
+    }
+    if (priceId && priceId.startsWith("price_")) {
+      return { planCode: "paid", maxAgents: config.paidMaxAgents };
+    }
+    return { planCode: "free", maxAgents: config.freeMaxAgents };
+  };
+
+  const ensureStripeCustomerForUser = async (params: { userId: string; email: string }): Promise<string> => {
+    if (!config.stripeEnabled || !config.stripeSecretKey) {
+      throw new Error("stripe_not_configured");
+    }
+    let stripeCustomerId = await repositories.getStripeCustomerIdForUser(params.userId);
+    if (!stripeCustomerId) {
+      const customer = await createStripeCustomer({
+        secretKey: config.stripeSecretKey,
+        email: params.email,
+        userId: params.userId
+      });
+      stripeCustomerId = customer.id;
+      await repositories.upsertStripeCustomer({ userId: params.userId, stripeCustomerId });
+    }
+    return stripeCustomerId;
+  };
+
+  app.post("/billing/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+    if (!config.stripeEnabled || !config.stripeWebhookSecret) {
+      res.status(404).json({ error: "stripe_not_configured" });
+      return;
+    }
+
+    if (!Buffer.isBuffer(req.body)) {
+      res.status(400).json({ error: "invalid_payload" });
+      return;
+    }
+
+    const signatureValid = verifyStripeWebhookSignature({
+      rawBody: req.body,
+      stripeSignatureHeader: req.header("stripe-signature"),
+      webhookSecret: config.stripeWebhookSecret
+    });
+    if (!signatureValid) {
+      res.status(400).json({ error: "invalid_signature" });
+      return;
+    }
+
+    const event = JSON.parse(req.body.toString("utf8")) as Record<string, unknown>;
+    const eventType = String(event.type ?? "");
+    const eventData = (event.data as Record<string, unknown> | undefined)?.object as Record<string, unknown> | undefined;
+    if (!eventData) {
+      res.json({ received: true });
+      return;
+    }
+
+    try {
+      if (eventType === "checkout.session.completed") {
+        const customerId = typeof eventData.customer === "string" ? eventData.customer : null;
+        const subscriptionId = typeof eventData.subscription === "string" ? eventData.subscription : null;
+        if (!customerId) {
+          res.json({ received: true });
+          return;
+        }
+        const user = await repositories.getUserByStripeCustomerId(customerId);
+        if (!user) {
+          res.json({ received: true });
+          return;
+        }
+
+        const priceId =
+          ((eventData as Record<string, unknown>).display_items as Array<Record<string, unknown>> | undefined)?.[0]
+            ?.price as string | undefined;
+        if (!priceId) {
+          res.json({ received: true });
+          return;
+        }
+        const mapped = mapStripePriceToPlan(priceId);
+        const update: BillingSubscriptionUpdate = {
+          userId: user.id,
+          planCode: mapped.planCode,
+          status: "active",
+          maxAgents: mapped.maxAgents,
+          source: "stripe",
+          stripeSubscriptionId: subscriptionId
+        };
+        await repositories.applyBillingSubscriptionUpdate(update);
+      }
+
+      if (eventType === "customer.subscription.updated" || eventType === "customer.subscription.deleted") {
+        const customerId = typeof eventData.customer === "string" ? eventData.customer : null;
+        if (!customerId) {
+          res.json({ received: true });
+          return;
+        }
+        const user = await repositories.getUserByStripeCustomerId(customerId);
+        if (!user) {
+          res.json({ received: true });
+          return;
+        }
+        const status = typeof eventData.status === "string" ? eventData.status : "inactive";
+        const subscriptionId = typeof eventData.id === "string" ? eventData.id : null;
+        const periodEnd =
+          typeof eventData.current_period_end === "number" ? new Date(eventData.current_period_end * 1000) : null;
+        const items = ((eventData.items as Record<string, unknown> | undefined)?.data as Array<Record<string, unknown>>) ?? [];
+        const firstPriceId = (items[0]?.price as Record<string, unknown> | undefined)?.id;
+        const mapped = mapStripePriceToPlan(typeof firstPriceId === "string" ? firstPriceId : null);
+        const active = status === "active" || status === "trialing";
+        const update: BillingSubscriptionUpdate = {
+          userId: user.id,
+          planCode: active ? mapped.planCode : "free",
+          status,
+          maxAgents: active ? mapped.maxAgents : config.freeMaxAgents,
+          source: active ? "stripe" : "free",
+          stripeSubscriptionId: active ? subscriptionId : null,
+          currentPeriodEnd: periodEnd
+        };
+        await repositories.applyBillingSubscriptionUpdate(update);
+      }
+    } catch (error) {
+      console.error("[control-api] stripe webhook failed", error);
+      res.status(500).json({ error: "webhook_processing_failed" });
+      return;
+    }
+
+    res.json({ received: true });
+  });
+
   app.use(express.json({ limit: jsonLimit }));
 
   app.get("/health", (_req, res) => {
@@ -509,34 +760,435 @@ export const createServer = async (): Promise<http.Server> => {
     await repositories.updateConversationStatus(params.conversationId, "idle");
   };
 
-  app.post("/auth/device/start", async (_req, res) => {
+  app.get("/web", (_req, res) => {
+    res.redirect("/web/account");
+  });
+
+  app.get("/web/login", async (req, res) => {
+    const returnTo = typeof req.query.returnTo === "string" && req.query.returnTo.startsWith("/")
+      ? req.query.returnTo
+      : "/web/account";
+    const user = await readUserFromWebSession(req);
+    if (user) {
+      res.redirect(returnTo);
+      return;
+    }
+
+    const title = "Nomade Sign In";
+    if (config.oidcEnabled) {
+      const body = `
+        <h1>Sign in to Nomade</h1>
+        <p>Use your SSO account to continue.</p>
+        <div class="row">
+          <a href="/auth/oidc/start?returnTo=${encodeURIComponent(returnTo)}"><button>Continue with SSO</button></a>
+        </div>
+      `;
+      res.type("html").send(htmlPage({ title, body }));
+      return;
+    }
+
+    if (!config.devLoginEnabled) {
+      const body = `
+        <h1>Sign in unavailable</h1>
+        <p>OIDC is not configured on this deployment and development login is disabled.</p>
+      `;
+      res.status(503).type("html").send(htmlPage({ title, body }));
+      return;
+    }
+
+    const body = `
+      <h1>Development Login</h1>
+      <p>OIDC is not configured. This fallback is only enabled when <code>DEV_LOGIN_ENABLED=true</code>.</p>
+      <form method="post" action="/web/dev-login">
+        <input type="hidden" name="returnTo" value="${encodeHtml(returnTo)}" />
+        <div class="row">
+          <input type="email" name="email" placeholder="you@example.com" required />
+          <button type="submit">Sign in</button>
+        </div>
+      </form>
+    `;
+    res.type("html").send(htmlPage({ title, body }));
+  });
+
+  app.post("/web/dev-login", async (req, res) => {
+    if (config.oidcEnabled || !config.devLoginEnabled) {
+      res.status(404).type("html").send(htmlPage({ title: "Not found", body: "<h1>Not found</h1>" }));
+      return;
+    }
+    const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    const returnTo =
+      typeof req.body.returnTo === "string" && req.body.returnTo.startsWith("/") ? req.body.returnTo : "/web/account";
+    if (!email || !email.includes("@")) {
+      res.status(400).type("html").send(htmlPage({ title: "Invalid email", body: "<h1>Invalid email</h1>" }));
+      return;
+    }
+    const user = await repositories.findOrCreateUserByEmail(email);
+    const sessionToken = createWebSessionToken({
+      userId: user.id,
+      email: user.email,
+      jwtSecret: config.jwtSecret,
+      ttlSec: config.webSessionTtlSec
+    });
+    setSessionCookie({
+      res,
+      cookieName: config.webSessionCookieName,
+      value: sessionToken,
+      ttlSec: config.webSessionTtlSec,
+      secure: webSessionCookieSecure
+    });
+    res.redirect(returnTo);
+  });
+
+  app.get("/auth/oidc/start", (req, res) => {
+    if (!config.oidcEnabled) {
+      res.status(503).json({ error: "oidc_not_configured" });
+      return;
+    }
+    const returnTo = typeof req.query.returnTo === "string" && req.query.returnTo.startsWith("/")
+      ? req.query.returnTo
+      : "/web/account";
+    cleanOidcStates();
+    const state = randomBytes(16).toString("hex");
+    oidcStateStore.set(state, { returnTo, createdAt: Date.now() });
+
+    const authorizeUrl = new URL(config.oidcAuthorizationUrl!);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("client_id", config.oidcClientId!);
+    authorizeUrl.searchParams.set("redirect_uri", config.oidcRedirectUrl!);
+    authorizeUrl.searchParams.set("scope", config.oidcScope);
+    authorizeUrl.searchParams.set("state", state);
+    res.redirect(authorizeUrl.toString());
+  });
+
+  app.get("/auth/oidc/callback", async (req, res) => {
+    if (!config.oidcEnabled) {
+      res.status(503).json({ error: "oidc_not_configured" });
+      return;
+    }
+    const code = typeof req.query.code === "string" ? req.query.code : "";
+    const state = typeof req.query.state === "string" ? req.query.state : "";
+    const storedState = oidcStateStore.get(state);
+    oidcStateStore.delete(state);
+
+    if (!code || !storedState) {
+      res.status(400).type("html").send(htmlPage({ title: "Invalid callback", body: "<h1>Invalid callback</h1>" }));
+      return;
+    }
+
+    try {
+      const tokenParams = new URLSearchParams();
+      tokenParams.set("grant_type", "authorization_code");
+      tokenParams.set("code", code);
+      tokenParams.set("redirect_uri", config.oidcRedirectUrl!);
+      tokenParams.set("client_id", config.oidcClientId!);
+      tokenParams.set("client_secret", config.oidcClientSecret!);
+
+      const tokenResponse = await fetch(config.oidcTokenUrl!, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: tokenParams.toString()
+      });
+      if (!tokenResponse.ok) {
+        const detail = await tokenResponse.text();
+        throw new Error(`oidc_token_exchange_failed:${tokenResponse.status}:${detail}`);
+      }
+
+      const tokenPayload = (await tokenResponse.json()) as Record<string, unknown>;
+      const accessToken = typeof tokenPayload.access_token === "string" ? tokenPayload.access_token : "";
+      if (!accessToken) {
+        throw new Error("oidc_access_token_missing");
+      }
+
+      const userInfoResponse = await fetch(config.oidcUserInfoUrl!, {
+        headers: { authorization: `Bearer ${accessToken}` }
+      });
+      if (!userInfoResponse.ok) {
+        const detail = await userInfoResponse.text();
+        throw new Error(`oidc_userinfo_failed:${userInfoResponse.status}:${detail}`);
+      }
+      const userInfo = (await userInfoResponse.json()) as Record<string, unknown>;
+      const email = typeof userInfo.email === "string" ? userInfo.email.trim().toLowerCase() : "";
+
+      if (!email) {
+        throw new Error("oidc_email_missing_in_userinfo");
+      }
+
+      const user = await repositories.findOrCreateUserByEmail(email);
+      const sessionToken = createWebSessionToken({
+        userId: user.id,
+        email: user.email,
+        jwtSecret: config.jwtSecret,
+        ttlSec: config.webSessionTtlSec
+      });
+      setSessionCookie({
+        res,
+        cookieName: config.webSessionCookieName,
+        value: sessionToken,
+        ttlSec: config.webSessionTtlSec,
+        secure: webSessionCookieSecure
+      });
+      res.redirect(storedState.returnTo);
+    } catch (error) {
+      console.error("[control-api] oidc callback failed", error);
+      res
+        .status(500)
+        .type("html")
+        .send(htmlPage({ title: "Sign in failed", body: "<h1>Sign in failed</h1><p>Try again in a moment.</p>" }));
+    }
+  });
+
+  app.get("/web/logout", (_req, res) => {
+    clearSessionCookie({
+      res,
+      cookieName: config.webSessionCookieName,
+      secure: webSessionCookieSecure
+    });
+    res.redirect("/web/login");
+  });
+
+  app.get("/web/activate", async (req, res) => {
+    const user = await ensureWebUser(req, res);
+    if (!user) {
+      return;
+    }
+    const presetCode = typeof req.query.user_code === "string" ? req.query.user_code : "";
+    const body = `
+      <h1>Activate Device Login</h1>
+      <p>Signed in as <code>${encodeHtml(user.email)}</code>.</p>
+      <form method="post" action="/web/activate">
+        <div class="row">
+          <input type="text" name="userCode" value="${encodeHtml(presetCode)}" placeholder="ABCD1234" required />
+          <button type="submit">Approve login</button>
+        </div>
+      </form>
+      <p class="muted">Copy the code displayed in your terminal if the field is empty.</p>
+    `;
+    res.type("html").send(htmlPage({ title: "Activate", body }));
+  });
+
+  app.post("/web/activate", async (req, res) => {
+    const user = await ensureWebUser(req, res);
+    if (!user) {
+      return;
+    }
+    const userCode = typeof req.body.userCode === "string" ? req.body.userCode.trim().toUpperCase() : "";
+    if (!userCode) {
+      res.status(400).type("html").send(htmlPage({ title: "Missing code", body: "<h1>Missing code</h1>" }));
+      return;
+    }
+    const approved = await repositories.approveDeviceCode(userCode, user.userId);
+    await repositories.writeAuditEvent({
+      userId: user.userId,
+      actorType: "user",
+      actorId: user.userId,
+      action: approved ? "auth.device_code.approved" : "auth.device_code.rejected",
+      metadata: { userCode }
+    });
+    if (!approved) {
+      res
+        .status(404)
+        .type("html")
+        .send(htmlPage({ title: "Code invalid", body: "<h1>Code invalid or expired</h1><p>Request a new login code.</p>" }));
+      return;
+    }
+    res
+      .type("html")
+      .send(
+        htmlPage({
+          title: "Login approved",
+          body: "<h1>Login approved</h1><p>You can return to your terminal. It will finish login automatically.</p>"
+        })
+      );
+  });
+
+  app.get("/web/account", async (req, res) => {
+    const user = await ensureWebUser(req, res);
+    if (!user) {
+      return;
+    }
+    const entitlements = await repositories.getUserEntitlements(user.userId);
+    const stripeConfigured = config.stripeEnabled && Boolean(config.stripeProPriceId);
+    const body = `
+      <h1>Account</h1>
+      <p>Signed in as <code>${encodeHtml(user.email)}</code>.</p>
+      <ul>
+        <li>Plan: <strong>${encodeHtml(entitlements.planCode)}</strong></li>
+        <li>Device quota: <strong>${entitlements.currentAgents}/${entitlements.maxAgents}</strong></li>
+        <li>Status: <strong>${encodeHtml(entitlements.subscriptionStatus)}</strong></li>
+      </ul>
+      <div class="row">
+        <a href="/web/devices"><button type="button">Manage devices</button></a>
+        <a href="/web/logout"><button type="button">Sign out</button></a>
+      </div>
+      ${
+        stripeConfigured
+          ? `<div class="row">
+              <form method="post" action="/web/billing/checkout"><button type="submit">Upgrade with Stripe</button></form>
+              <form method="post" action="/web/billing/portal"><button type="submit">Open billing portal</button></form>
+            </div>`
+          : `<p class="muted">Stripe billing is not configured on this environment.</p>`
+      }
+    `;
+    res.type("html").send(htmlPage({ title: "Account", body }));
+  });
+
+  app.get("/web/devices", async (req, res) => {
+    const user = await ensureWebUser(req, res);
+    if (!user) {
+      return;
+    }
+    const agents = await repositories.listAgents(user.userId);
+    const entitlements = await repositories.getUserEntitlements(user.userId);
+    const items = agents.map((agent) => `<li><code>${encodeHtml(agent.name)}</code> (${encodeHtml(agent.id)})</li>`).join("");
+    const body = `
+      <h1>Devices</h1>
+      <p>Registered devices: <strong>${entitlements.currentAgents}/${entitlements.maxAgents}</strong>.</p>
+      <ul>${items || "<li>No device paired yet.</li>"}</ul>
+      <div class="row">
+        <a href="/web/account"><button type="button">Back to account</button></a>
+      </div>
+    `;
+    res.type("html").send(htmlPage({ title: "Devices", body }));
+  });
+
+  app.post("/web/billing/checkout", async (req, res) => {
+    const user = await ensureWebUser(req, res);
+    if (!user) {
+      return;
+    }
+    if (!config.stripeEnabled || !config.stripeSecretKey || !config.stripeProPriceId) {
+      res.status(503).type("html").send(htmlPage({ title: "Billing unavailable", body: "<h1>Billing unavailable</h1>" }));
+      return;
+    }
+    try {
+      const stripeCustomerId = await ensureStripeCustomerForUser({ userId: user.userId, email: user.email });
+      const base = config.appBaseUrl.replace(/\/$/, "");
+      const session = await createStripeCheckoutSession({
+        secretKey: config.stripeSecretKey,
+        customerId: stripeCustomerId,
+        priceId: config.stripeProPriceId,
+        successUrl: `${base}/web/account?billing=success`,
+        cancelUrl: `${base}/web/account?billing=cancel`
+      });
+      if (!session.url) {
+        throw new Error("stripe_session_missing_url");
+      }
+      res.redirect(session.url);
+    } catch (error) {
+      console.error("[control-api] stripe checkout failed", error);
+      res.status(500).type("html").send(htmlPage({ title: "Checkout failed", body: "<h1>Checkout failed</h1>" }));
+    }
+  });
+
+  app.post("/web/billing/portal", async (req, res) => {
+    const user = await ensureWebUser(req, res);
+    if (!user) {
+      return;
+    }
+    if (!config.stripeEnabled || !config.stripeSecretKey) {
+      res.status(503).type("html").send(htmlPage({ title: "Billing unavailable", body: "<h1>Billing unavailable</h1>" }));
+      return;
+    }
+    try {
+      const stripeCustomerId = await ensureStripeCustomerForUser({ userId: user.userId, email: user.email });
+      const portal = await createStripePortalSession({
+        secretKey: config.stripeSecretKey,
+        customerId: stripeCustomerId,
+        returnUrl: `${config.appBaseUrl.replace(/\/$/, "")}/web/account`
+      });
+      if (!portal.url) {
+        throw new Error("stripe_portal_missing_url");
+      }
+      res.redirect(portal.url);
+    } catch (error) {
+      console.error("[control-api] stripe portal failed", error);
+      res.status(500).type("html").send(htmlPage({ title: "Portal failed", body: "<h1>Portal failed</h1>" }));
+    }
+  });
+
+  app.post("/auth/device/start", async (req, res) => {
+    if (
+      !(await enforceRateLimit({
+        req,
+        res,
+        namespace: "auth_device_start",
+        maxHits: 20,
+        windowSec: 60
+      }))
+    ) {
+      return;
+    }
     const created = await auth.startDeviceCode();
     res.json({
       deviceCode: created.deviceCode,
       userCode: created.userCode,
       expiresAt: created.expiresAt.toISOString(),
-      intervalSec: created.intervalSec
+      intervalSec: created.intervalSec,
+      verificationUri: created.verificationUri,
+      verificationUriComplete: created.verificationUriComplete
     });
   });
 
   app.post("/auth/device/approve", async (req, res) => {
-    const schema = z.object({ userCode: z.string().min(4), email: z.string().email() });
+    if (
+      !(await enforceRateLimit({
+        req,
+        res,
+        namespace: "auth_device_approve",
+        maxHits: 30,
+        windowSec: 60
+      }))
+    ) {
+      return;
+    }
+    const schema = z.object({
+      userCode: z.string().min(4),
+      email: z.string().email().optional()
+    });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
       return;
     }
 
-    const approved = await auth.approveDeviceCode(parsed.data);
+    let user = await resolveAnyUser(req);
+    if (!user && config.legacyDeviceApproveEnabled && parsed.data.email) {
+      const fallback = await repositories.findOrCreateUserByEmail(parsed.data.email);
+      user = { userId: fallback.id, email: fallback.email };
+    }
+
+    if (!user) {
+      res.status(401).json({ error: "auth_required" });
+      return;
+    }
+
+    const approved = await repositories.approveDeviceCode(parsed.data.userCode.toUpperCase(), user.userId);
     if (!approved) {
       res.status(404).json({ error: "invalid_or_expired_user_code" });
       return;
     }
-
+    await repositories.writeAuditEvent({
+      userId: user.userId,
+      actorType: "user",
+      actorId: user.userId,
+      action: "auth.device_code.approved",
+      metadata: { source: "api" }
+    });
     res.json({ approved: true });
   });
 
   app.post("/auth/device/poll", async (req, res) => {
+    if (
+      !(await enforceRateLimit({
+        req,
+        res,
+        namespace: "auth_device_poll",
+        maxHits: 120,
+        windowSec: 60
+      }))
+    ) {
+      return;
+    }
     const schema = z.object({ deviceCode: z.string().min(10) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -600,7 +1252,97 @@ export const createServer = async (): Promise<http.Server> => {
     res.json(me);
   });
 
+  app.get("/me/entitlements", requireUserAuth(auth), async (req, res) => {
+    const entitlements = await repositories.getUserEntitlements(req.userId!);
+    res.json(entitlements);
+  });
+
+  app.post("/billing/checkout-session", requireUserAuth(auth), async (req, res) => {
+    if (!config.stripeEnabled || !config.stripeSecretKey || !config.stripeProPriceId) {
+      res.status(503).json({ error: "stripe_not_configured" });
+      return;
+    }
+    const me = await repositories.getUserById(req.userId!);
+    if (!me) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    try {
+      const stripeCustomerId = await ensureStripeCustomerForUser({ userId: me.id, email: me.email });
+      const base = config.appBaseUrl.replace(/\/$/, "");
+      const session = await createStripeCheckoutSession({
+        secretKey: config.stripeSecretKey,
+        customerId: stripeCustomerId,
+        priceId: config.stripeProPriceId,
+        successUrl: `${base}/web/account?billing=success`,
+        cancelUrl: `${base}/web/account?billing=cancel`
+      });
+      res.json({ id: session.id, url: session.url ?? null });
+    } catch (error) {
+      console.error("[control-api] checkout session failed", error);
+      res.status(500).json({ error: "checkout_session_failed" });
+    }
+  });
+
+  app.post("/billing/portal-session", requireUserAuth(auth), async (req, res) => {
+    if (!config.stripeEnabled || !config.stripeSecretKey) {
+      res.status(503).json({ error: "stripe_not_configured" });
+      return;
+    }
+    const me = await repositories.getUserById(req.userId!);
+    if (!me) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    try {
+      const stripeCustomerId = await ensureStripeCustomerForUser({ userId: me.id, email: me.email });
+      const portal = await createStripePortalSession({
+        secretKey: config.stripeSecretKey,
+        customerId: stripeCustomerId,
+        returnUrl: `${config.appBaseUrl.replace(/\/$/, "")}/web/account`
+      });
+      res.json({ id: portal.id, url: portal.url ?? null });
+    } catch (error) {
+      console.error("[control-api] portal session failed", error);
+      res.status(500).json({ error: "portal_session_failed" });
+    }
+  });
+
   app.post("/agents/pair", requireUserAuth(auth), async (req, res) => {
+    if (
+      !(await enforceRateLimit({
+        req,
+        res,
+        namespace: "agents_pair",
+        keySuffix: req.userId ?? req.ip ?? "unknown",
+        maxHits: 20,
+        windowSec: 60
+      }))
+    ) {
+      return;
+    }
+    const entitlements = await repositories.getUserEntitlements(req.userId!);
+    if (entitlements.limitReached) {
+      await repositories.writeAuditEvent({
+        userId: req.userId!,
+        actorType: "user",
+        actorId: req.userId!,
+        action: "agent.pairing_code.blocked_device_limit",
+        metadata: {
+          currentAgents: entitlements.currentAgents,
+          maxAgents: entitlements.maxAgents,
+          planCode: entitlements.planCode
+        }
+      });
+      res.status(403).json(
+        deviceLimitPayload({
+          currentAgents: entitlements.currentAgents,
+          maxAgents: entitlements.maxAgents,
+          planCode: entitlements.planCode
+        })
+      );
+      return;
+    }
     const code = await repositories.createPairingCode(req.userId!, config.pairingCodeTtlSec);
     await repositories.writeAuditEvent({
       userId: req.userId!,
@@ -609,10 +1351,25 @@ export const createServer = async (): Promise<http.Server> => {
       action: "agent.pairing_code.created",
       metadata: { ttlSec: config.pairingCodeTtlSec }
     });
-    res.json({ pairingCode: code, expiresInSec: config.pairingCodeTtlSec });
+    res.json({
+      pairingCode: code,
+      expiresInSec: config.pairingCodeTtlSec,
+      entitlements
+    });
   });
 
   app.post("/agents/register", async (req, res) => {
+    if (
+      !(await enforceRateLimit({
+        req,
+        res,
+        namespace: "agents_register",
+        maxHits: 20,
+        windowSec: 60
+      }))
+    ) {
+      return;
+    }
     const schema = z.object({ pairingCode: z.string().min(8), name: z.string().min(2).max(120) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -626,7 +1383,36 @@ export const createServer = async (): Promise<http.Server> => {
       return;
     }
 
-    const created = await repositories.createAgent(consumed.userId, parsed.data.name);
+    const entitlements = await repositories.getUserEntitlements(consumed.userId);
+    let created: { agentId: string; agentToken: string };
+    try {
+      created = await repositories.createAgent(consumed.userId, parsed.data.name, entitlements.maxAgents);
+    } catch (error) {
+      if (error instanceof DeviceLimitReachedError) {
+        await repositories.writeAuditEvent({
+          userId: consumed.userId,
+          actorType: "user",
+          actorId: consumed.userId,
+          action: "agent.register.blocked_device_limit",
+          metadata: {
+            currentAgents: error.currentAgents,
+            maxAgents: error.maxAgents
+          }
+        });
+        res
+          .status(403)
+          .json(
+            deviceLimitPayload({
+              currentAgents: error.currentAgents,
+              maxAgents: error.maxAgents,
+              planCode: entitlements.planCode
+            })
+          );
+        return;
+      }
+      throw error;
+    }
+
     await repositories.writeAuditEvent({
       userId: consumed.userId,
       actorType: "agent",
@@ -635,7 +1421,10 @@ export const createServer = async (): Promise<http.Server> => {
       metadata: { name: parsed.data.name }
     });
 
-    res.json(created);
+    res.json({
+      ...created,
+      entitlements: await repositories.getUserEntitlements(consumed.userId)
+    });
   });
 
   app.get("/agents", requireUserAuth(auth), async (req, res) => {
@@ -674,7 +1463,10 @@ export const createServer = async (): Promise<http.Server> => {
         return Date.parse(b.created_at) - Date.parse(a.created_at);
       });
 
-    res.json({ items: agents });
+    res.json({
+      items: agents,
+      entitlements: await repositories.getUserEntitlements(req.userId!)
+    });
   });
 
   app.post("/agents/:agentId/codex/import", requireUserAuth(auth), async (req, res) => {

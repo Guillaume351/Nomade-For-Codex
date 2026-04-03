@@ -6,6 +6,36 @@ export interface User {
   email: string;
 }
 
+export interface UserEntitlements {
+  userId: string;
+  planCode: string;
+  subscriptionStatus: string;
+  maxAgents: number;
+  currentAgents: number;
+  limitReached: boolean;
+  source: string;
+}
+
+export interface BillingSubscriptionUpdate {
+  userId: string;
+  planCode: string;
+  status: string;
+  maxAgents: number;
+  source: string;
+  stripeSubscriptionId?: string | null;
+  currentPeriodEnd?: Date | null;
+}
+
+export class DeviceLimitReachedError extends Error {
+  constructor(
+    readonly currentAgents: number,
+    readonly maxAgents: number
+  ) {
+    super("device_limit_reached");
+    this.name = "DeviceLimitReachedError";
+  }
+}
+
 export interface SessionRecord {
   id: string;
   user_id: string;
@@ -115,9 +145,25 @@ export interface DevServiceRuntimeRecord {
 export class Repositories {
   constructor(private readonly pool: Pool) {}
 
+  async ensureUserBillingDefaults(userId: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO subscriptions (user_id, plan_code, status)
+       VALUES ($1, 'free', 'active')
+       ON CONFLICT (user_id) DO NOTHING`,
+      [userId]
+    );
+    await this.pool.query(
+      `INSERT INTO device_entitlements (user_id, max_agents, source)
+       VALUES ($1, 1, 'free')
+       ON CONFLICT (user_id) DO NOTHING`,
+      [userId]
+    );
+  }
+
   async findOrCreateUserByEmail(email: string): Promise<User> {
     const existing = await this.pool.query<User>("SELECT id, email FROM users WHERE email = $1", [email]);
     if ((existing.rowCount ?? 0) > 0 && existing.rows[0]) {
+      await this.ensureUserBillingDefaults(existing.rows[0].id);
       return existing.rows[0];
     }
 
@@ -125,6 +171,7 @@ export class Repositories {
       "INSERT INTO users (id, email) VALUES ($1, $2) RETURNING id, email",
       [newId(), email]
     );
+    await this.ensureUserBillingDefaults(created.rows[0].id);
     return created.rows[0];
   }
 
@@ -232,7 +279,137 @@ export class Repositories {
     if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
       return null;
     }
+    await this.ensureUserBillingDefaults(result.rows[0].id);
     return result.rows[0];
+  }
+
+  async getUserByStripeCustomerId(stripeCustomerId: string): Promise<User | null> {
+    const result = await this.pool.query<User>(
+      `SELECT u.id, u.email
+       FROM users u
+       JOIN billing_customers b ON b.user_id = u.id
+       WHERE b.stripe_customer_id = $1`,
+      [stripeCustomerId]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      return null;
+    }
+    return result.rows[0];
+  }
+
+  async getStripeCustomerIdForUser(userId: string): Promise<string | null> {
+    const result = await this.pool.query<{ stripe_customer_id: string }>(
+      "SELECT stripe_customer_id FROM billing_customers WHERE user_id = $1",
+      [userId]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      return null;
+    }
+    return result.rows[0].stripe_customer_id;
+  }
+
+  async upsertStripeCustomer(params: { userId: string; stripeCustomerId: string }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO billing_customers (user_id, stripe_customer_id)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id) DO UPDATE
+       SET stripe_customer_id = EXCLUDED.stripe_customer_id,
+           updated_at = NOW()`,
+      [params.userId, params.stripeCustomerId]
+    );
+  }
+
+  async applyBillingSubscriptionUpdate(params: BillingSubscriptionUpdate): Promise<void> {
+    await this.ensureUserBillingDefaults(params.userId);
+    await this.pool.query(
+      `INSERT INTO subscriptions (
+         user_id, plan_code, status, stripe_subscription_id, current_period_end, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, NOW())
+       ON CONFLICT (user_id) DO UPDATE
+       SET plan_code = EXCLUDED.plan_code,
+           status = EXCLUDED.status,
+           stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+           current_period_end = EXCLUDED.current_period_end,
+           updated_at = NOW()`,
+      [
+        params.userId,
+        params.planCode,
+        params.status,
+        params.stripeSubscriptionId ?? null,
+        params.currentPeriodEnd ?? null
+      ]
+    );
+
+    await this.pool.query(
+      `INSERT INTO device_entitlements (user_id, max_agents, source, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (user_id) DO UPDATE
+       SET max_agents = EXCLUDED.max_agents,
+           source = EXCLUDED.source,
+           updated_at = NOW()`,
+      [params.userId, Math.max(1, params.maxAgents), params.source]
+    );
+  }
+
+  async countAgentsForUser(userId: string): Promise<number> {
+    const result = await this.pool.query<{ count: number }>(
+      "SELECT COUNT(*)::int AS count FROM agents WHERE user_id = $1",
+      [userId]
+    );
+    return Number(result.rows[0]?.count ?? 0);
+  }
+
+  async getUserEntitlements(userId: string): Promise<UserEntitlements> {
+    await this.ensureUserBillingDefaults(userId);
+    const result = await this.pool.query<{
+      plan_code: string;
+      subscription_status: string;
+      max_agents: number;
+      source: string;
+      current_agents: number;
+    }>(
+      `SELECT
+         COALESCE(s.plan_code, 'free') AS plan_code,
+         COALESCE(s.status, 'active') AS subscription_status,
+         COALESCE(e.max_agents, 1) AS max_agents,
+         COALESCE(e.source, 'free') AS source,
+         COALESCE(a.current_agents, 0)::int AS current_agents
+       FROM users u
+       LEFT JOIN subscriptions s ON s.user_id = u.id
+       LEFT JOIN device_entitlements e ON e.user_id = u.id
+       LEFT JOIN (
+         SELECT user_id, COUNT(*)::int AS current_agents
+         FROM agents
+         GROUP BY user_id
+       ) a ON a.user_id = u.id
+       WHERE u.id = $1`,
+      [userId]
+    );
+
+    const row = result.rows[0];
+    if (!row) {
+      return {
+        userId,
+        planCode: "free",
+        subscriptionStatus: "active",
+        maxAgents: 1,
+        currentAgents: 0,
+        limitReached: false,
+        source: "free"
+      };
+    }
+
+    const maxAgents = Math.max(1, Number(row.max_agents));
+    const currentAgents = Math.max(0, Number(row.current_agents));
+    return {
+      userId,
+      planCode: row.plan_code,
+      subscriptionStatus: row.subscription_status,
+      maxAgents,
+      currentAgents,
+      limitReached: currentAgents >= maxAgents,
+      source: row.source
+    };
   }
 
   async createPairingCode(userId: string, ttlSec: number): Promise<string> {
@@ -262,15 +439,40 @@ export class Repositories {
     return { userId: result.rows[0].user_id };
   }
 
-  async createAgent(userId: string, name: string): Promise<{ agentId: string; agentToken: string }> {
-    const agentId = newId();
-    const agentToken = randomToken("na");
-    await this.pool.query(
-      `INSERT INTO agents (id, user_id, name, token_hash)
-       VALUES ($1, $2, $3, $4)`,
-      [agentId, userId, name, sha256(agentToken)]
-    );
-    return { agentId, agentToken };
+  async createAgent(
+    userId: string,
+    name: string,
+    maxAgents: number
+  ): Promise<{ agentId: string; agentToken: string }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT id FROM users WHERE id = $1 FOR UPDATE", [userId]);
+      const countResult = await client.query<{ count: number }>(
+        "SELECT COUNT(*)::int AS count FROM agents WHERE user_id = $1",
+        [userId]
+      );
+      const currentAgents = Number(countResult.rows[0]?.count ?? 0);
+      const normalizedMax = Math.max(1, maxAgents);
+      if (currentAgents >= normalizedMax) {
+        throw new DeviceLimitReachedError(currentAgents, normalizedMax);
+      }
+
+      const agentId = newId();
+      const agentToken = randomToken("na");
+      await client.query(
+        `INSERT INTO agents (id, user_id, name, token_hash)
+         VALUES ($1, $2, $3, $4)`,
+        [agentId, userId, name, sha256(agentToken)]
+      );
+      await client.query("COMMIT");
+      return { agentId, agentToken };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async findAgentByToken(agentToken: string): Promise<{ agentId: string; userId: string } | null> {
@@ -1007,5 +1209,41 @@ export class Repositories {
        VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
       [newId(), params.userId, params.actorType, params.actorId, params.action, JSON.stringify(params.metadata)]
     );
+  }
+
+  async consumeRateLimit(params: {
+    key: string;
+    maxHits: number;
+    windowSec: number;
+  }): Promise<{ allowed: boolean; retryAfterSec: number }> {
+    const windowSec = Math.max(1, params.windowSec);
+    const maxHits = Math.max(1, params.maxHits);
+    const result = await this.pool.query<{
+      hit_count: number;
+      elapsed_sec: number;
+    }>(
+      `WITH upsert AS (
+         INSERT INTO rate_limits (key, window_started_at, hit_count, updated_at)
+         VALUES ($1, NOW(), 1, NOW())
+         ON CONFLICT (key) DO UPDATE
+         SET hit_count = CASE
+               WHEN rate_limits.window_started_at <= NOW() - ($2::text || ' seconds')::interval THEN 1
+               ELSE rate_limits.hit_count + 1
+             END,
+             window_started_at = CASE
+               WHEN rate_limits.window_started_at <= NOW() - ($2::text || ' seconds')::interval THEN NOW()
+               ELSE rate_limits.window_started_at
+             END,
+             updated_at = NOW()
+         RETURNING hit_count, EXTRACT(EPOCH FROM (NOW() - window_started_at))::int AS elapsed_sec
+       )
+       SELECT hit_count, elapsed_sec FROM upsert`,
+      [params.key, windowSec]
+    );
+    const hitCount = Number(result.rows[0]?.hit_count ?? 1);
+    const elapsed = Math.max(0, Number(result.rows[0]?.elapsed_sec ?? 0));
+    const retryAfterSec = Math.max(0, windowSec - elapsed);
+    const allowed = hitCount <= maxHits;
+    return { allowed, retryAfterSec };
   }
 }
