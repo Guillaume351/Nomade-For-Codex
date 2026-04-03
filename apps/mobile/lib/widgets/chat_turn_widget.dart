@@ -5,9 +5,39 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/turn.dart';
-import '../models/turn_item.dart';
 import '../models/turn_timeline.dart';
 import '../providers/nomade_provider.dart';
+
+enum _TimelineSegmentKind {
+  agentMessage,
+  commandGroup,
+  event,
+}
+
+class _TimelineSegment {
+  _TimelineSegment.agentMessage({
+    required this.text,
+  })  : kind = _TimelineSegmentKind.agentMessage,
+        item = null,
+        commandItems = const [];
+
+  _TimelineSegment.commandGroup({
+    required this.commandItems,
+  })  : kind = _TimelineSegmentKind.commandGroup,
+        text = null,
+        item = null;
+
+  _TimelineSegment.event({
+    required this.item,
+  })  : kind = _TimelineSegmentKind.event,
+        text = null,
+        commandItems = const [];
+
+  final _TimelineSegmentKind kind;
+  final String? text;
+  final TurnTimelineItem? item;
+  final List<TurnTimelineItem> commandItems;
+}
 
 class ChatTurnWidget extends StatelessWidget {
   const ChatTurnWidget({super.key, required this.turn});
@@ -18,34 +48,51 @@ class ChatTurnWidget extends StatelessWidget {
   Widget build(BuildContext context) {
     final provider = context.watch<NomadeProvider>();
     final timeline = provider.tryTimelineForTurn(turn.id);
-    final markdown = _getMarkdown(timeline);
+    final markdownForCopy = _getMarkdownForCopy(timeline);
     final isUser = turn.userPrompt.isNotEmpty;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (isUser) _buildUserBubble(context, turn.userPrompt),
-        _buildAssistantBubble(context, markdown, timeline),
+        _buildAssistantBubble(
+          context,
+          timeline: timeline,
+          markdownForCopy: markdownForCopy,
+        ),
       ],
     );
   }
 
-  String _getMarkdown(TurnTimeline? timeline) {
+  String _getMarkdownForCopy(TurnTimeline? timeline) {
     if (timeline != null) {
-      final fromTimeline = _markdownFromTimeline(timeline);
-      if (fromTimeline.trim().isNotEmpty) {
-        return fromTimeline;
+      final chunks = <String>[];
+      for (final item in timeline.items) {
+        if (!item.isAgentMessage) {
+          continue;
+        }
+        final text = _extractAgentMessageText(item);
+        if (text.isNotEmpty) {
+          chunks.add(text);
+        }
+      }
+      if (chunks.isNotEmpty) {
+        return chunks.join('\n\n');
       }
     }
 
-    final isTerminal = turn.status == 'completed' ||
-        turn.status == 'failed' ||
-        turn.status == 'interrupted';
-    if (isTerminal && turn.items.isNotEmpty) {
-      final persisted = _markdownFromPersistedItems(turn.items);
-      if (persisted.trim().isNotEmpty) {
-        return persisted;
+    final chunks = <String>[];
+    for (final item in turn.items) {
+      if (item.itemType != 'agentMessage') {
+        continue;
       }
+      final extracted = _extractTextFromPayload(item.payload).trim();
+      if (extracted.isNotEmpty) {
+        chunks.add(extracted);
+      }
+    }
+    if (chunks.isNotEmpty) {
+      return chunks.join('\n\n');
     }
 
     if (turn.status == 'failed') {
@@ -57,120 +104,87 @@ class ChatTurnWidget extends StatelessWidget {
     return '';
   }
 
-  String _markdownFromTimeline(TurnTimeline timeline) {
-    final chunks = <String>[];
-    for (final item in timeline.items) {
-      if (!item.isAgentMessage) {
-        continue;
-      }
-      final timelineText = item.textDelta.trim();
-      if (timelineText.isNotEmpty) {
-        chunks.add(timelineText);
-        continue;
-      }
-      final payloadText = _extractTextFromPayload(item.payload).trim();
-      if (payloadText.isNotEmpty) {
-        chunks.add(payloadText);
-      }
+  List<_TimelineSegment> _buildSegments(TurnTimeline timeline) {
+    final segments = <_TimelineSegment>[];
+    final commandBuffer = <TurnTimelineItem>[];
+    final timelineItems = List<TurnTimelineItem>.from(timeline.items);
+    final indexByItemId = <String, int>{};
+    for (var index = 0; index < timelineItems.length; index += 1) {
+      indexByItemId[timelineItems[index].itemId] = index;
     }
-    return chunks.join('\n\n');
-  }
+    timelineItems.sort((a, b) {
+      final timeCompare =
+          _timelineSortInstant(a).compareTo(_timelineSortInstant(b));
+      if (timeCompare != 0) {
+        return timeCompare;
+      }
+      final typeCompare =
+          _timelineTypeSortWeight(a).compareTo(_timelineTypeSortWeight(b));
+      if (typeCompare != 0) {
+        return typeCompare;
+      }
+      return (indexByItemId[a.itemId] ?? 0).compareTo(
+        indexByItemId[b.itemId] ?? 0,
+      );
+    });
 
-  String _markdownFromPersistedItems(List<TurnItem> items) {
-    final chunks = <String>[];
-    for (final item in items) {
-      if (item.itemType == 'agentMessage') {
-        final extracted = _extractTextFromPayload(item.payload).trim();
-        if (extracted.isNotEmpty) {
-          chunks.add(extracted);
-        }
-        continue;
+    void flushCommands() {
+      if (commandBuffer.isEmpty) {
+        return;
       }
-      if (item.itemType == 'plan') {
-        final text = item.payload['text']?.toString().trim() ?? '';
-        if (text.isNotEmpty) {
-          chunks.add('Plan:\n$text');
-        }
-        continue;
-      }
-      if (item.itemType == 'reasoning') {
-        final reasoning = _extractReasoningSummary(item.payload);
-        if (reasoning.isNotEmpty) {
-          chunks.add('Reasoning:\n$reasoning');
-        }
-      }
+      segments.add(_TimelineSegment.commandGroup(
+        commandItems: List<TurnTimelineItem>.from(commandBuffer),
+      ));
+      commandBuffer.clear();
     }
-    return chunks.join('\n\n');
-  }
 
-  String _extractReasoningSummary(Map<String, dynamic> payload) {
-    final summary = payload['summary'];
-    if (summary is List) {
-      final lines = <String>[];
-      for (final entry in summary) {
-        if (entry is String && entry.trim().isNotEmpty) {
-          lines.add(entry.trim());
+    for (final item in timelineItems) {
+      if (item.isCommandExecution) {
+        commandBuffer.add(item);
+        continue;
+      }
+
+      flushCommands();
+      if (item.isAgentMessage) {
+        final text = _extractAgentMessageText(item);
+        if (text.isEmpty) {
           continue;
         }
-        if (entry is Map) {
-          final text = entry['text'];
-          if (text is String && text.trim().isNotEmpty) {
-            lines.add(text.trim());
-          }
-        }
-      }
-      if (lines.isNotEmpty) {
-        return lines.join('\n');
+        segments.add(_TimelineSegment.agentMessage(text: text));
+      } else {
+        segments.add(_TimelineSegment.event(item: item));
       }
     }
-    return '';
+    flushCommands();
+
+    return segments;
   }
 
-  String _extractTextFromPayload(Map<String, dynamic> payload) {
-    final nested = payload['payload'];
-    if (nested is Map) {
-      final nestedText =
-          _extractTextFromPayload(nested.cast<String, dynamic>());
-      if (nestedText.trim().isNotEmpty) {
-        return nestedText;
-      }
+  DateTime _timelineSortInstant(TurnTimelineItem item) {
+    var instant = item.completedAt ?? item.startedAt;
+    final phase = item.payload['phase']?.toString().toLowerCase();
+    if (item.isAgentMessage && phase == 'final_answer') {
+      instant = instant.add(const Duration(milliseconds: 1));
     }
+    return instant;
+  }
 
-    final directText = payload['text'];
-    if (directText is String && directText.trim().isNotEmpty) {
-      return directText.trim();
+  int _timelineTypeSortWeight(TurnTimelineItem item) {
+    if (item.isCommandExecution) {
+      return 0;
     }
-
-    final content = payload['content'];
-    if (content is String && content.trim().isNotEmpty) {
-      return content.trim();
+    if (item.isAgentMessage) {
+      return 2;
     }
+    return 1;
+  }
 
-    if (content is List) {
-      final parts = <String>[];
-      for (final entry in content) {
-        if (entry is String && entry.trim().isNotEmpty) {
-          parts.add(entry.trim());
-          continue;
-        }
-        if (entry is Map) {
-          final text = entry['text'];
-          if (text is String && text.trim().isNotEmpty) {
-            parts.add(text.trim());
-            continue;
-          }
-          final nestedContent = entry['content'];
-          if (nestedContent is String && nestedContent.trim().isNotEmpty) {
-            parts.add(nestedContent.trim());
-          }
-        }
-      }
-      if (parts.isNotEmpty) {
-        return parts.join('\n');
-      }
+  String _extractAgentMessageText(TurnTimelineItem item) {
+    final timelineText = item.textDelta.trim();
+    if (timelineText.isNotEmpty) {
+      return timelineText;
     }
-
-    return '';
+    return _extractTextFromPayload(item.payload).trim();
   }
 
   Widget _buildUserBubble(BuildContext context, String text) {
@@ -180,9 +194,9 @@ class ChatTurnWidget extends StatelessWidget {
     return Align(
       alignment: Alignment.centerRight,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 780),
+        constraints: const BoxConstraints(maxWidth: 1260),
         child: Container(
-          margin: const EdgeInsets.only(bottom: 14, left: 42),
+          margin: const EdgeInsets.only(bottom: 12, left: 16),
           padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
           decoration: BoxDecoration(
             borderRadius: const BorderRadius.only(
@@ -219,26 +233,26 @@ class ChatTurnWidget extends StatelessWidget {
   }
 
   Widget _buildAssistantBubble(
-      BuildContext context, String markdown, TurnTimeline? timeline) {
+    BuildContext context, {
+    required TurnTimeline? timeline,
+    required String markdownForCopy,
+  }) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final hasMarkdown = markdown.trim().isNotEmpty;
     final hasError = turn.error != null && turn.error!.trim().isNotEmpty;
-    final commandItems = timeline?.commandItems ?? const <TurnTimelineItem>[];
-    final eventItems = timeline == null
-        ? const <TurnTimelineItem>[]
-        : timeline.items
-            .where((item) => !item.isAgentMessage && !item.isCommandExecution)
-            .toList(growable: false);
+    final segments = timeline == null
+        ? const <_TimelineSegment>[]
+        : _buildSegments(timeline);
+    final hasTimeline = segments.isNotEmpty;
     final shouldCollapseExecution = timeline?.executionCollapsed ??
         (turn.status == 'completed' ||
             turn.status == 'failed' ||
             turn.status == 'interrupted');
 
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 920),
+      constraints: const BoxConstraints(maxWidth: 1360),
       child: Container(
-        margin: const EdgeInsets.only(bottom: 18, right: 42),
+        margin: const EdgeInsets.only(bottom: 16, right: 6),
         padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
         decoration: BoxDecoration(
           color: scheme.surface,
@@ -262,67 +276,25 @@ class ChatTurnWidget extends StatelessWidget {
           children: [
             _buildTurnStatusChip(context, turn.status),
             const SizedBox(height: 10),
-            if (hasMarkdown)
-              MarkdownBody(
-                data: markdown,
-                selectable: true,
-                onTapLink: (_, href, __) async {
-                  if (href == null) {
-                    return;
-                  }
-                  final uri = Uri.tryParse(href);
-                  if (uri == null) {
-                    return;
-                  }
-                  await launchUrl(
-                    uri,
-                    mode: LaunchMode.externalApplication,
-                  );
-                },
-                styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
-                  p: theme.textTheme.bodyMedium?.copyWith(height: 1.6),
-                  blockSpacing: 12,
-                  code: TextStyle(
-                    backgroundColor:
-                        scheme.surfaceContainerHighest.withValues(alpha: 0.8),
-                    fontFamily: 'monospace',
-                    fontSize: 13,
-                  ),
-                  codeblockDecoration: BoxDecoration(
-                    color: theme.brightness == Brightness.dark
-                        ? const Color(0xFF0F131A)
-                        : const Color(0xFF171C24),
-                    borderRadius: BorderRadius.circular(12),
-                    border:
-                        Border.all(color: Colors.white.withValues(alpha: 0.14)),
-                  ),
-                  codeblockPadding: const EdgeInsets.all(12),
-                  codeblockAlign: WrapAlignment.start,
-                  blockquoteDecoration: BoxDecoration(
-                    color: scheme.surfaceContainerLow,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border(
-                        left: BorderSide(color: scheme.primary, width: 3)),
-                  ),
-                  blockquotePadding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                ),
-              )
+            if (hasTimeline)
+              ...segments.map((segment) {
+                return switch (segment.kind) {
+                  _TimelineSegmentKind.agentMessage =>
+                    _buildAgentMessageCard(context, segment.text ?? ''),
+                  _TimelineSegmentKind.commandGroup => Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _buildExecutionPanel(
+                        context,
+                        commandItems: segment.commandItems,
+                        collapsed: shouldCollapseExecution,
+                      ),
+                    ),
+                  _TimelineSegmentKind.event =>
+                    _buildLiveEventCard(context, segment.item!),
+                };
+              })
             else
-              Text(
-                turn.status == 'running'
-                    ? 'Codex is thinking...'
-                    : hasError
-                        ? 'No assistant message was produced.'
-                        : 'No assistant message.',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-            if (eventItems.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              ...eventItems.map((item) => _buildLiveEventCard(context, item)),
-            ],
+              _buildAgentMessageFallback(context, markdownForCopy, hasError),
             if (hasError) ...[
               const SizedBox(height: 8),
               Container(
@@ -339,21 +311,89 @@ class ChatTurnWidget extends StatelessWidget {
                 ),
               ),
             ],
-            if (commandItems.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              _buildExecutionPanel(
-                context,
-                commandItems: commandItems,
-                collapsed: shouldCollapseExecution,
-              ),
-            ],
             if (turn.status == 'completed' || turn.status == 'failed') ...[
               const Divider(height: 28),
-              _buildMetrics(context, turn, markdown),
+              _buildMetrics(context, turn, markdownForCopy),
             ],
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildAgentMessageFallback(
+    BuildContext context,
+    String markdown,
+    bool hasError,
+  ) {
+    if (markdown.trim().isEmpty) {
+      final theme = Theme.of(context);
+      final scheme = theme.colorScheme;
+      return Text(
+        turn.status == 'running'
+            ? 'Codex is thinking...'
+            : hasError
+                ? 'No assistant message was produced.'
+                : 'No assistant message.',
+        style: theme.textTheme.bodyMedium?.copyWith(
+          color: scheme.onSurfaceVariant,
+        ),
+      );
+    }
+    return _buildAgentMessageCard(context, markdown);
+  }
+
+  Widget _buildAgentMessageCard(BuildContext context, String markdown) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: MarkdownBody(
+        data: markdown,
+        selectable: true,
+        onTapLink: (_, href, __) async {
+          if (href == null) {
+            return;
+          }
+          final uri = Uri.tryParse(href);
+          if (uri == null) {
+            return;
+          }
+          await launchUrl(
+            uri,
+            mode: LaunchMode.externalApplication,
+          );
+        },
+        styleSheet: _markdownStyle(context),
+      ),
+    );
+  }
+
+  MarkdownStyleSheet _markdownStyle(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return MarkdownStyleSheet.fromTheme(theme).copyWith(
+      p: theme.textTheme.bodyMedium?.copyWith(height: 1.6),
+      blockSpacing: 12,
+      code: TextStyle(
+        backgroundColor: scheme.surfaceContainerHighest.withValues(alpha: 0.8),
+        fontFamily: 'monospace',
+        fontSize: 13,
+      ),
+      codeblockDecoration: BoxDecoration(
+        color: theme.brightness == Brightness.dark
+            ? const Color(0xFF0F131A)
+            : const Color(0xFF171C24),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+      ),
+      codeblockPadding: const EdgeInsets.all(12),
+      codeblockAlign: WrapAlignment.start,
+      blockquoteDecoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(8),
+        border: Border(left: BorderSide(color: scheme.primary, width: 3)),
+      ),
+      blockquotePadding:
+          const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
     );
   }
 
@@ -495,7 +535,6 @@ class ChatTurnWidget extends StatelessWidget {
         runSpacing: 8,
         children: [
           _decisionButton(
-            context,
             label: 'Accept',
             onPressed: () => provider.respondToServerRequest(
               conversationId: conversationId,
@@ -505,7 +544,6 @@ class ChatTurnWidget extends StatelessWidget {
             ),
           ),
           _decisionButton(
-            context,
             label: 'Accept session',
             onPressed: () => provider.respondToServerRequest(
               conversationId: conversationId,
@@ -515,7 +553,6 @@ class ChatTurnWidget extends StatelessWidget {
             ),
           ),
           _decisionButton(
-            context,
             label: 'Decline',
             onPressed: () => provider.respondToServerRequest(
               conversationId: conversationId,
@@ -525,7 +562,6 @@ class ChatTurnWidget extends StatelessWidget {
             ),
           ),
           _decisionButton(
-            context,
             label: 'Cancel',
             onPressed: () => provider.respondToServerRequest(
               conversationId: conversationId,
@@ -544,7 +580,6 @@ class ChatTurnWidget extends StatelessWidget {
         runSpacing: 8,
         children: [
           _decisionButton(
-            context,
             label: 'Reply',
             onPressed: () async {
               final input = await _promptForInput(
@@ -563,7 +598,6 @@ class ChatTurnWidget extends StatelessWidget {
             },
           ),
           _decisionButton(
-            context,
             label: 'Decline',
             onPressed: () => provider.respondToServerRequest(
               conversationId: conversationId,
@@ -582,7 +616,6 @@ class ChatTurnWidget extends StatelessWidget {
         runSpacing: 8,
         children: [
           _decisionButton(
-            context,
             label: 'Return empty',
             onPressed: () => provider.respondToServerRequest(
               conversationId: conversationId,
@@ -594,7 +627,6 @@ class ChatTurnWidget extends StatelessWidget {
             ),
           ),
           _decisionButton(
-            context,
             label: 'Error',
             onPressed: () => provider.respondToServerRequest(
               conversationId: conversationId,
@@ -607,26 +639,18 @@ class ChatTurnWidget extends StatelessWidget {
       );
     }
 
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: [
-        _decisionButton(
-          context,
-          label: 'Resolve',
-          onPressed: () => provider.respondToServerRequest(
-            conversationId: conversationId,
-            turnId: turnId,
-            requestId: requestId,
-            result: {},
-          ),
-        ),
-      ],
+    return _decisionButton(
+      label: 'Resolve',
+      onPressed: () => provider.respondToServerRequest(
+        conversationId: conversationId,
+        turnId: turnId,
+        requestId: requestId,
+        result: {},
+      ),
     );
   }
 
-  Widget _decisionButton(
-    BuildContext context, {
+  Widget _decisionButton({
     required String label,
     required VoidCallback onPressed,
   }) {
@@ -690,7 +714,9 @@ class ChatTurnWidget extends StatelessWidget {
       child: Theme(
         data: theme.copyWith(dividerColor: Colors.transparent),
         child: ExpansionTile(
-          key: ValueKey('exec-${turn.id}-${collapsed ? "closed" : "open"}'),
+          key: ValueKey(
+            'exec-${turn.id}-${commandItems.first.itemId}-${commandItems.length}-${collapsed ? "closed" : "open"}',
+          ),
           initiallyExpanded: !collapsed,
           tilePadding: const EdgeInsets.symmetric(horizontal: 10),
           childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
@@ -891,5 +917,52 @@ class ChatTurnWidget extends StatelessWidget {
         ),
       ],
     );
+  }
+
+  String _extractTextFromPayload(Map<String, dynamic> payload) {
+    final nested = payload['payload'];
+    if (nested is Map) {
+      final nestedText =
+          _extractTextFromPayload(nested.cast<String, dynamic>());
+      if (nestedText.trim().isNotEmpty) {
+        return nestedText;
+      }
+    }
+
+    final directText = payload['text'];
+    if (directText is String && directText.trim().isNotEmpty) {
+      return directText.trim();
+    }
+
+    final content = payload['content'];
+    if (content is String && content.trim().isNotEmpty) {
+      return content.trim();
+    }
+
+    if (content is List) {
+      final parts = <String>[];
+      for (final entry in content) {
+        if (entry is String && entry.trim().isNotEmpty) {
+          parts.add(entry.trim());
+          continue;
+        }
+        if (entry is Map) {
+          final text = entry['text'];
+          if (text is String && text.trim().isNotEmpty) {
+            parts.add(text.trim());
+            continue;
+          }
+          final nestedContent = entry['content'];
+          if (nestedContent is String && nestedContent.trim().isNotEmpty) {
+            parts.add(nestedContent.trim());
+          }
+        }
+      }
+      if (parts.isNotEmpty) {
+        return parts.join('\n');
+      }
+    }
+
+    return '';
   }
 }

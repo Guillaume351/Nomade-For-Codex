@@ -90,6 +90,52 @@ describe("DevServiceManager template resolution", () => {
     expect(repositories.createTunnel).not.toHaveBeenCalled();
   });
 
+  it("supports configurable preview base origin with explicit protocol and port", async () => {
+    const backend = buildService({
+      id: "svc-backend",
+      name: "backend",
+      port: 3000,
+      auto_tunnel: true
+    });
+
+    const repositories: Partial<Repositories> = {
+      findOpenTunnelByService: vi.fn().mockResolvedValue({
+        id: "tnl-2",
+        user_id: "user-1",
+        workspace_id: "workspace-1",
+        agent_id: "agent-1",
+        service_id: "svc-backend",
+        slug: "47b07d18a0",
+        target_port: 3000,
+        access_token_hash: "hash",
+        token_required: false,
+        status: "open"
+      }),
+      createTunnel: vi.fn(),
+      updateTunnelToken: vi.fn()
+    };
+
+    const manager = new DevServiceManager(
+      repositories as Repositories,
+      {} as WsHub,
+      "preview.localhost",
+      "http://preview.localhost:8081"
+    );
+    const context = {
+      userId: "user-1",
+      workspacePath: "/repo/workspace",
+      servicesByName: new Map<string, DevServiceRecord>([["backend", backend]])
+    };
+
+    const origin = await (manager as any).resolveTemplateValue(
+      "${service.backend.public_origin}",
+      context,
+      true
+    );
+
+    expect(origin).toBe("http://47b07d18a0.preview.localhost:8081");
+  });
+
   it("throws when a referenced service does not exist", async () => {
     const manager = createManager({
       findOpenTunnelByService: vi.fn(),
@@ -131,5 +177,40 @@ describe("DevServiceManager dependency graph", () => {
     expect(() => (manager as any).resolveDependencyOrder(web, services)).toThrow(
       "service_dependency_cycle:web"
     );
+  });
+});
+
+describe("DevServiceManager tunnel token issuance", () => {
+  it("keeps issued token stable until explicit rotate", async () => {
+    const tunnel = {
+      id: "tnl-1",
+      user_id: "user-1",
+      workspace_id: "workspace-1",
+      agent_id: "agent-1",
+      service_id: "svc-1",
+      slug: "frontend",
+      target_port: 3000,
+      access_token_hash: "hash",
+      token_required: true,
+      status: "open"
+    };
+
+    const repositories: Partial<Repositories> = {
+      findTunnelByIdForUser: vi.fn().mockResolvedValue(tunnel),
+      updateTunnelToken: vi.fn().mockResolvedValue(undefined)
+    };
+    const manager = createManager(repositories);
+
+    const first = await manager.issueTunnelToken("user-1", "tnl-1");
+    const second = await manager.issueTunnelToken("user-1", "tnl-1");
+    const rotated = await manager.rotateTunnelToken("user-1", "tnl-1");
+
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(rotated).not.toBeNull();
+    expect(first?.token).toBe(second?.token);
+    expect(first?.previewUrl).toBe(second?.previewUrl);
+    expect(rotated?.token).not.toBe(first?.token);
+    expect(repositories.updateTunnelToken).toHaveBeenCalledTimes(2);
   });
 });

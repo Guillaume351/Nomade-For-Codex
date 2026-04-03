@@ -519,6 +519,38 @@ class NomadeApi {
         .toList();
   }
 
+  Future<Map<String, dynamic>> createTunnel({
+    required String accessToken,
+    required String workspaceId,
+    required String agentId,
+    required int targetPort,
+    String? serviceId,
+    int? ttlSec,
+  }) async {
+    final body = <String, dynamic>{
+      'workspaceId': workspaceId,
+      'agentId': agentId,
+      'targetPort': targetPort,
+    };
+    if (serviceId != null && serviceId.trim().isNotEmpty) {
+      body['serviceId'] = serviceId.trim();
+    }
+    if (ttlSec != null && ttlSec > 0) {
+      body['ttlSec'] = ttlSec;
+    }
+    final response = await _send(
+      () => http.post(
+        _uri('/tunnels'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode(body),
+      ),
+    );
+    return _decodeObject(response);
+  }
+
   Future<Map<String, dynamic>> issueTunnelToken({
     required String accessToken,
     required String tunnelId,

@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../providers/nomade_provider.dart';
 import '../screens/onboarding_screen.dart';
 import 'e2e_guide_sheet.dart';
+import 'tunnel_manager_sheet.dart';
 
 class Sidebar extends StatelessWidget {
   const Sidebar({super.key});
@@ -254,6 +256,24 @@ class Sidebar extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   _buildSectionHeader(context, 'Tunnels'),
+                  if (provider.selectedWorkspace != null)
+                    ListTile(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      leading: const Icon(Icons.settings_ethernet, size: 20),
+                      title: const Text('Manage tunnels'),
+                      subtitle: const Text(
+                        'Create, open, rotate, or close',
+                        style: TextStyle(fontSize: 11),
+                      ),
+                      onTap: () {
+                        final rootContext =
+                            Navigator.of(context, rootNavigator: true).context;
+                        Navigator.of(context).pop();
+                        showTunnelManagerSheet(rootContext);
+                      },
+                    ),
                   if (provider.loadingTunnels)
                     const Padding(
                       padding:
@@ -309,6 +329,24 @@ class Sidebar extends StatelessWidget {
                             return;
                           }
 
+                          if (value == 'copy') {
+                            final link = tunnel.tokenRequired
+                                ? await provider.issueTunnelLink(tunnel.id)
+                                : tunnel.previewUrl;
+                            if (link == null || link.trim().isEmpty) {
+                              return;
+                            }
+                            await Clipboard.setData(ClipboardData(text: link));
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Tunnel URL copied'),
+                                ),
+                              );
+                            }
+                            return;
+                          }
+
                           if (value == 'close') {
                             await provider.closeTunnel(tunnel.id);
                           }
@@ -321,6 +359,10 @@ class Sidebar extends StatelessWidget {
                           PopupMenuItem(
                             value: 'rotate',
                             child: Text('Rotate token'),
+                          ),
+                          PopupMenuItem(
+                            value: 'copy',
+                            child: Text('Copy URL'),
                           ),
                           PopupMenuItem(
                             value: 'close',

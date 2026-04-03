@@ -7,6 +7,7 @@ import type {
   TunnelRecord
 } from "./repositories.js";
 import type { WsHub } from "./ws-hub.js";
+import { previewOriginForSlug } from "./preview-origin.js";
 
 export type ServiceHealthState = "stopped" | "starting" | "healthy" | "unhealthy" | "crashed";
 
@@ -69,7 +70,8 @@ export class DevServiceManager {
   constructor(
     private readonly repositories: Repositories,
     private readonly wsHub: WsHub,
-    private readonly previewBaseDomain: string
+    private readonly previewBaseDomain: string,
+    private readonly previewBaseOrigin?: string
   ) {}
 
   async listWorkspaceServices(userId: string, workspaceId: string): Promise<ServiceStateView[] | null> {
@@ -220,9 +222,10 @@ export class DevServiceManager {
       return null;
     }
 
-    const token = randomToken("tp");
-    await this.repositories.updateTunnelToken(tunnelId, token);
-    this.issuedTunnelTokens.set(tunnelId, token);
+    let token = this.issuedTunnelTokens.get(tunnelId);
+    if (!token) {
+      token = await this.mintTunnelToken(tunnelId);
+    }
 
     const origin = this.previewOrigin(tunnel.slug);
     const previewUrl = tunnel.token_required
@@ -236,7 +239,21 @@ export class DevServiceManager {
   }
 
   async rotateTunnelToken(userId: string, tunnelId: string): Promise<{ token: string; previewUrl: string } | null> {
-    return this.issueTunnelToken(userId, tunnelId);
+    const tunnel = await this.repositories.findTunnelByIdForUser(userId, tunnelId);
+    if (!tunnel) {
+      return null;
+    }
+
+    const token = await this.mintTunnelToken(tunnelId);
+    const origin = this.previewOrigin(tunnel.slug);
+    const previewUrl = tunnel.token_required
+      ? `${origin}?nomade_token=${encodeURIComponent(token)}`
+      : origin;
+
+    return {
+      token,
+      previewUrl
+    };
   }
 
   async closeTunnel(userId: string, tunnelId: string): Promise<boolean> {
@@ -516,7 +533,18 @@ export class DevServiceManager {
   }
 
   private previewOrigin(slug: string): string {
-    return `https://${slug}.${this.previewBaseDomain}`;
+    return previewOriginForSlug({
+      slug,
+      baseDomain: this.previewBaseDomain,
+      baseOrigin: this.previewBaseOrigin ?? `https://${this.previewBaseDomain}`
+    });
+  }
+
+  private async mintTunnelToken(tunnelId: string): Promise<string> {
+    const token = randomToken("tp");
+    await this.repositories.updateTunnelToken(tunnelId, token);
+    this.issuedTunnelTokens.set(tunnelId, token);
+    return token;
   }
 
   private startProbe(service: DevServiceRecord, sessionId: string, tunnelId: string): void {

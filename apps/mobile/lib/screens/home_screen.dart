@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import '../models/conversation.dart';
+import '../models/workspace.dart';
 import '../providers/nomade_provider.dart';
 import '../widgets/chat_turn_widget.dart';
 import '../widgets/e2e_guide_sheet.dart';
 import '../widgets/sidebar.dart';
+import '../widgets/tunnel_manager_sheet.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -20,8 +23,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   final _promptController = TextEditingController();
   final _scrollController = ScrollController();
+  final Set<String> _expandedWorkspaceIds = <String>{};
 
-  bool _showDiagnostics = true;
+  bool _showDiagnostics = false;
 
   @override
   void dispose() {
@@ -74,6 +78,7 @@ class _HomeScreenState extends State<HomeScreen> {
         MediaQuery.of(context).size.width >= _conversationRailBreakpoint;
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    _ensureWorkspaceExpansion(provider);
     _scrollToBottom();
 
     return Scaffold(
@@ -105,7 +110,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   _buildTopBar(provider, isWideLayout),
                   Expanded(
                     child: Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                      padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(24),
                         child: DecoratedBox(
@@ -120,7 +125,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               ? Row(
                                   children: [
                                     SizedBox(
-                                      width: 340,
+                                      width: 356,
                                       child: _buildConversationRail(provider),
                                     ),
                                     Expanded(child: _buildChatPane(provider)),
@@ -144,11 +149,13 @@ class _HomeScreenState extends State<HomeScreen> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final conversation = provider.selectedConversation;
+    final hasRunningTurn =
+        provider.activeTurnId != null || conversation?.status == 'running';
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         decoration: BoxDecoration(
           color: scheme.surface.withValues(alpha: 0.84),
           borderRadius: BorderRadius.circular(20),
@@ -215,23 +222,22 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
             ),
-            if (provider.selectedWorkspace != null && isWideLayout)
+            if (hasRunningTurn)
               Padding(
                 padding: const EdgeInsets.only(right: 8),
-                child: Chip(
-                  label: Text(
-                    provider.selectedWorkspace!.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  avatar: const Icon(Icons.folder_open_rounded, size: 16),
-                ),
+                child: _buildRunningBadge(theme, scheme),
               ),
             _buildTopAction(
               icon: Icons.menu_book_outlined,
               tooltip: 'Guide E2E',
               onPressed: () => showE2eGuideSheet(context),
             ),
+            if (provider.selectedWorkspace != null)
+              _buildTopAction(
+                icon: Icons.wifi_tethering_rounded,
+                tooltip: 'Tunnel management',
+                onPressed: () => showTunnelManagerSheet(context),
+              ),
             if (provider.selectedService != null)
               _buildTopAction(
                 icon: Icons.terminal_rounded,
@@ -285,11 +291,40 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String _buildContextSubtitle(NomadeProvider provider) {
     final agent = provider.selectedAgent?.displayName ?? 'No agent paired';
-    final workspace =
-        provider.selectedWorkspace?.name ?? 'No workspace selected';
     final socket =
         provider.realtimeConnected ? 'Realtime connected' : 'Realtime offline';
-    return '$agent • $workspace • $socket';
+    return '$agent • $socket';
+  }
+
+  Widget _buildRunningBadge(ThemeData theme, ColorScheme scheme) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: scheme.primary.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 8,
+            height: 8,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: scheme.primary,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            'running',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.primary,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildChatPane(NomadeProvider provider) {
@@ -544,6 +579,40 @@ class _HomeScreenState extends State<HomeScreen> {
     return '$hh:$mm:$ss';
   }
 
+  void _ensureWorkspaceExpansion(NomadeProvider provider) {
+    final selectedWorkspaceId = provider.selectedWorkspace?.id;
+    if (selectedWorkspaceId == null || selectedWorkspaceId.isEmpty) {
+      _expandedWorkspaceIds.clear();
+      return;
+    }
+    if (_expandedWorkspaceIds.contains(selectedWorkspaceId)) {
+      return;
+    }
+    _expandedWorkspaceIds
+      ..clear()
+      ..add(selectedWorkspaceId);
+  }
+
+  void _handleWorkspaceExpansion({
+    required NomadeProvider provider,
+    required Workspace workspace,
+    required bool expanded,
+  }) {
+    setState(() {
+      if (expanded) {
+        _expandedWorkspaceIds
+          ..clear()
+          ..add(workspace.id);
+      } else {
+        _expandedWorkspaceIds.remove(workspace.id);
+      }
+    });
+
+    if (expanded && provider.selectedWorkspace?.id != workspace.id) {
+      provider.onWorkspaceSelected(workspace);
+    }
+  }
+
   Widget _buildConversationRail(NomadeProvider provider) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
@@ -564,11 +633,20 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 Expanded(
                   child: Text(
-                    'Conversations',
+                    'Projects',
                     style: theme.textTheme.titleMedium?.copyWith(
                       fontWeight: FontWeight.w700,
                     ),
                   ),
+                ),
+                IconButton(
+                  tooltip: 'Refresh data',
+                  icon: const Icon(Icons.refresh_rounded),
+                  onPressed: provider.loadingData
+                      ? null
+                      : () async {
+                          await provider.refreshAll();
+                        },
                 ),
                 IconButton(
                   tooltip: 'New conversation',
@@ -582,103 +660,248 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
-          if (provider.selectedWorkspace != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-              child: Row(
-                children: [
-                  Icon(Icons.folder_open_rounded,
-                      size: 15, color: scheme.onSurfaceVariant),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      provider.selectedWorkspace!.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
           const Divider(height: 1),
           Expanded(
-            child: provider.selectedWorkspace == null
+            child: provider.workspaces.isEmpty
                 ? _buildRailPlaceholder(
                     icon: Icons.folder_open_rounded,
-                    title: 'Select a workspace first',
+                    title: 'No workspace',
                     subtitle:
-                        'Open the workspace panel to pick or create a workspace.',
+                        'Open the workspace panel to pair an agent and create or import workspaces.',
                   )
-                : provider.conversations.isEmpty
-                    ? _buildRailPlaceholder(
-                        icon: Icons.chat_bubble_outline_rounded,
-                        title: 'No conversation yet',
-                        subtitle:
-                            'Create one from this panel or import Codex history from the drawer.',
-                      )
-                    : ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
-                        itemCount: provider.conversations.length,
-                        itemBuilder: (context, index) {
-                          final conv = provider.conversations[index];
-                          final selected =
-                              provider.selectedConversation?.id == conv.id;
-
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: ListTile(
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(14),
-                              ),
-                              tileColor: selected
-                                  ? scheme.primary.withValues(alpha: 0.12)
-                                  : scheme.surface,
-                              selectedTileColor:
-                                  scheme.primary.withValues(alpha: 0.14),
-                              selected: selected,
-                              contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 6,
-                              ),
-                              leading: Icon(
-                                Icons.chat_outlined,
-                                size: 20,
-                                color: selected
-                                    ? scheme.primary
-                                    : scheme.onSurfaceVariant,
-                              ),
-                              title: Text(
-                                conv.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.bodyMedium?.copyWith(
-                                  fontWeight: selected
-                                      ? FontWeight.w700
-                                      : FontWeight.w500,
-                                ),
-                              ),
-                              subtitle: Text(
-                                conv.status,
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: scheme.onSurfaceVariant,
-                                ),
-                              ),
-                              onTap: () async {
-                                provider.selectedConversation = conv;
-                                await provider.loadTurns(conv.id);
-                              },
-                            ),
-                          );
-                        },
-                      ),
+                : ListView(
+                    padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
+                    children: provider.workspaces
+                        .map((workspace) =>
+                            _buildWorkspaceNode(provider, workspace))
+                        .toList(),
+                  ),
           ),
         ],
       ),
     );
+  }
+
+  Widget _buildWorkspaceNode(NomadeProvider provider, Workspace workspace) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final selectedWorkspace = provider.selectedWorkspace?.id == workspace.id;
+    final expanded = _expandedWorkspaceIds.contains(workspace.id);
+    final workspaceConversations =
+        selectedWorkspace ? provider.conversations : const <Conversation>[];
+    final workspaceIsRunning = _workspaceIsRunning(
+      provider,
+      workspaceId: workspace.id,
+      conversations: workspaceConversations,
+    );
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: selectedWorkspace
+            ? scheme.primary.withValues(alpha: 0.08)
+            : scheme.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: selectedWorkspace
+              ? scheme.primary.withValues(alpha: 0.35)
+              : scheme.outlineVariant.withValues(alpha: 0.66),
+        ),
+      ),
+      child: Theme(
+        data: theme.copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          key: ValueKey(
+              'workspace-${workspace.id}-${expanded ? "open" : "closed"}'),
+          initiallyExpanded: expanded,
+          tilePadding: const EdgeInsets.fromLTRB(10, 2, 10, 2),
+          childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+          onExpansionChanged: (value) => _handleWorkspaceExpansion(
+            provider: provider,
+            workspace: workspace,
+            expanded: value,
+          ),
+          leading: Icon(
+            selectedWorkspace
+                ? Icons.folder_open_rounded
+                : Icons.folder_copy_outlined,
+            size: 20,
+            color: selectedWorkspace ? scheme.primary : scheme.onSurfaceVariant,
+          ),
+          title: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  workspace.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight:
+                        selectedWorkspace ? FontWeight.w700 : FontWeight.w600,
+                  ),
+                ),
+              ),
+              if (workspaceIsRunning)
+                Container(
+                  width: 8,
+                  height: 8,
+                  margin: const EdgeInsets.only(left: 6),
+                  decoration: BoxDecoration(
+                    color: scheme.primary,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+            ],
+          ),
+          subtitle: Text(
+            selectedWorkspace
+                ? '${workspaceConversations.length} conversation${workspaceConversations.length > 1 ? "s" : ""}'
+                : workspace.path,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+          children: [
+            if (!selectedWorkspace)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: OutlinedButton.icon(
+                    onPressed: () async {
+                      await provider.onWorkspaceSelected(workspace);
+                    },
+                    icon: const Icon(Icons.open_in_new_rounded, size: 16),
+                    label: const Text('Open workspace'),
+                  ),
+                ),
+              ),
+            if (selectedWorkspace) ...[
+              Align(
+                alignment: Alignment.centerLeft,
+                child: FilledButton.tonalIcon(
+                  onPressed: () async {
+                    await provider.createConversation();
+                  },
+                  icon: const Icon(Icons.add_comment_outlined, size: 16),
+                  label: const Text('New conversation'),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton.icon(
+                  onPressed: () => showTunnelManagerSheet(context),
+                  icon: const Icon(Icons.wifi_tethering_rounded, size: 16),
+                  label: Text('Tunnels (${provider.tunnels.length})'),
+                ),
+              ),
+              const SizedBox(height: 8),
+              if (workspaceConversations.isEmpty)
+                Text(
+                  'No conversation yet in this workspace.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                )
+              else
+                ...workspaceConversations.map((conversation) =>
+                    _buildConversationNode(provider, conversation)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConversationNode(
+      NomadeProvider provider, Conversation conversation) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final selected = provider.selectedConversation?.id == conversation.id;
+    final isRunning = _conversationIsRunning(provider, conversation);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      decoration: BoxDecoration(
+        color: selected
+            ? scheme.primary.withValues(alpha: 0.14)
+            : scheme.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: selected
+              ? scheme.primary.withValues(alpha: 0.36)
+              : scheme.outlineVariant.withValues(alpha: 0.56),
+        ),
+      ),
+      child: ListTile(
+        dense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        leading: Icon(
+          isRunning ? Icons.chat_bubble_rounded : Icons.chat_bubble_outline,
+          size: 18,
+          color: isRunning
+              ? scheme.primary
+              : selected
+                  ? scheme.primary
+                  : scheme.onSurfaceVariant,
+        ),
+        title: Text(
+          conversation.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+          ),
+        ),
+        subtitle: Text(
+          isRunning ? 'running' : conversation.status,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: scheme.onSurfaceVariant,
+          ),
+        ),
+        trailing: isRunning
+            ? SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: scheme.primary,
+                ),
+              )
+            : null,
+        onTap: () async {
+          provider.selectedConversation = conversation;
+          await provider.loadTurns(conversation.id);
+        },
+      ),
+    );
+  }
+
+  bool _workspaceIsRunning(
+    NomadeProvider provider, {
+    required String workspaceId,
+    required List<Conversation> conversations,
+  }) {
+    final selectedWorkspaceId = provider.selectedWorkspace?.id;
+    if (selectedWorkspaceId != workspaceId) {
+      return false;
+    }
+    if (provider.activeTurnId != null) {
+      return true;
+    }
+    return conversations.any((entry) => entry.status == 'running');
+  }
+
+  bool _conversationIsRunning(
+      NomadeProvider provider, Conversation conversation) {
+    if (conversation.status == 'running') {
+      return true;
+    }
+    return provider.activeTurnId != null &&
+        provider.selectedConversation?.id == conversation.id;
   }
 
   Widget _buildRailPlaceholder({

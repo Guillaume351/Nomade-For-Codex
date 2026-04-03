@@ -20,6 +20,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me}
       INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:-gateway-dev-secret}
       PREVIEW_BASE_DOMAIN: ${PREVIEW_BASE_DOMAIN:-preview.localhost}
+      PREVIEW_BASE_ORIGIN: ${PREVIEW_BASE_ORIGIN:-https://preview.localhost}
     depends_on:
       - postgres
     ports:

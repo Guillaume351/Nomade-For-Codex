@@ -869,6 +869,54 @@ class NomadeProvider with ChangeNotifier {
     }
   }
 
+  Future<bool> createTunnel({
+    required int targetPort,
+    String? serviceId,
+    int? ttlSec,
+  }) async {
+    if (targetPort < 1 || targetPort > 65535) {
+      status = 'Invalid port: $targetPort';
+      notifyListeners();
+      return false;
+    }
+    if (selectedWorkspace == null ||
+        selectedAgent == null ||
+        accessToken == null) {
+      status = 'Select an online agent and workspace first';
+      notifyListeners();
+      return false;
+    }
+    try {
+      final payload = await api.createTunnel(
+        accessToken: accessToken!,
+        workspaceId: selectedWorkspace!.id,
+        agentId: selectedAgent!.id,
+        targetPort: targetPort,
+        serviceId: serviceId,
+        ttlSec: ttlSec,
+      );
+      final created = TunnelPreview.fromJson(payload);
+      final existingIndex = tunnels.indexWhere((item) => item.id == created.id);
+      if (existingIndex == -1) {
+        tunnels = [created, ...tunnels];
+      } else {
+        tunnels[existingIndex] = created;
+      }
+      await loadTunnels();
+      await loadServices();
+      status = 'Tunnel created for :$targetPort';
+      notifyListeners();
+      return true;
+    } catch (e) {
+      if (await _logoutIfUnauthorized(e)) {
+        return false;
+      }
+      status = 'Tunnel creation failed: $e';
+      notifyListeners();
+      return false;
+    }
+  }
+
   Future<void> startService(String serviceId) async {
     if (accessToken == null) return;
     try {
@@ -1291,6 +1339,13 @@ class NomadeProvider with ChangeNotifier {
       final probeCode = (event['probeCode'] as num?)?.toInt();
       final detail = event['detail']?.toString();
       final probeAt = event['probeAt']?.toString();
+      final hasDiagnostic = event.containsKey('diagnostic');
+      final rawDiagnostic = event['diagnostic'];
+      final diagnostic = rawDiagnostic is Map<String, dynamic>
+          ? TunnelDiagnostic.fromJson(rawDiagnostic)
+          : rawDiagnostic is Map
+              ? TunnelDiagnostic.fromJson(rawDiagnostic.cast<String, dynamic>())
+              : null;
       if (tunnelId != null) {
         final tunnelIndex = tunnels.indexWhere((item) => item.id == tunnelId);
         if (tunnelIndex != -1) {
@@ -1304,6 +1359,8 @@ class NomadeProvider with ChangeNotifier {
             lastProbeAt: probeAt != null
                 ? DateTime.tryParse(probeAt)
                 : current.lastProbeAt,
+            diagnostic: diagnostic,
+            replaceDiagnostic: hasDiagnostic,
           );
         }
 

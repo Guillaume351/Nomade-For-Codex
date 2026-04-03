@@ -695,6 +695,15 @@ export class Repositories {
     return result.rows[0];
   }
 
+  async updateTunnelAgent(tunnelId: string, agentId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE tunnels
+       SET agent_id = $1, updated_at = NOW()
+       WHERE id = $2`,
+      [agentId, tunnelId]
+    );
+  }
+
   async updateTunnelToken(tunnelId: string, accessToken: string): Promise<void> {
     await this.pool.query(
       `UPDATE tunnels

@@ -3,6 +3,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { IncomingMessage } from "http";
 import type { AuthService } from "./auth.js";
 import type { Repositories } from "./repositories.js";
+import type { TunnelDiagnostic } from "./tunnel-diagnostics.js";
 
 interface AgentConnection {
   ws: WebSocket;
@@ -222,13 +223,14 @@ export class WsHub {
       detail?: string;
       probeStatus?: "ok" | "error" | "unknown";
       probeCode?: number;
+      diagnostic?: TunnelDiagnostic | null;
     }
   ): void {
     const userId = this.tunnelOwner.get(tunnelId);
     if (!userId) {
       return;
     }
-    this.broadcastToUser(userId, {
+    const message: Record<string, unknown> = {
       type: "tunnel.status",
       tunnelId,
       status: payload.status,
@@ -236,7 +238,11 @@ export class WsHub {
       probeStatus: payload.probeStatus,
       probeCode: payload.probeCode,
       probeAt: new Date().toISOString()
-    });
+    };
+    if ("diagnostic" in payload) {
+      message.diagnostic = payload.diagnostic ?? null;
+    }
+    this.broadcastToUser(userId, message);
   }
 
   rememberConversationOwner(conversationId: string, userId: string, agentId?: string): void {
@@ -257,6 +263,21 @@ export class WsHub {
     }
     conn.ws.send(JSON.stringify(message));
     return true;
+  }
+
+  isAgentOnline(agentId: string): boolean {
+    const conn = this.agentSockets.get(agentId);
+    return Boolean(conn && conn.ws.readyState === conn.ws.OPEN);
+  }
+
+  listOnlineAgentIdsForUser(userId: string): string[] {
+    const ids: string[] = [];
+    for (const [agentId, conn] of this.agentSockets.entries()) {
+      if (conn.userId === userId && conn.ws.readyState === conn.ws.OPEN) {
+        ids.push(agentId);
+      }
+    }
+    return ids;
   }
 
   async openTunnelWsThroughAgent(params: {

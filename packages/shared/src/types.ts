@@ -71,6 +71,14 @@ export interface TunnelStatusMessage {
   probeStatus?: "ok" | "error" | "unknown";
   probeCode?: number;
   probeAt?: string;
+  diagnostic?: TunnelDiagnostic | null;
+}
+
+export interface TunnelDiagnostic {
+  code: string;
+  message: string;
+  scope: "transport" | "upstream_app";
+  timestamp: string;
 }
 
 export interface TunnelWsOpenMessage {

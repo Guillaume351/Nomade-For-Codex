@@ -8,6 +8,7 @@ export interface Config {
   pairingCodeTtlSec: number;
   gatewaySecret: string;
   previewBaseDomain: string;
+  previewBaseOrigin: string;
 }
 
 const readInt = (name: string, defaultValue: number): number => {
@@ -23,6 +24,9 @@ const readInt = (name: string, defaultValue: number): number => {
 };
 
 export const loadConfig = (): Config => {
+  const previewBaseDomain = process.env.PREVIEW_BASE_DOMAIN ?? "preview.localhost";
+  const previewBaseOrigin = process.env.PREVIEW_BASE_ORIGIN ?? `https://${previewBaseDomain}`;
+
   return {
     port: readInt("PORT", 8080),
     databaseUrl: process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/nomade",
@@ -32,6 +36,7 @@ export const loadConfig = (): Config => {
     deviceCodeTtlSec: readInt("DEVICE_CODE_TTL_SEC", 600),
     pairingCodeTtlSec: readInt("PAIRING_CODE_TTL_SEC", 600),
     gatewaySecret: process.env.INTERNAL_GATEWAY_SECRET ?? "gateway-dev-secret",
-    previewBaseDomain: process.env.PREVIEW_BASE_DOMAIN ?? "preview.localhost"
+    previewBaseDomain,
+    previewBaseOrigin
   };
 };

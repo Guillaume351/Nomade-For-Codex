@@ -101,6 +101,89 @@ describe("tunnel gateway server", () => {
       expect(body.headers.authorization).toBe("Bearer test");
       expect(body.headers.host).toBe("frontend.preview.localhost");
       expect(body.headers["x-forwarded-host"]).toBe("frontend.preview.localhost");
+      const setCookie = response.headers["set-cookie"];
+      expect(setCookie).toBeDefined();
+      const cookies = Array.isArray(setCookie) ? setCookie : [String(setCookie)];
+      expect(cookies.some((cookie) => cookie.includes("nomade_tunnel_token=secret-token"))).toBe(true);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    }
+  });
+
+  it("reuses tunnel token from auth cookie and does not forward it to local app", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("ok", {
+        status: 200,
+        headers: {
+          "content-type": "text/plain"
+        }
+      })
+    );
+    global.fetch = fetchMock as typeof global.fetch;
+
+    const server = createServer();
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+
+    try {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const response = await request({
+        port,
+        path: "/assets/app.js",
+        host: "frontend.preview.localhost",
+        headers: {
+          cookie: "nomade_tunnel_token=secret-cookie-token; sid=abc"
+        }
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toBe("ok");
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("http://control-api.internal/internal/tunnels/frontend/proxy");
+
+      const body = JSON.parse(String(init.body));
+      expect(body.token).toBe("secret-cookie-token");
+      expect(body.headers.cookie).toBe("sid=abc");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    }
+  });
+
+  it("falls back to token from referer when cookie is not available yet", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("ok", {
+        status: 200,
+        headers: {
+          "content-type": "text/plain"
+        }
+      })
+    );
+    global.fetch = fetchMock as typeof global.fetch;
+
+    const server = createServer();
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+
+    try {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const response = await request({
+        port,
+        path: "/src/main.tsx?t=1",
+        host: "frontend.preview.localhost",
+        headers: {
+          referer: "http://frontend.preview.localhost/?nomade_token=referer-token"
+        }
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toBe("ok");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(init.body));
+      expect(body.token).toBe("referer-token");
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     }
