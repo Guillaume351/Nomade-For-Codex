@@ -176,6 +176,26 @@ const extractClientIp = (req: express.Request): string => {
   return req.ip || "";
 };
 
+const extractCookieNamesForLog = (setCookieHeader: string | string[] | number | undefined): string[] => {
+  if (typeof setCookieHeader === "number" || setCookieHeader === undefined) {
+    return [];
+  }
+  const values = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
+  const names: string[] = [];
+  for (const raw of values) {
+    const first = raw.split(";", 1)[0] ?? "";
+    const eq = first.indexOf("=");
+    if (eq <= 0) {
+      continue;
+    }
+    const name = first.slice(0, eq).trim();
+    if (name.length > 0) {
+      names.push(name);
+    }
+  }
+  return names;
+};
+
 const hasLegacyWrappedItemPayload = (payload: unknown): boolean => {
   if (!payload || typeof payload !== "object") {
     return false;
@@ -330,6 +350,15 @@ export const createServer = async (): Promise<http.Server> => {
       }
     } finally {
       if (config.authDebugLogs || res.statusCode >= 400) {
+        const location = res.getHeader("location");
+        const setCookie = res.getHeader("set-cookie");
+        const setCookieNames = extractCookieNamesForLog(
+          Array.isArray(setCookie)
+            ? (setCookie as string[])
+            : typeof setCookie === "string" || typeof setCookie === "number"
+              ? setCookie
+              : undefined
+        );
         console.log("[auth-http]", {
           requestId,
           method: req.method,
@@ -338,7 +367,9 @@ export const createServer = async (): Promise<http.Server> => {
           durationMs: Date.now() - startedAt,
           ip: extractClientIp(req),
           origin: req.header("origin") ?? "",
-          referer: req.header("referer") ?? ""
+          referer: req.header("referer") ?? "",
+          location: typeof location === "string" ? location : "",
+          setCookieNames
         });
       }
     }

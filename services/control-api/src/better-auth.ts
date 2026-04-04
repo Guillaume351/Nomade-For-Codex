@@ -198,7 +198,14 @@ export const createBetterAuthRuntime = (params: { config: Config; pool: Pool }):
     trustedOrigins: [normalizeBaseUrl(config.appBaseUrl)],
     database: pool,
     advanced: {
-      useSecureCookies: isSecureUrl(config.appBaseUrl)
+      useSecureCookies: isSecureUrl(config.appBaseUrl),
+      trustedProxyHeaders: true,
+      defaultCookieAttributes: {
+        path: "/",
+        httpOnly: true,
+        sameSite: "lax",
+        secure: isSecureUrl(config.appBaseUrl)
+      }
     },
     user: {
       modelName: "users",
