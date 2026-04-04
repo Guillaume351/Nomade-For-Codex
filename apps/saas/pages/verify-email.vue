@@ -1,49 +1,64 @@
 <script setup lang="ts">
+definePageMeta({
+  layout: "auth"
+});
+
 const route = useRoute();
-const notice = ref('Verifying your email...');
-const noticeError = ref(false);
+const { t } = useI18n();
+const { info, success, errorFrom, error } = useNotify();
+const { waitForAuthenticatedSession } = useAuthFlow();
 
-const token = typeof route.query.token === 'string' ? route.query.token : '';
-const returnTo = typeof route.query.returnTo === 'string' && route.query.returnTo.startsWith('/')
-  ? route.query.returnTo
-  : '/account';
-
-const setNotice = (message: string, isError = false) => {
-  notice.value = message;
-  noticeError.value = isError;
-};
+const loading = ref(true);
+const token = typeof route.query.token === "string" ? route.query.token : "";
+const returnTo =
+  typeof route.query.returnTo === "string" && route.query.returnTo.startsWith("/")
+    ? route.query.returnTo
+    : "/account";
 
 onMounted(async () => {
   if (!token) {
-    setNotice('Missing verification token.', true);
+    error("errors.missing_token");
+    loading.value = false;
     return;
   }
+  info("toasts.verifyingEmail");
   try {
     const callbackURL = new URL(returnTo, window.location.origin).toString();
-    const response = await fetch(`/api/auth/verify-email?token=${encodeURIComponent(token)}&callbackURL=${encodeURIComponent(callbackURL)}`);
-    const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    const response = await fetch(
+      `/api/auth/verify-email?token=${encodeURIComponent(token)}&callbackURL=${encodeURIComponent(callbackURL)}`,
+      { credentials: "include" }
+    );
+    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
     if (!response.ok) {
       const message =
-        typeof data.message === 'string'
-          ? data.message
-          : typeof data.error === 'string'
-            ? data.error
-            : 'Verification failed';
+        typeof payload.message === "string"
+          ? payload.message
+          : typeof payload.error === "string"
+            ? payload.error
+            : t("errors.generic");
       throw new Error(message);
     }
+    await waitForAuthenticatedSession();
+    success("toasts.emailVerified");
     await navigateTo(returnTo);
-  } catch (error) {
-    setNotice(error instanceof Error ? error.message : 'Verification failed', true);
+  } catch (err) {
+    errorFrom(err);
+    loading.value = false;
   }
 });
 </script>
 
 <template>
-  <main class="page">
-    <section class="card">
-      <h1>Verify your email</h1>
-      <p class="notice" :class="{ error: noticeError }">{{ notice }}</p>
-      <p class="muted"><NuxtLink to="/login">Back to sign-in</NuxtLink></p>
-    </section>
-  </main>
+  <section class="mx-auto max-w-xl">
+    <div class="glass-panel p-6 md:p-8">
+      <h1 class="text-3xl font-semibold tracking-tight">{{ t("auth.verifyTitle") }}</h1>
+      <p class="mt-2 text-sm text-muted-foreground">{{ t("auth.verifySubtitle") }}</p>
+      <div class="mt-6 rounded-2xl border border-border/80 bg-muted/60 px-4 py-3 text-sm text-muted-foreground">
+        {{ loading ? t("common.loading") : t("auth.backToSignIn") }}
+      </div>
+      <p class="mt-5 text-sm text-muted-foreground">
+        <NuxtLink to="/login">{{ t("auth.backToSignIn") }}</NuxtLink>
+      </p>
+    </div>
+  </section>
 </template>

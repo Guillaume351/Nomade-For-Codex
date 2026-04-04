@@ -1,43 +1,32 @@
 <script setup lang="ts">
-const route = useRoute();
-const userCode = ref(typeof route.query.user_code === 'string' ? route.query.user_code : '');
-const notice = ref('');
-const noticeError = ref(false);
-const busy = ref(false);
-const me = ref<string | null>(null);
-const { postJson, getJson } = useApi();
-
-const setNotice = (message: string, isError = false) => {
-  notice.value = message;
-  noticeError.value = isError;
-};
-
-onMounted(async () => {
-  try {
-    const session = await getJson<{ user?: { email?: string } | null }>('/api/auth/get-session');
-    if (!session?.user?.email) {
-      throw new Error('auth_required');
-    }
-    me.value = session.user.email;
-  } catch {
-    const returnTo = `/activate${route.fullPath.includes('?') ? route.fullPath.slice(route.fullPath.indexOf('?')) : ''}`;
-    await navigateTo(`/login?returnTo=${encodeURIComponent(returnTo)}`);
-  }
+definePageMeta({
+  middleware: ["require-auth"]
 });
+
+const route = useRoute();
+const { t } = useI18n();
+const { postJson } = useApi();
+const { user, fetchSession } = useAuthSession();
+const { info, success, errorFrom, error } = useNotify();
+
+await fetchSession();
+
+const busy = ref(false);
+const userCode = ref(typeof route.query.user_code === "string" ? route.query.user_code : "");
 
 const approve = async () => {
   const normalized = userCode.value.trim().toUpperCase();
   if (!normalized) {
-    setNotice('Missing user code.', true);
+    error("errors.missing_user_code");
     return;
   }
   busy.value = true;
-  setNotice('Approving login...');
+  info("toasts.approvingLogin");
   try {
-    await postJson('/auth/device/approve', { userCode: normalized });
-    setNotice('Login approved. You can return to your terminal/app.');
-  } catch (error) {
-    setNotice(error instanceof Error ? error.message : 'Approval failed', true);
+    await postJson("/auth/device/approve", { userCode: normalized });
+    success("toasts.loginApproved");
+  } catch (err) {
+    errorFrom(err);
   } finally {
     busy.value = false;
   }
@@ -45,16 +34,34 @@ const approve = async () => {
 </script>
 
 <template>
-  <main class="page">
-    <section class="card">
-      <h1>Activate Device Login</h1>
-      <p v-if="me" class="muted">Signed in as <code>{{ me }}</code>.</p>
-      <form class="row" @submit.prevent="approve">
-        <input v-model="userCode" type="text" placeholder="ABCD1234" required />
-        <button class="primary" :disabled="busy" type="submit">Approve login</button>
+  <section class="mx-auto max-w-2xl">
+    <div class="glass-panel p-6 md:p-8">
+      <h1 class="text-3xl font-semibold tracking-tight">{{ t("auth.activateTitle") }}</h1>
+      <p class="mt-2 text-sm text-muted-foreground">{{ t("auth.activateSubtitle") }}</p>
+
+      <p v-if="user?.email" class="mt-4 inline-flex rounded-xl bg-muted px-3 py-2 text-xs font-medium text-muted-foreground">
+        {{ t("account.signedInAs", { email: user.email }) }}
+      </p>
+
+      <form class="mt-6 space-y-4" @submit.prevent="approve">
+        <div class="space-y-2">
+          <label class="text-sm font-medium">{{ t("auth.userCode") }}</label>
+          <input
+            v-model="userCode"
+            type="text"
+            required
+            class="h-14 w-full rounded-2xl border border-input bg-background px-4 text-center font-mono text-xl tracking-[0.35em] uppercase focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            placeholder="ABCD1234"
+          />
+        </div>
+        <button
+          type="submit"
+          class="inline-flex h-11 w-full items-center justify-center rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+          :disabled="busy"
+        >
+          {{ t("auth.approveLogin") }}
+        </button>
       </form>
-      <p class="muted">Copy the code displayed in your terminal if the field is empty.</p>
-      <p class="notice" :class="{ error: noticeError }">{{ notice }}</p>
-    </section>
-  </main>
+    </div>
+  </section>
 </template>

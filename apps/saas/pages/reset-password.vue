@@ -1,32 +1,34 @@
 <script setup lang="ts">
-const route = useRoute();
-const token = ref(typeof route.query.token === 'string' ? route.query.token : '');
-const newPassword = ref('');
-const notice = ref('');
-const noticeError = ref(false);
-const busy = ref(false);
-const { postJson } = useApi();
+definePageMeta({
+  layout: "auth",
+  middleware: ["guest-only"]
+});
 
-const setNotice = (message: string, isError = false) => {
-  notice.value = message;
-  noticeError.value = isError;
-};
+const route = useRoute();
+const { t } = useI18n();
+const { postJson } = useApi();
+const { info, success, errorFrom, error } = useNotify();
+
+const token = ref(typeof route.query.token === "string" ? route.query.token : "");
+const newPassword = ref("");
+const busy = ref(false);
 
 const resetPassword = async () => {
   if (!token.value) {
-    setNotice('Missing reset token.', true);
+    error("errors.missing_token");
     return;
   }
   busy.value = true;
-  setNotice('Updating password...');
+  info("toasts.updatingPassword");
   try {
-    await postJson('/api/auth/reset-password', {
+    await postJson("/api/auth/reset-password", {
       token: token.value,
       newPassword: newPassword.value
     });
-    await navigateTo('/login');
-  } catch (error) {
-    setNotice(error instanceof Error ? error.message : 'Reset failed', true);
+    success("toasts.passwordUpdated");
+    await navigateTo("/login");
+  } catch (err) {
+    errorFrom(err);
   } finally {
     busy.value = false;
   }
@@ -34,19 +36,46 @@ const resetPassword = async () => {
 </script>
 
 <template>
-  <main class="page">
-    <section class="card">
-      <h1>Reset password</h1>
-      <p class="muted">Choose a new password for your account.</p>
-      <form class="row" @submit.prevent="resetPassword">
-        <input v-model="token" type="text" placeholder="Reset token" required />
-        <input v-model="newPassword" type="password" placeholder="New password" required />
-        <button class="primary" :disabled="busy" type="submit">Update password</button>
+  <section class="mx-auto max-w-xl">
+    <div class="glass-panel p-6 md:p-8">
+      <h1 class="text-3xl font-semibold tracking-tight">{{ t("auth.resetTitle") }}</h1>
+      <p class="mt-2 text-sm text-muted-foreground">{{ t("auth.resetSubtitle") }}</p>
+
+      <form class="mt-6 space-y-4" @submit.prevent="resetPassword">
+        <div class="space-y-2">
+          <label class="text-sm font-medium">{{ t("common.token") }}</label>
+          <input
+            v-model="token"
+            type="text"
+            required
+            class="h-11 w-full rounded-xl border border-input bg-background px-3 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            placeholder="token"
+          />
+        </div>
+        <div class="space-y-2">
+          <label class="text-sm font-medium">{{ t("auth.password") }}</label>
+          <input
+            v-model="newPassword"
+            type="password"
+            autocomplete="new-password"
+            required
+            minlength="8"
+            class="h-11 w-full rounded-xl border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            placeholder="••••••••"
+          />
+        </div>
+
+        <button
+          type="submit"
+          class="inline-flex h-11 w-full items-center justify-center rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+          :disabled="busy"
+        >
+          {{ t("auth.resetTitle") }}
+        </button>
       </form>
-      <div class="row" style="margin-top:0.75rem">
-        <NuxtLink to="/login">Back to sign-in</NuxtLink>
-      </div>
-      <p class="notice" :class="{ error: noticeError }">{{ notice }}</p>
-    </section>
-  </main>
+      <p class="mt-5 text-sm text-muted-foreground">
+        <NuxtLink to="/login">{{ t("auth.backToSignIn") }}</NuxtLink>
+      </p>
+    </div>
+  </section>
 </template>

@@ -281,6 +281,27 @@ export const createServer = async (): Promise<http.Server> => {
     });
     next();
   });
+  app.use((req, res, next) => {
+    if (!config.authDebugLogs) {
+      next();
+      return;
+    }
+    const requestId = String((req as express.Request & { requestId?: string }).requestId ?? "");
+    res.once("finish", () => {
+      if (!req.authMode || !req.userId) {
+        return;
+      }
+      console.log("[control-authz-http]", {
+        requestId,
+        method: req.method,
+        path: req.path,
+        status: res.statusCode,
+        authMode: req.authMode,
+        userId: req.userId
+      });
+    });
+    next();
+  });
   app.all("/api/auth/*", async (req, res) => {
     const startedAt = Date.now();
     const requestId = String((req as express.Request & { requestId?: string }).requestId ?? "");
@@ -363,6 +384,16 @@ export const createServer = async (): Promise<http.Server> => {
     }
     return readUserFromWebSession(req);
   };
+
+  const requireHybridUserAuth = requireUserAuth(auth, {
+    resolveSessionUser: readUserFromWebSession,
+    csrf: {
+      appBaseUrl: config.appBaseUrl,
+      enabled: true
+    },
+    debugLogs: config.authDebugLogs,
+    logPrefix: "control-authz"
+  });
 
   const enforceRateLimit = async (params: {
     req: express.Request;
@@ -1652,7 +1683,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.json({ approved: true });
   });
 
-  app.post("/auth/device/scan-approve", requireUserAuth(auth), async (req, res) => {
+  app.post("/auth/device/scan-approve", requireHybridUserAuth, async (req, res) => {
     if (
       !(await enforceRateLimit({
         req,
@@ -1774,7 +1805,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.json({ ok: true });
   });
 
-  app.post("/auth/device/scan-mobile-ack", requireUserAuth(auth), async (req, res) => {
+  app.post("/auth/device/scan-mobile-ack", requireHybridUserAuth, async (req, res) => {
     if (
       !(await enforceRateLimit({
         req,
@@ -1926,7 +1957,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.json(tokens);
   });
 
-  app.post("/auth/logout", requireUserAuth(auth), async (req, res) => {
+  app.post("/auth/logout", requireHybridUserAuth, async (req, res) => {
     const schema = z.object({ refreshToken: z.string().min(8) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -1938,7 +1969,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.json({ ok: true });
   });
 
-  app.get("/me", requireUserAuth(auth), async (req, res) => {
+  app.get("/me", requireHybridUserAuth, async (req, res) => {
     const me = await repositories.getUserById(req.userId!);
     if (!me) {
       res.status(404).json({ error: "not_found" });
@@ -1947,12 +1978,12 @@ export const createServer = async (): Promise<http.Server> => {
     res.json(me);
   });
 
-  app.get("/me/entitlements", requireUserAuth(auth), async (req, res) => {
+  app.get("/me/entitlements", requireHybridUserAuth, async (req, res) => {
     const entitlements = await repositories.getUserEntitlements(req.userId!);
     res.json(entitlements);
   });
 
-  app.post("/billing/checkout-session", requireUserAuth(auth), async (req, res) => {
+  app.post("/billing/checkout-session", requireHybridUserAuth, async (req, res) => {
     const requestStartedAt = Date.now();
     if (!config.stripeEnabled || !config.stripeSecretKey || !config.stripeProPriceId) {
       console.log("[billing-checkout]", { status: "stripe_not_configured", userId: req.userId ?? "" });
@@ -1998,7 +2029,7 @@ export const createServer = async (): Promise<http.Server> => {
     }
   });
 
-  app.post("/billing/portal-session", requireUserAuth(auth), async (req, res) => {
+  app.post("/billing/portal-session", requireHybridUserAuth, async (req, res) => {
     const requestStartedAt = Date.now();
     if (!config.stripeEnabled || !config.stripeSecretKey) {
       console.log("[billing-portal]", { status: "stripe_not_configured", userId: req.userId ?? "" });
@@ -2041,7 +2072,7 @@ export const createServer = async (): Promise<http.Server> => {
     }
   });
 
-  app.post("/agents/pair", requireUserAuth(auth), async (req, res) => {
+  app.post("/agents/pair", requireHybridUserAuth, async (req, res) => {
     if (
       !(await enforceRateLimit({
         req,
@@ -2160,7 +2191,7 @@ export const createServer = async (): Promise<http.Server> => {
     });
   });
 
-  app.get("/agents", requireUserAuth(auth), async (req, res) => {
+  app.get("/agents", requireHybridUserAuth, async (req, res) => {
     const now = Date.now();
     const rawAgents = await repositories.listAgents(req.userId!);
     const nameCounts = new Map<string, number>();
@@ -2202,7 +2233,7 @@ export const createServer = async (): Promise<http.Server> => {
     });
   });
 
-  app.post("/agents/:agentId/codex/import", requireUserAuth(auth), async (req, res) => {
+  app.post("/agents/:agentId/codex/import", requireHybridUserAuth, async (req, res) => {
     const schema = z.object({
       limit: z.number().int().min(1).max(500).optional()
     });
@@ -2337,7 +2368,7 @@ export const createServer = async (): Promise<http.Server> => {
     });
   });
 
-  app.get("/agents/:agentId/codex/options", requireUserAuth(auth), async (req, res) => {
+  app.get("/agents/:agentId/codex/options", requireHybridUserAuth, async (req, res) => {
     const userId = req.userId!;
     const agentId = req.params.agentId;
     const cwd = typeof req.query.cwd === "string" ? req.query.cwd.trim() : "";
@@ -2361,7 +2392,7 @@ export const createServer = async (): Promise<http.Server> => {
     }
   });
 
-  app.post("/workspaces", requireUserAuth(auth), async (req, res) => {
+  app.post("/workspaces", requireHybridUserAuth, async (req, res) => {
     const schema = z.object({
       agentId: z.string().uuid().or(z.string().min(10)),
       name: z.string().min(1).max(120),
@@ -2383,13 +2414,13 @@ export const createServer = async (): Promise<http.Server> => {
     res.status(201).json(workspace);
   });
 
-  app.get("/workspaces", requireUserAuth(auth), async (req, res) => {
+  app.get("/workspaces", requireHybridUserAuth, async (req, res) => {
     const agentId = typeof req.query.agentId === "string" ? req.query.agentId.trim() : "";
     const workspaces = await repositories.listWorkspaces(req.userId!, agentId || undefined);
     res.json({ items: workspaces });
   });
 
-  app.get("/workspaces/:workspaceId/dev-settings", requireUserAuth(auth), async (req, res) => {
+  app.get("/workspaces/:workspaceId/dev-settings", requireHybridUserAuth, async (req, res) => {
     const settings = await repositories.getWorkspaceDevSettings(req.userId!, req.params.workspaceId);
     if (!settings) {
       res.status(404).json({ error: "workspace_not_found" });
@@ -2402,7 +2433,7 @@ export const createServer = async (): Promise<http.Server> => {
     });
   });
 
-  app.patch("/workspaces/:workspaceId/dev-settings", requireUserAuth(auth), async (req, res) => {
+  app.patch("/workspaces/:workspaceId/dev-settings", requireHybridUserAuth, async (req, res) => {
     const schema = z.object({
       trustedDevMode: z.boolean()
     });
@@ -2427,7 +2458,7 @@ export const createServer = async (): Promise<http.Server> => {
     });
   });
 
-  app.get("/workspaces/:workspaceId/services", requireUserAuth(auth), async (req, res) => {
+  app.get("/workspaces/:workspaceId/services", requireHybridUserAuth, async (req, res) => {
     const items = await devServiceManager.listWorkspaceServices(req.userId!, req.params.workspaceId);
     if (!items) {
       res.status(404).json({ error: "workspace_not_found" });
@@ -2436,7 +2467,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.json({ items });
   });
 
-  app.post("/workspaces/:workspaceId/services", requireUserAuth(auth), async (req, res) => {
+  app.post("/workspaces/:workspaceId/services", requireHybridUserAuth, async (req, res) => {
     const schema = z.object({
       name: z.string().min(1).max(120),
       role: z.string().min(1).max(120).default("service"),
@@ -2487,7 +2518,7 @@ export const createServer = async (): Promise<http.Server> => {
     }
   });
 
-  app.patch("/services/:serviceId", requireUserAuth(auth), async (req, res) => {
+  app.patch("/services/:serviceId", requireHybridUserAuth, async (req, res) => {
     const schema = z.object({
       name: z.string().min(1).max(120).optional(),
       role: z.string().min(1).max(120).optional(),
@@ -2525,7 +2556,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.json(state ?? updated);
   });
 
-  app.post("/services/:serviceId/start", requireUserAuth(auth), async (req, res) => {
+  app.post("/services/:serviceId/start", requireHybridUserAuth, async (req, res) => {
     try {
       const state = await devServiceManager.startService(req.userId!, req.params.serviceId);
       if (!state) {
@@ -2540,7 +2571,7 @@ export const createServer = async (): Promise<http.Server> => {
     }
   });
 
-  app.post("/services/:serviceId/stop", requireUserAuth(auth), async (req, res) => {
+  app.post("/services/:serviceId/stop", requireHybridUserAuth, async (req, res) => {
     const state = await devServiceManager.stopService(req.userId!, req.params.serviceId);
     if (!state) {
       res.status(404).json({ error: "service_not_found" });
@@ -2549,7 +2580,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.json(state);
   });
 
-  app.get("/services/:serviceId/state", requireUserAuth(auth), async (req, res) => {
+  app.get("/services/:serviceId/state", requireHybridUserAuth, async (req, res) => {
     const state = await devServiceManager.getServiceState(req.userId!, req.params.serviceId);
     if (!state) {
       res.status(404).json({ error: "service_not_found" });
@@ -2558,7 +2589,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.json(state);
   });
 
-  app.post("/conversations", requireUserAuth(auth), async (req, res) => {
+  app.post("/conversations", requireHybridUserAuth, async (req, res) => {
     const schema = z.object({
       workspaceId: z.string().min(6),
       agentId: z.string().min(6).optional(),
@@ -2588,7 +2619,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.status(201).json(conversation);
   });
 
-  app.get("/conversations", requireUserAuth(auth), async (req, res) => {
+  app.get("/conversations", requireHybridUserAuth, async (req, res) => {
     const workspaceId = String(req.query.workspaceId ?? "");
     if (!workspaceId) {
       res.status(400).json({ error: "workspace_id_required" });
@@ -2602,7 +2633,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.json({ items: conversations });
   });
 
-  app.get("/conversations/:conversationId/turns", requireUserAuth(auth), async (req, res) => {
+  app.get("/conversations/:conversationId/turns", requireHybridUserAuth, async (req, res) => {
     const conversation = await repositories.findConversation(req.userId!, req.params.conversationId);
     if (!conversation) {
       res.status(404).json({ error: "conversation_not_found" });
@@ -2652,7 +2683,7 @@ export const createServer = async (): Promise<http.Server> => {
     });
   });
 
-  app.post("/conversations/:conversationId/turns", requireUserAuth(auth), async (req, res) => {
+  app.post("/conversations/:conversationId/turns", requireHybridUserAuth, async (req, res) => {
     const approvalPolicySchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
     const sandboxModeSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
     const reasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
@@ -2776,7 +2807,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.status(201).json(turn);
   });
 
-  app.post("/conversations/:conversationId/turns/:turnId/interrupt", requireUserAuth(auth), async (req, res) => {
+  app.post("/conversations/:conversationId/turns/:turnId/interrupt", requireHybridUserAuth, async (req, res) => {
     const conversation = await repositories.findConversation(req.userId!, req.params.conversationId);
     if (!conversation) {
       res.status(404).json({ error: "conversation_not_found" });
@@ -2806,7 +2837,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.json({ accepted: true });
   });
 
-  app.post("/sessions", requireUserAuth(auth), async (req, res) => {
+  app.post("/sessions", requireHybridUserAuth, async (req, res) => {
     const e2eEnvelopeSchema = z.object({
       v: z.literal(1),
       alg: z.literal("xchacha20poly1305"),
@@ -2864,7 +2895,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.status(201).json(session);
   });
 
-  app.get("/sessions", requireUserAuth(auth), async (req, res) => {
+  app.get("/sessions", requireHybridUserAuth, async (req, res) => {
     const workspaceId = String(req.query.workspaceId ?? "");
     if (!workspaceId) {
       res.status(400).json({ error: "workspace_id_required" });
@@ -2877,7 +2908,7 @@ export const createServer = async (): Promise<http.Server> => {
     res.json({ items: sessions });
   });
 
-  app.post("/tunnels", requireUserAuth(auth), async (req, res) => {
+  app.post("/tunnels", requireHybridUserAuth, async (req, res) => {
     const schema = z.object({
       workspaceId: z.string().min(6),
       agentId: z.string().min(6),
@@ -2945,7 +2976,7 @@ export const createServer = async (): Promise<http.Server> => {
     });
   });
 
-  app.get("/tunnels", requireUserAuth(auth), async (req, res) => {
+  app.get("/tunnels", requireHybridUserAuth, async (req, res) => {
     const workspaceId = String(req.query.workspaceId ?? "");
     if (!workspaceId) {
       res.status(400).json({ error: "workspace_id_required" });
@@ -2972,7 +3003,7 @@ export const createServer = async (): Promise<http.Server> => {
     });
   });
 
-  app.post("/tunnels/:tunnelId/issue-token", requireUserAuth(auth), async (req, res) => {
+  app.post("/tunnels/:tunnelId/issue-token", requireHybridUserAuth, async (req, res) => {
     const issued = await devServiceManager.issueTunnelToken(req.userId!, req.params.tunnelId);
     if (!issued) {
       res.status(404).json({ error: "tunnel_not_found" });
@@ -2984,7 +3015,7 @@ export const createServer = async (): Promise<http.Server> => {
     });
   });
 
-  app.post("/tunnels/:tunnelId/rotate-token", requireUserAuth(auth), async (req, res) => {
+  app.post("/tunnels/:tunnelId/rotate-token", requireHybridUserAuth, async (req, res) => {
     const issued = await devServiceManager.rotateTunnelToken(req.userId!, req.params.tunnelId);
     if (!issued) {
       res.status(404).json({ error: "tunnel_not_found" });
@@ -2996,7 +3027,7 @@ export const createServer = async (): Promise<http.Server> => {
     });
   });
 
-  app.delete("/tunnels/:tunnelId", requireUserAuth(auth), async (req, res) => {
+  app.delete("/tunnels/:tunnelId", requireHybridUserAuth, async (req, res) => {
     const deleted = await devServiceManager.closeTunnel(req.userId!, req.params.tunnelId);
     if (!deleted) {
       res.status(404).json({ error: "tunnel_not_found" });

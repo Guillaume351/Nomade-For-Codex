@@ -1,3 +1,5 @@
 <script setup lang="ts">
-await navigateTo('/account');
+const { fetchSession, isAuthenticated } = useAuthSession();
+await fetchSession();
+await navigateTo(isAuthenticated.value ? "/account" : "/login");
 </script>

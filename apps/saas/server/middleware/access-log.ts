@@ -39,6 +39,16 @@ const sanitizePathForLog = (url: URL): string => {
   return query.length > 0 ? `${url.pathname}?${query}` : url.pathname;
 };
 
+const classifyRouteGroup = (pathname: string): string => {
+  if (pathname.startsWith("/api/auth/")) return "auth";
+  if (pathname.startsWith("/billing/")) return "billing";
+  if (pathname.startsWith("/auth/")) return "device-auth";
+  if (pathname.startsWith("/internal/")) return "internal";
+  if (pathname.startsWith("/web/")) return "legacy-web";
+  if (pathname.startsWith("/_nuxt/")) return "assets";
+  return "web";
+};
+
 export default defineEventHandler((event) => {
   const config = useRuntimeConfig(event);
   if (!config.httpAccessLogs) {
@@ -66,13 +76,17 @@ export default defineEventHandler((event) => {
       return;
     }
     const durationMs = Date.now() - startedAt;
+    const routeGroup = classifyRouteGroup(url.pathname);
     console.log("[saas-http]", {
       requestId,
       method: req.method,
       path: sanitizePathForLog(url),
+      routeGroup,
       status: res.statusCode,
       durationMs,
-      ip: event.node.req.headers["x-forwarded-for"] ?? event.node.req.socket.remoteAddress ?? ""
+      ip: event.node.req.headers["x-forwarded-for"] ?? event.node.req.socket.remoteAddress ?? "",
+      referer: event.node.req.headers.referer ?? "",
+      userAgent: event.node.req.headers["user-agent"] ?? ""
     });
 
     if (url.pathname.startsWith("/api/auth/")) {
@@ -80,6 +94,7 @@ export default defineEventHandler((event) => {
         requestId,
         method: req.method,
         path: url.pathname,
+        routeGroup,
         status: res.statusCode,
         durationMs
       });
@@ -90,6 +105,7 @@ export default defineEventHandler((event) => {
         requestId,
         method: req.method,
         path: url.pathname,
+        routeGroup,
         status: res.statusCode,
         durationMs
       });
