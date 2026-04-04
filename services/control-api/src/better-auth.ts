@@ -180,6 +180,8 @@ export const createBetterAuthRuntime = (params: { config: Config; pool: Pool }):
   console.log("[auth] better-auth configured", {
     baseUrl: normalizeBaseUrl(config.appBaseUrl),
     emailMode: config.authEmailMode,
+    magicLinkAllowedAttempts: config.magicLinkAllowedAttempts,
+    magicLinkExpiresInSec: config.magicLinkExpiresInSec,
     smtpHost: config.smtpHost,
     smtpPort: config.smtpPort,
     smtpSecure: config.smtpSecure,
@@ -298,6 +300,8 @@ export const createBetterAuthRuntime = (params: { config: Config; pool: Pool }):
     plugins: [
       magicLink({
         disableSignUp: true,
+        allowedAttempts: config.magicLinkAllowedAttempts,
+        expiresIn: config.magicLinkExpiresInSec,
         sendMagicLink: async (data) => {
           await sendMail({
             kind: "magic_link",

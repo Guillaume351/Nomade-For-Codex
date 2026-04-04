@@ -101,6 +101,9 @@ const resolveAuthCallbackMessage = (rawError: string): string => {
   if (normalized.includes("sign_up_disabled") || normalized.includes("signup_disabled")) {
     return t("errors.sign_up_disabled");
   }
+  if (normalized.includes("attempts_exceeded") || (normalized.includes("attempt") && normalized.includes("exceed"))) {
+    return t("errors.magic_link_attempts_exceeded");
+  }
   if (normalized.includes("token") && normalized.includes("invalid")) {
     return t("errors.invalid_token");
   }
@@ -111,12 +114,14 @@ const resolveAuthCallbackMessage = (rawError: string): string => {
 };
 
 onMounted(() => {
+  const callbackError = typeof route.query.error === "string" ? route.query.error.trim() : "";
+  if (callbackError.length > 0) {
+    const msg = resolveAuthCallbackMessage(callbackError);
+    errorMessage(msg);
+    return;
+  }
   if (typeof route.query.reason === "string" && route.query.reason === "auth_required") {
     info("errors.session_required");
-  }
-  if (typeof route.query.error === "string" && route.query.error.trim().length > 0) {
-    const msg = resolveAuthCallbackMessage(route.query.error);
-    errorMessage(msg);
   }
 });
 </script>

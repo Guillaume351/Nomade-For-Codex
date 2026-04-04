@@ -42,6 +42,8 @@ Set these for a real deployment:
 - `AUTH_SMTP_SECURE` (`true` on 465, often `false` on 587/STARTTLS)
 - `AUTH_SMTP_FROM`
 - `AUTH_SMTP_USER` and `AUTH_SMTP_PASS` (if required by provider)
+- `AUTH_MAGIC_LINK_ALLOWED_ATTEMPTS` (default `5`, recommended `5-10` in production to tolerate mail-link pre-open scanners)
+- `AUTH_MAGIC_LINK_EXPIRES_SEC` (default `900`, i.e. 15 minutes)
 
 Optional social login (prepared, disabled until both vars exist):
 - Google: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
@@ -153,3 +155,8 @@ Then check `saas` logs for:
 - `[auth-http]` for Better Auth route requests/responses (`/api/auth/*`)
 - `[auth-mail:smtp] transporter verified|failed`
 - `[auth-mail:smtp] sent` or `[auth-mail:smtp] send failed`
+
+If magic-link verification redirects with `error=ATTEMPTS_EXCEEDED`:
+- Increase `AUTH_MAGIC_LINK_ALLOWED_ATTEMPTS` (for example `8`)
+- Keep `AUTH_MAGIC_LINK_EXPIRES_SEC` reasonable (`600-1800`)
+- Request a brand-new magic link and retry

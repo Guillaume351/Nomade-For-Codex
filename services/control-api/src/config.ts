@@ -16,6 +16,8 @@ export interface Config {
   previewBaseOrigin: string;
   appBaseUrl: string;
   authEmailMode: AuthEmailMode;
+  magicLinkAllowedAttempts: number;
+  magicLinkExpiresInSec: number;
   smtpHost?: string;
   smtpPort: number;
   smtpSecure: boolean;
@@ -123,6 +125,14 @@ export const loadConfig = (): Config => {
   const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
   const stripeProPriceId = process.env.STRIPE_PRO_PRICE_ID;
   const stripeEnabled = Boolean(stripeSecretKey);
+  const magicLinkAllowedAttempts = readInt("AUTH_MAGIC_LINK_ALLOWED_ATTEMPTS", 5);
+  const magicLinkExpiresInSec = readInt("AUTH_MAGIC_LINK_EXPIRES_SEC", 60 * 15);
+  if (magicLinkAllowedAttempts < 1) {
+    throw new Error("AUTH_MAGIC_LINK_ALLOWED_ATTEMPTS must be >= 1.");
+  }
+  if (magicLinkExpiresInSec < 60) {
+    throw new Error("AUTH_MAGIC_LINK_EXPIRES_SEC must be >= 60.");
+  }
 
   return {
     port: readInt("PORT", 8080),
@@ -140,6 +150,8 @@ export const loadConfig = (): Config => {
     previewBaseOrigin,
     appBaseUrl,
     authEmailMode,
+    magicLinkAllowedAttempts,
+    magicLinkExpiresInSec,
     smtpHost,
     smtpPort,
     smtpSecure: readBool("AUTH_SMTP_SECURE", smtpPort === 465),

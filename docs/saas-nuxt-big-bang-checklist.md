@@ -29,6 +29,8 @@ Auth email:
 - `AUTH_SMTP_FROM`
 - `AUTH_SMTP_USER`
 - `AUTH_SMTP_PASS`
+- `AUTH_MAGIC_LINK_ALLOWED_ATTEMPTS` (default `5`)
+- `AUTH_MAGIC_LINK_EXPIRES_SEC` (default `900`)
 
 Observability:
 - `HTTP_ACCESS_LOGS=true`

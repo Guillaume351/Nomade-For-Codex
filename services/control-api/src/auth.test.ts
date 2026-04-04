@@ -22,6 +22,8 @@ describe("auth primitives", () => {
         previewBaseOrigin: "https://preview.localhost",
         port: 8080,
         authEmailMode: "log",
+        magicLinkAllowedAttempts: 5,
+        magicLinkExpiresInSec: 900,
         smtpPort: 587,
         smtpSecure: false,
         smtpFrom: "Nomade <test@example.com>",
