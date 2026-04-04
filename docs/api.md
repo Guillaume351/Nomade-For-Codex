@@ -1,5 +1,10 @@
 # API Contract (v1)
 
+## Canonical SaaS web routes
+- `/login`, `/signup`, `/forgot-password`, `/reset-password`, `/verify-email`
+- `/activate`, `/account`, `/devices`, `/billing`
+- Legacy `/web/*` routes are redirected to canonical routes.
+
 ## Public auth
 - `POST/GET /api/auth/*` Better Auth endpoints (email/password, email verification, password reset, magic link, optional social providers)
 - `POST /auth/device/start` -> `{ deviceCode, userCode, expiresAt, intervalSec, verificationUri, verificationUriComplete }`
@@ -40,8 +45,9 @@
 - `POST /tunnels` body `{ workspaceId, agentId, targetPort, ttlSec? }`
 - `GET /tunnels?workspaceId=...`
 
-## Internal endpoint (gateway -> control-api)
+## Internal endpoint (gateway -> saas compatibility API)
 - `POST /internal/tunnels/:slug/proxy`
+- `GET /internal/tunnels/:slug/ws` (WebSocket upgrade)
 - Requires `x-gateway-secret`.
 - Body: `{ method, path, query?, headers, bodyBase64?, token }`.
 

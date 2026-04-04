@@ -6,7 +6,7 @@ Auth deployment checklist (env + SMTP + DB migration):
 - [`docs/auth-better-auth-checklist.md`](./auth-better-auth-checklist.md)
 
 ## Prerequisites
-- Node.js 20+ and npm.
+- Node.js 24+ (LTS) and npm.
 - Network access to your deployed control API URL (for example `https://app.example.com`).
 - A user account on that deployed instance (Better Auth email/password or enabled social login).
 - No extra system package is required for QR display (rendered by the CLI itself).
@@ -90,7 +90,7 @@ npm --workspace agent/nomade-agent run pair -- --server-url https://app.example.
 ## 7) Quick troubleshooting
 - `Control API is not reachable`: verify URL, DNS, TLS certificate, and firewall.
 - `invalid_token`: run `logout`, then `login` again.
-- `device_limit_reached`: remove device from account/devices or upgrade plan from account/billing page.
+- `device_limit_reached`: remove device from account/devices or upgrade plan from account/billing page (`/account`, legacy `/web/account` still redirects).
 - Agent appears offline: ensure `run` command is still active and machine can reach API/WebSocket.
 
 ## 8) Use from Flutter app (iPhone / iPad) to control the paired machine

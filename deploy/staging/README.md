@@ -4,6 +4,7 @@ This setup deploys prebuilt images from GHCR.
 
 Before deployment, complete:
 - `docs/auth-better-auth-checklist.md`
+- `docs/saas-nuxt-big-bang-checklist.md`
 
 ## 1) GitHub setup (once)
 - In GitHub: `Settings -> Actions -> General -> Workflow permissions`
@@ -12,7 +13,7 @@ Before deployment, complete:
   - `.github/workflows/publish-images.yml`
 
 Images published:
-- `ghcr.io/<owner>/nomade-for-codex-control-api:<tag>`
+- `ghcr.io/<owner>/nomade-for-codex-saas:<tag>`
 - `ghcr.io/<owner>/nomade-for-codex-tunnel-gateway:<tag>`
 
 ## 2) Prepare server
@@ -26,6 +27,9 @@ Copy the two files:
 - `deploy/staging/.env.example` as `.env`
 
 Edit `.env` with your values.
+For temporary auth troubleshooting, set:
+- `AUTH_DEBUG_LOGS=true`
+- `HTTP_ACCESS_LOGS=true`
 
 If the GHCR package is private, log in:
 ```bash
@@ -38,7 +42,7 @@ echo "$GHCR_PAT" | docker login ghcr.io -u <github_username> --password-stdin
 docker compose pull
 docker compose up -d
 docker compose ps
-docker compose logs -f control-api
+docker compose logs -f saas
 ```
 
 ## 4) API quick check

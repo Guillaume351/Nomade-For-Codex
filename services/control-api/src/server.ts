@@ -122,6 +122,14 @@ const isTruthyQuery = (value: unknown): boolean => {
   return normalized === "1" || normalized === "true" || normalized === "yes";
 };
 
+const maskEmailForLog = (value: string): string => {
+  const at = value.indexOf("@");
+  if (at <= 1) {
+    return "***";
+  }
+  return `${value.slice(0, 1)}***${value.slice(at)}`;
+};
+
 const hasLegacyWrappedItemPayload = (payload: unknown): boolean => {
   if (!payload || typeof payload !== "object") {
     return false;
@@ -406,11 +414,13 @@ export const createServer = async (): Promise<http.Server> => {
 
   app.post("/billing/webhook", express.raw({ type: "application/json" }), async (req, res) => {
     if (!config.stripeEnabled || !config.stripeWebhookSecret) {
+      console.log("[billing-webhook]", { status: "ignored", reason: "stripe_not_configured" });
       res.status(404).json({ error: "stripe_not_configured" });
       return;
     }
 
     if (!Buffer.isBuffer(req.body)) {
+      console.log("[billing-webhook]", { status: "invalid_payload" });
       res.status(400).json({ error: "invalid_payload" });
       return;
     }
@@ -421,14 +431,27 @@ export const createServer = async (): Promise<http.Server> => {
       webhookSecret: config.stripeWebhookSecret
     });
     if (!signatureValid) {
+      console.warn("[billing-webhook]", { status: "invalid_signature" });
       res.status(400).json({ error: "invalid_signature" });
       return;
     }
 
     const event = JSON.parse(req.body.toString("utf8")) as Record<string, unknown>;
+    const eventId = typeof event.id === "string" ? event.id : "unknown";
     const eventType = String(event.type ?? "");
+    console.log("[billing-webhook]", {
+      status: "received",
+      eventId,
+      eventType
+    });
     const eventData = (event.data as Record<string, unknown> | undefined)?.object as Record<string, unknown> | undefined;
     if (!eventData) {
+      console.log("[billing-webhook]", {
+        status: "ignored",
+        reason: "missing_event_data",
+        eventId,
+        eventType
+      });
       res.json({ received: true });
       return;
     }
@@ -443,6 +466,13 @@ export const createServer = async (): Promise<http.Server> => {
         }
         const user = await repositories.getUserByStripeCustomerId(customerId);
         if (!user) {
+          console.log("[billing-webhook]", {
+            status: "ignored",
+            reason: "customer_not_mapped",
+            eventId,
+            eventType,
+            customerId
+          });
           res.json({ received: true });
           return;
         }
@@ -464,6 +494,14 @@ export const createServer = async (): Promise<http.Server> => {
           stripeSubscriptionId: subscriptionId
         };
         await repositories.applyBillingSubscriptionUpdate(update);
+        console.log("[billing-webhook]", {
+          status: "applied",
+          eventId,
+          eventType,
+          userId: user.id,
+          planCode: mapped.planCode,
+          subscriptionId
+        });
       }
 
       if (eventType === "customer.subscription.updated" || eventType === "customer.subscription.deleted") {
@@ -474,6 +512,13 @@ export const createServer = async (): Promise<http.Server> => {
         }
         const user = await repositories.getUserByStripeCustomerId(customerId);
         if (!user) {
+          console.log("[billing-webhook]", {
+            status: "ignored",
+            reason: "customer_not_mapped",
+            eventId,
+            eventType,
+            customerId
+          });
           res.json({ received: true });
           return;
         }
@@ -495,13 +540,31 @@ export const createServer = async (): Promise<http.Server> => {
           currentPeriodEnd: periodEnd
         };
         await repositories.applyBillingSubscriptionUpdate(update);
+        console.log("[billing-webhook]", {
+          status: "applied",
+          eventId,
+          eventType,
+          userId: user.id,
+          planCode: update.planCode,
+          subscriptionStatus: status,
+          subscriptionId
+        });
       }
     } catch (error) {
-      console.error("[control-api] stripe webhook failed", error);
+      console.error("[control-api] stripe webhook failed", {
+        eventId,
+        eventType,
+        error: error instanceof Error ? error.message : String(error)
+      });
       res.status(500).json({ error: "webhook_processing_failed" });
       return;
     }
 
+    console.log("[billing-webhook]", {
+      status: "acknowledged",
+      eventId,
+      eventType
+    });
     res.json({ received: true });
   });
 
@@ -1780,15 +1843,23 @@ export const createServer = async (): Promise<http.Server> => {
   });
 
   app.post("/billing/checkout-session", requireUserAuth(auth), async (req, res) => {
+    const requestStartedAt = Date.now();
     if (!config.stripeEnabled || !config.stripeSecretKey || !config.stripeProPriceId) {
+      console.log("[billing-checkout]", { status: "stripe_not_configured", userId: req.userId ?? "" });
       res.status(503).json({ error: "stripe_not_configured" });
       return;
     }
     const me = await repositories.getUserById(req.userId!);
     if (!me) {
+      console.log("[billing-checkout]", { status: "user_not_found", userId: req.userId ?? "" });
       res.status(404).json({ error: "not_found" });
       return;
     }
+    console.log("[billing-checkout]", {
+      status: "start",
+      userId: me.id,
+      email: maskEmailForLog(me.email)
+    });
     try {
       const stripeCustomerId = await ensureStripeCustomerForUser({ userId: me.id, email: me.email });
       const base = config.appBaseUrl.replace(/\/$/, "");
@@ -1799,23 +1870,42 @@ export const createServer = async (): Promise<http.Server> => {
         successUrl: `${base}/web/account?billing=success`,
         cancelUrl: `${base}/web/account?billing=cancel`
       });
+      console.log("[billing-checkout]", {
+        status: "success",
+        userId: me.id,
+        sessionId: session.id,
+        hasUrl: Boolean(session.url),
+        durationMs: Date.now() - requestStartedAt
+      });
       res.json({ id: session.id, url: session.url ?? null });
     } catch (error) {
-      console.error("[control-api] checkout session failed", error);
+      console.error("[control-api] checkout session failed", {
+        userId: me.id,
+        error: error instanceof Error ? error.message : String(error),
+        durationMs: Date.now() - requestStartedAt
+      });
       res.status(500).json({ error: "checkout_session_failed" });
     }
   });
 
   app.post("/billing/portal-session", requireUserAuth(auth), async (req, res) => {
+    const requestStartedAt = Date.now();
     if (!config.stripeEnabled || !config.stripeSecretKey) {
+      console.log("[billing-portal]", { status: "stripe_not_configured", userId: req.userId ?? "" });
       res.status(503).json({ error: "stripe_not_configured" });
       return;
     }
     const me = await repositories.getUserById(req.userId!);
     if (!me) {
+      console.log("[billing-portal]", { status: "user_not_found", userId: req.userId ?? "" });
       res.status(404).json({ error: "not_found" });
       return;
     }
+    console.log("[billing-portal]", {
+      status: "start",
+      userId: me.id,
+      email: maskEmailForLog(me.email)
+    });
     try {
       const stripeCustomerId = await ensureStripeCustomerForUser({ userId: me.id, email: me.email });
       const portal = await createStripePortalSession({
@@ -1823,9 +1913,20 @@ export const createServer = async (): Promise<http.Server> => {
         customerId: stripeCustomerId,
         returnUrl: `${config.appBaseUrl.replace(/\/$/, "")}/web/account`
       });
+      console.log("[billing-portal]", {
+        status: "success",
+        userId: me.id,
+        sessionId: portal.id,
+        hasUrl: Boolean(portal.url),
+        durationMs: Date.now() - requestStartedAt
+      });
       res.json({ id: portal.id, url: portal.url ?? null });
     } catch (error) {
-      console.error("[control-api] portal session failed", error);
+      console.error("[control-api] portal session failed", {
+        userId: me.id,
+        error: error instanceof Error ? error.message : String(error),
+        durationMs: Date.now() - requestStartedAt
+      });
       res.status(500).json({ error: "portal_session_failed" });
     }
   });

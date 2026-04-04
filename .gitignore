@@ -7,6 +7,8 @@ build/
 coverage/
 *.tsbuildinfo
 *.tgz
+apps/saas/.nuxt/
+apps/saas/.output/
 
 # Logs
 *.log

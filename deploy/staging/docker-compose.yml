@@ -20,12 +20,14 @@ services:
     volumes:
       - nomade_staging_postgres:/var/lib/postgresql/data
 
-  control-api:
-    image: ${CONTROL_API_IMAGE:-ghcr.io/CHANGE_ME/nomade-for-codex-control-api}:${IMAGE_TAG:-latest}
+  saas:
+    image: ${SAAS_IMAGE:-ghcr.io/CHANGE_ME/nomade-for-codex-saas}:${IMAGE_TAG:-latest}
     pull_policy: always
     restart: unless-stopped
     environment:
       PORT: 8080
+      COMPAT_BACKEND_PORT: 8090
+      COMPAT_BACKEND_URL: ${COMPAT_BACKEND_URL:-http://127.0.0.1:8090}
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-nomade}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
       INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:?set INTERNAL_GATEWAY_SECRET}
@@ -41,6 +43,7 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
       AUTH_EMAIL_MODE: ${AUTH_EMAIL_MODE:-log}
       AUTH_DEBUG_LOGS: ${AUTH_DEBUG_LOGS:-false}
+      HTTP_ACCESS_LOGS: ${HTTP_ACCESS_LOGS:-true}
       AUTH_SMTP_HOST: ${AUTH_SMTP_HOST:-}
       AUTH_SMTP_PORT: ${AUTH_SMTP_PORT:-587}
       AUTH_SMTP_SECURE: ${AUTH_SMTP_SECURE:-false}
@@ -59,7 +62,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "${CONTROL_API_PORT:-8080}:8080"
+      - "${SAAS_PORT:-8080}:8080"
 
   tunnel-gateway:
     image: ${TUNNEL_GATEWAY_IMAGE:-ghcr.io/CHANGE_ME/nomade-for-codex-tunnel-gateway}:${IMAGE_TAG:-latest}
@@ -67,11 +70,11 @@ services:
     restart: unless-stopped
     environment:
       PORT: 8081
-      CONTROL_API_URL: http://control-api:8080
+      CONTROL_API_URL: ${CONTROL_API_URL:-http://saas:8090}
       INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:?set INTERNAL_GATEWAY_SECRET}
       PREVIEW_BASE_DOMAIN: ${PREVIEW_BASE_DOMAIN:-preview.localhost}
     depends_on:
-      control-api:
+      saas:
         condition: service_started
     ports:
       - "${TUNNEL_GATEWAY_PORT:-8081}:8081"

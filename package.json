@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "workspaces": [
+    "apps/*",
     "services/*",
     "agent/*",
     "packages/*"
@@ -14,6 +15,7 @@
     "dev:logs": "docker compose -f deploy/selfhost/docker-compose.dev.yml logs -f",
     "dev:control": "npm --workspace services/control-api run dev",
     "dev:gateway": "npm --workspace services/tunnel-gateway run dev",
+    "dev:saas": "npm --workspace apps/saas run dev",
     "dev:agent": "npm --workspace agent/nomade-agent run dev --",
     "dev:agent:login": "npm --workspace agent/nomade-agent run login --",
     "dev:agent:whoami": "npm --workspace agent/nomade-agent run whoami --",

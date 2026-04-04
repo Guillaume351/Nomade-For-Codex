@@ -10,7 +10,7 @@ This runbook is the reference for deploying Nomade authentication with:
 ## 1) What Is Already Implemented
 
 Server integration:
-- Better Auth handler mounted at `/api/auth/*` in `services/control-api/src/server.ts`
+- Better Auth handler mounted at `/api/auth/*` in `services/control-api/src/server.ts` (embedded compatibility backend behind `apps/saas` in deployed setup)
 - Better Auth runtime and providers in `services/control-api/src/better-auth.ts`
 - Device flow compatibility kept (`/auth/device/start`, `/auth/device/poll`, `/auth/device/approve`)
 
@@ -90,9 +90,9 @@ psql "$DATABASE_URL" -f deploy/selfhost/sql/2026-04-03-better-auth.sql
 ## 5) Deployment Steps
 
 1. Backup DB.
-2. Deploy the new `control-api` image/code.
+2. Deploy the new `saas` image/code (it embeds the compatibility backend).
 3. Set env vars from section 2.
-4. Restart `control-api` (this triggers automatic schema migration).
+4. Restart `saas` (this triggers automatic schema migration in the embedded compatibility backend).
 5. Verify health:
 
 ```bash
@@ -149,7 +149,7 @@ Set temporary detailed logging:
 AUTH_DEBUG_LOGS=true
 ```
 
-Then check `control-api` logs for:
+Then check `saas` logs for:
 - `[auth-http]` for Better Auth route requests/responses (`/api/auth/*`)
 - `[auth-mail:smtp] transporter verified|failed`
 - `[auth-mail:smtp] sent` or `[auth-mail:smtp] send failed`

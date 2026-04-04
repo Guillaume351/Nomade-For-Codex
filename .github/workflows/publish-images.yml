@@ -19,8 +19,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - service: control-api
-            dockerfile: services/control-api/Dockerfile
+          - service: saas
+            dockerfile: apps/saas/Dockerfile
           - service: tunnel-gateway
             dockerfile: services/tunnel-gateway/Dockerfile
 

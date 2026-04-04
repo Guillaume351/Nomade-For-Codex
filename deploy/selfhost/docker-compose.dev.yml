@@ -22,7 +22,7 @@ services:
       - "8025:8025"
 
   control-api:
-    image: node:20-alpine
+    image: node:24-alpine
     working_dir: /workspace
     command: >
       sh -c "npm install &&
@@ -78,7 +78,7 @@ services:
       - control_api_node_modules:/workspace/node_modules
 
   tunnel-gateway:
-    image: node:20-alpine
+    image: node:24-alpine
     working_dir: /workspace
     command: >
       sh -c "npm install &&
