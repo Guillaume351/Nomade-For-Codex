@@ -15,7 +15,6 @@ FROM node:24-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/services/tunnel-gateway/node_modules ./services/tunnel-gateway/node_modules
 COPY --from=build /app/services/tunnel-gateway/dist ./services/tunnel-gateway/dist
 COPY services/tunnel-gateway/package.json ./services/tunnel-gateway/package.json
 CMD ["node", "services/tunnel-gateway/dist/index.js"]
