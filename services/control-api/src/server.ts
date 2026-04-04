@@ -1,5 +1,6 @@
 import http from "node:http";
 import { type IncomingHttpHeaders } from "node:http";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import express from "express";
 import cors from "cors";
@@ -130,6 +131,51 @@ const maskEmailForLog = (value: string): string => {
   return `${value.slice(0, 1)}***${value.slice(at)}`;
 };
 
+const SENSITIVE_QUERY_KEYS = new Set([
+  "email",
+  "token",
+  "access_token",
+  "refresh_token",
+  "code",
+  "password",
+  "user_code",
+  "device_code"
+]);
+
+const sanitizeRequestPathForLog = (rawUrl: string): string => {
+  try {
+    const parsed = new URL(rawUrl, "http://nomade.local");
+    if (!parsed.search) {
+      return parsed.pathname;
+    }
+    const sanitized = new URLSearchParams();
+    for (const [key, value] of parsed.searchParams.entries()) {
+      const normalized = key.toLowerCase();
+      if (normalized === "email") {
+        sanitized.set(key, maskEmailForLog(value));
+        continue;
+      }
+      if (SENSITIVE_QUERY_KEYS.has(normalized)) {
+        sanitized.set(key, "[redacted]");
+        continue;
+      }
+      sanitized.set(key, value);
+    }
+    const query = sanitized.toString();
+    return query.length > 0 ? `${parsed.pathname}?${query}` : parsed.pathname;
+  } catch {
+    return rawUrl;
+  }
+};
+
+const extractClientIp = (req: express.Request): string => {
+  const forwarded = req.header("x-forwarded-for");
+  if (forwarded && forwarded.trim().length > 0) {
+    return forwarded.split(",")[0]!.trim();
+  }
+  return req.ip || "";
+};
+
 const hasLegacyWrappedItemPayload = (payload: unknown): boolean => {
   if (!payload || typeof payload !== "object") {
     return false;
@@ -185,14 +231,75 @@ export const createServer = async (): Promise<http.Server> => {
 
   const app = express();
   app.set("trust proxy", 1);
-  app.use(helmet());
+  app.use((req, res, next) => {
+    const requestIdHeader = req.header("x-request-id");
+    const requestId = requestIdHeader && requestIdHeader.trim().length > 0 ? requestIdHeader.trim() : randomUUID();
+    (req as express.Request & { requestId?: string }).requestId = requestId;
+    res.setHeader("x-request-id", requestId);
+    next();
+  });
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        useDefaults: true,
+        directives: {
+          scriptSrc: ["'self'", "'unsafe-inline'"]
+        }
+      }
+    })
+  );
   app.use(cors());
+  app.use((req, res, next) => {
+    if (!config.httpAccessLogs) {
+      next();
+      return;
+    }
+
+    const startedAt = Date.now();
+    const requestId = String((req as express.Request & { requestId?: string }).requestId ?? "");
+    const path = sanitizeRequestPathForLog(req.originalUrl || req.url || req.path);
+
+    const loginEmail = typeof req.query.email === "string" ? req.query.email.trim() : "";
+    if ((req.path === "/web/login" || req.path === "/login") && loginEmail.length > 0) {
+      console.log("[control-auth] login_query_prefill", {
+        requestId,
+        email: maskEmailForLog(loginEmail)
+      });
+    }
+
+    res.once("finish", () => {
+      console.log("[control-http]", {
+        requestId,
+        method: req.method,
+        path,
+        status: res.statusCode,
+        durationMs: Date.now() - startedAt,
+        ip: extractClientIp(req),
+        userAgent: req.header("user-agent") ?? "",
+        referer: req.header("referer") ?? ""
+      });
+    });
+    next();
+  });
   app.all("/api/auth/*", async (req, res) => {
     const startedAt = Date.now();
+    const requestId = String((req as express.Request & { requestId?: string }).requestId ?? "");
+    if (config.authDebugLogs) {
+      console.log("[auth-http] incoming", {
+        requestId,
+        method: req.method,
+        path: req.path,
+        origin: req.header("origin") ?? "",
+        referer: req.header("referer") ?? "",
+        ip: extractClientIp(req),
+        userAgent: req.header("user-agent") ?? ""
+      });
+    }
     try {
       await betterAuthHandler(req, res);
     } catch (error) {
       console.error("[auth-http] handler error", {
+        requestId,
         method: req.method,
         path: req.path,
         error: error instanceof Error ? error.message : String(error)
@@ -203,11 +310,14 @@ export const createServer = async (): Promise<http.Server> => {
     } finally {
       if (config.authDebugLogs || res.statusCode >= 400) {
         console.log("[auth-http]", {
+          requestId,
           method: req.method,
           path: req.path,
           status: res.statusCode,
           durationMs: Date.now() - startedAt,
-          ip: req.ip
+          ip: extractClientIp(req),
+          origin: req.header("origin") ?? "",
+          referer: req.header("referer") ?? ""
         });
       }
     }

@@ -71,7 +71,7 @@ const createMailSender = (config: Config): ((mail: AuthMail) => Promise<void>) =
     return async (mail) => {
       console.log("[auth-mail:log]", {
         kind: mail.kind,
-        to: mail.to,
+        to: maskEmail(mail.to),
         subject: mail.subject,
         text: mail.text
       });
@@ -112,6 +112,16 @@ const createMailSender = (config: Config): ((mail: AuthMail) => Promise<void>) =
 
   return async (mail) => {
     const startedAt = Date.now();
+    if (config.authDebugLogs) {
+      console.log("[auth-mail:smtp] sending", {
+        kind: mail.kind,
+        to: maskEmail(mail.to),
+        subject: mail.subject,
+        host: config.smtpHost,
+        port: config.smtpPort,
+        secure: config.smtpSecure
+      });
+    }
     try {
       const result = await transport.sendMail({
         from: config.smtpFrom,
@@ -125,6 +135,9 @@ const createMailSender = (config: Config): ((mail: AuthMail) => Promise<void>) =
           kind: mail.kind,
           to: maskEmail(mail.to),
           messageId: result.messageId,
+          accepted: result.accepted,
+          rejected: result.rejected,
+          response: result.response,
           durationMs: Date.now() - startedAt
         });
       }

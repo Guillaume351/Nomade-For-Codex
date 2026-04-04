@@ -105,18 +105,88 @@ export const htmlPage = (params: { title: string; body: string }): string => {
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>${params.title}</title>
     <style>
-      body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background: #f6f7fb; color: #111827; }
-      .wrap { max-width: 720px; margin: 40px auto; padding: 24px; }
-      .card { background: #fff; border-radius: 12px; border: 1px solid #e5e7eb; padding: 20px; box-shadow: 0 6px 20px rgba(17,24,39,0.06); }
-      h1 { margin: 0 0 12px; font-size: 24px; }
-      p { line-height: 1.5; color: #374151; }
-      code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #f3f4f6; border-radius: 6px; padding: 2px 6px; }
-      input, button { font-size: 16px; padding: 10px 12px; border-radius: 8px; border: 1px solid #d1d5db; }
-      button { cursor: pointer; background: #111827; color: #fff; border-color: #111827; }
-      .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
-      a { color: #1d4ed8; text-decoration: none; }
-      .muted { color: #6b7280; font-size: 14px; }
-      ul { padding-left: 18px; }
+      :root {
+        --bg: #f5f7fb;
+        --surface: #ffffff;
+        --text: #101828;
+        --muted: #475467;
+        --border: #d0d5dd;
+        --primary: #0b5fff;
+        --danger: #b42318;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Sora", "Avenir Next", "Segoe UI", sans-serif;
+        background: radial-gradient(circle at top right, #dce7ff 0%, #f5f7fb 45%, #f5f7fb 100%);
+        color: var(--text);
+      }
+      .wrap {
+        width: min(960px, calc(100% - 2rem));
+        margin: 2rem auto;
+      }
+      .card {
+        background: color-mix(in srgb, var(--surface) 95%, transparent);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        box-shadow: 0 16px 48px rgba(16, 24, 40, 0.08);
+        padding: 1.25rem;
+      }
+      h1 {
+        margin: 0 0 0.75rem;
+        letter-spacing: -0.02em;
+      }
+      p {
+        line-height: 1.5;
+        color: var(--muted);
+        margin: 0 0 0.75rem;
+      }
+      code, pre {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: #eef2ff;
+        border-radius: 6px;
+        padding: 0.15rem 0.35rem;
+      }
+      input, button {
+        font: inherit;
+        font-size: 16px;
+        padding: 0.6rem 0.75rem;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: #fff;
+      }
+      input { flex: 1 1 220px; min-width: 220px; }
+      button {
+        cursor: pointer;
+        background: var(--primary);
+        border-color: var(--primary);
+        color: #fff;
+      }
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.6;
+      }
+      .row {
+        display: flex;
+        gap: 0.6rem;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-top: 0.75rem;
+      }
+      a {
+        color: var(--primary);
+        text-decoration: none;
+      }
+      a:hover { text-decoration: underline; }
+      .muted { color: var(--muted); font-size: 14px; }
+      ul { padding-left: 1.1rem; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td {
+        text-align: left;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid var(--border);
+      }
+      #auth-notice[style*="b91c1c"], #signup-notice[style*="b91c1c"] { color: var(--danger) !important; }
     </style>
   </head>
   <body>

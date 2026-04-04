@@ -6,6 +6,7 @@ export interface Config {
   jwtSecret: string;
   betterAuthSecret: string;
   authDebugLogs: boolean;
+  httpAccessLogs: boolean;
   accessTtlSec: number;
   refreshTtlSec: number;
   deviceCodeTtlSec: number;
@@ -129,6 +130,7 @@ export const loadConfig = (): Config => {
     jwtSecret,
     betterAuthSecret,
     authDebugLogs: readBool("AUTH_DEBUG_LOGS", false),
+    httpAccessLogs: readBool("HTTP_ACCESS_LOGS", true),
     accessTtlSec: readInt("ACCESS_TOKEN_TTL_SEC", 900),
     refreshTtlSec: readInt("REFRESH_TOKEN_TTL_SEC", 60 * 60 * 24 * 30),
     deviceCodeTtlSec: readInt("DEVICE_CODE_TTL_SEC", 600),
