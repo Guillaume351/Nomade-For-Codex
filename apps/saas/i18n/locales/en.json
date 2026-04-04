@@ -121,6 +121,8 @@
     "session_required": "Please sign in to continue.",
     "missing_token": "Missing token.",
     "missing_user_code": "Missing user code.",
+    "magic_link_expired": "This magic link expired. Request a new one.",
+    "magic_link_failed": "Magic link sign-in failed. Please request a new link.",
     "request_failed_with_code": "Request failed ({code})."
   }
 }

@@ -33,6 +33,10 @@ export const useNotify = () => {
     toast.error(t(key, params));
   };
 
+  const errorMessage = (message: string) => {
+    toast.error(message);
+  };
+
   const errorFrom = (err: unknown, fallbackKey = "errors.generic") => {
     if (err instanceof ApiError) {
       const mappedKey = ERROR_KEY_MAP[err.code];
@@ -54,6 +58,7 @@ export const useNotify = () => {
     success,
     info,
     error,
+    errorMessage,
     errorFrom
   };
 };

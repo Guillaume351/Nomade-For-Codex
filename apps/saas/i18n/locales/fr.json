@@ -121,6 +121,8 @@
     "session_required": "Connecte-toi pour continuer.",
     "missing_token": "Token manquant.",
     "missing_user_code": "Code utilisateur manquant.",
+    "magic_link_expired": "Ce magic link a expiré. Demande un nouveau lien.",
+    "magic_link_failed": "La connexion magic link a échoué. Demande un nouveau lien.",
     "request_failed_with_code": "La requête a échoué ({code})."
   }
 }

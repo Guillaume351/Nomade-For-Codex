@@ -10,7 +10,7 @@ const route = useRoute();
 const runtimeConfig = useRuntimeConfig();
 const { t } = useI18n();
 const { postJson } = useApi();
-const { info, success, errorFrom } = useNotify();
+const { info, success, errorFrom, errorMessage } = useNotify();
 const { waitForAuthenticatedSession } = useAuthFlow();
 
 const email = ref(typeof route.query.email === "string" ? route.query.email : "");
@@ -95,6 +95,30 @@ const sendMagicLink = async () => {
     busy.value = false;
   }
 };
+
+const resolveAuthCallbackMessage = (rawError: string): string => {
+  const normalized = rawError.trim().toLowerCase();
+  if (normalized.includes("sign_up_disabled") || normalized.includes("signup_disabled")) {
+    return t("errors.sign_up_disabled");
+  }
+  if (normalized.includes("token") && normalized.includes("invalid")) {
+    return t("errors.invalid_token");
+  }
+  if (normalized.includes("expired")) {
+    return t("errors.magic_link_expired");
+  }
+  return t("errors.magic_link_failed");
+};
+
+onMounted(() => {
+  if (typeof route.query.reason === "string" && route.query.reason === "auth_required") {
+    info("errors.session_required");
+  }
+  if (typeof route.query.error === "string" && route.query.error.trim().length > 0) {
+    const msg = resolveAuthCallbackMessage(route.query.error);
+    errorMessage(msg);
+  }
+});
 </script>
 
 <template>
