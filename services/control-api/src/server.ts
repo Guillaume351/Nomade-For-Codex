@@ -180,7 +180,29 @@ export const createServer = async (): Promise<http.Server> => {
   app.use(helmet());
   app.use(cors());
   app.all("/api/auth/*", async (req, res) => {
-    await betterAuthHandler(req, res);
+    const startedAt = Date.now();
+    try {
+      await betterAuthHandler(req, res);
+    } catch (error) {
+      console.error("[auth-http] handler error", {
+        method: req.method,
+        path: req.path,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      if (!res.headersSent) {
+        res.status(500).json({ error: "auth_handler_error" });
+      }
+    } finally {
+      if (config.authDebugLogs || res.statusCode >= 400) {
+        console.log("[auth-http]", {
+          method: req.method,
+          path: req.path,
+          status: res.statusCode,
+          durationMs: Date.now() - startedAt,
+          ip: req.ip
+        });
+      }
+    }
   });
   app.use(express.urlencoded({ extended: false }));
 

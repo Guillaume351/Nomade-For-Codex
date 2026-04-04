@@ -14,6 +14,7 @@ describe("auth primitives", () => {
         gatewaySecret: "",
         jwtSecret: "test_test_test_test_test_test",
         betterAuthSecret: "test_test_test_test_test_test",
+        authDebugLogs: false,
         paidMaxAgents: 10,
         freeMaxAgents: 1,
         previewBaseDomain: "preview.localhost",

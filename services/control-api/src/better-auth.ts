@@ -13,6 +13,7 @@ export interface BetterAuthRuntime {
 }
 
 interface AuthMail {
+  kind: "verification" | "reset_password" | "magic_link";
   to: string;
   subject: string;
   html: string;
@@ -35,6 +36,24 @@ const buildWebUrl = (baseUrl: string, path: string, params?: Record<string, stri
 
 const isSecureUrl = (value: string): boolean => value.trim().toLowerCase().startsWith("https://");
 
+const maskEmail = (value: string): string => {
+  const trimmed = value.trim();
+  const at = trimmed.indexOf("@");
+  if (at <= 1) {
+    return "***";
+  }
+  const local = trimmed.slice(0, at);
+  const domain = trimmed.slice(at + 1);
+  return `${local[0]}***@${domain}`;
+};
+
+const errorToMessage = (error: unknown): string => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+};
+
 const htmlMailTemplate = (params: { title: string; intro: string; ctaLabel: string; ctaUrl: string }): string => `<!doctype html>
 <html>
   <body style="font-family: ui-sans-serif, system-ui, sans-serif; background:#f6f7fb; margin:0; padding:24px; color:#111827;">
@@ -51,6 +70,7 @@ const createMailSender = (config: Config): ((mail: AuthMail) => Promise<void>) =
   if (config.authEmailMode === "log") {
     return async (mail) => {
       console.log("[auth-mail:log]", {
+        kind: mail.kind,
         to: mail.to,
         subject: mail.subject,
         text: mail.text
@@ -71,14 +91,54 @@ const createMailSender = (config: Config): ((mail: AuthMail) => Promise<void>) =
         : undefined
   });
 
-  return async (mail) => {
-    await transport.sendMail({
-      from: config.smtpFrom,
-      to: mail.to,
-      subject: mail.subject,
-      text: mail.text,
-      html: mail.html
+  void transport
+    .verify()
+    .then(() => {
+      console.log("[auth-mail:smtp] transporter verified", {
+        host: config.smtpHost,
+        port: config.smtpPort,
+        secure: config.smtpSecure,
+        hasAuth: Boolean(config.smtpUser && config.smtpPass)
+      });
+    })
+    .catch((error) => {
+      console.error("[auth-mail:smtp] transporter verify failed", {
+        host: config.smtpHost,
+        port: config.smtpPort,
+        secure: config.smtpSecure,
+        error: errorToMessage(error)
+      });
     });
+
+  return async (mail) => {
+    const startedAt = Date.now();
+    try {
+      const result = await transport.sendMail({
+        from: config.smtpFrom,
+        to: mail.to,
+        subject: mail.subject,
+        text: mail.text,
+        html: mail.html
+      });
+      if (config.authDebugLogs) {
+        console.log("[auth-mail:smtp] sent", {
+          kind: mail.kind,
+          to: maskEmail(mail.to),
+          messageId: result.messageId,
+          durationMs: Date.now() - startedAt
+        });
+      }
+    } catch (error) {
+      console.error("[auth-mail:smtp] send failed", {
+        kind: mail.kind,
+        to: maskEmail(mail.to),
+        host: config.smtpHost,
+        port: config.smtpPort,
+        secure: config.smtpSecure,
+        error: errorToMessage(error)
+      });
+      throw error;
+    }
   };
 };
 
@@ -103,6 +163,19 @@ export const createBetterAuthRuntime = (params: { config: Config; pool: Pool }):
       ...(config.appleBundleId ? { appBundleIdentifier: config.appleBundleId } : {})
     };
   }
+
+  console.log("[auth] better-auth configured", {
+    baseUrl: normalizeBaseUrl(config.appBaseUrl),
+    emailMode: config.authEmailMode,
+    smtpHost: config.smtpHost,
+    smtpPort: config.smtpPort,
+    smtpSecure: config.smtpSecure,
+    debugLogs: config.authDebugLogs,
+    socialProviders: {
+      google: googleEnabled,
+      apple: appleEnabled
+    }
+  });
 
   const authOptions: BetterAuthOptions = {
     appName: "Nomade",
@@ -169,6 +242,7 @@ export const createBetterAuthRuntime = (params: { config: Config; pool: Pool }):
       sendResetPassword: async (data) => {
         const resetUrl = buildWebUrl(config.appBaseUrl, "/web/reset-password", { token: data.token });
         await sendMail({
+          kind: "reset_password",
           to: data.user.email,
           subject: "Reset your Nomade password",
           text: `Reset your Nomade password: ${resetUrl}`,
@@ -187,6 +261,7 @@ export const createBetterAuthRuntime = (params: { config: Config; pool: Pool }):
       sendVerificationEmail: async (data) => {
         const verifyUrl = buildWebUrl(config.appBaseUrl, "/web/verify-email", { token: data.token });
         await sendMail({
+          kind: "verification",
           to: data.user.email,
           subject: "Verify your Nomade email",
           text: `Verify your email address: ${verifyUrl}`,
@@ -205,6 +280,7 @@ export const createBetterAuthRuntime = (params: { config: Config; pool: Pool }):
         disableSignUp: true,
         sendMagicLink: async (data) => {
           await sendMail({
+            kind: "magic_link",
             to: data.email,
             subject: "Your Nomade magic link",
             text: `Sign in to Nomade: ${data.url}`,

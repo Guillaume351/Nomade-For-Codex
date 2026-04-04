@@ -36,6 +36,7 @@ Set these for a real deployment:
 - `BETTER_AUTH_SECRET` (strong, >=24 chars; if empty, falls back to `JWT_SECRET`, but explicit value is recommended)
 - `APP_BASE_URL` (public URL, ex: `https://nomade.example.com`)
 - `AUTH_EMAIL_MODE=smtp`
+- `AUTH_DEBUG_LOGS=false` (set `true` temporarily for detailed auth logs)
 - `AUTH_SMTP_HOST`
 - `AUTH_SMTP_PORT`
 - `AUTH_SMTP_SECURE` (`true` on 465, often `false` on 587/STARTTLS)
@@ -139,3 +140,16 @@ WHERE table_name IN ('auth_sessions', 'auth_accounts', 'auth_verifications');
 - Existing accounts migration strategy is `claim via reset`: users with pre-existing email identities can claim access via forgot-password.
 - `AUTH_EMAIL_MODE=log` is acceptable for local/dev only.
 - Apple login in production requires HTTPS and Apple-side app/service configuration.
+
+## 8) Troubleshooting Logs
+
+Set temporary detailed logging:
+
+```env
+AUTH_DEBUG_LOGS=true
+```
+
+Then check `control-api` logs for:
+- `[auth-http]` for Better Auth route requests/responses (`/api/auth/*`)
+- `[auth-mail:smtp] transporter verified|failed`
+- `[auth-mail:smtp] sent` or `[auth-mail:smtp] send failed`

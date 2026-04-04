@@ -5,6 +5,7 @@ export interface Config {
   databaseUrl: string;
   jwtSecret: string;
   betterAuthSecret: string;
+  authDebugLogs: boolean;
   accessTtlSec: number;
   refreshTtlSec: number;
   deviceCodeTtlSec: number;
@@ -127,6 +128,7 @@ export const loadConfig = (): Config => {
     databaseUrl: process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/nomade",
     jwtSecret,
     betterAuthSecret,
+    authDebugLogs: readBool("AUTH_DEBUG_LOGS", false),
     accessTtlSec: readInt("ACCESS_TOKEN_TTL_SEC", 900),
     refreshTtlSec: readInt("REFRESH_TOKEN_TTL_SEC", 60 * 60 * 24 * 30),
     deviceCodeTtlSec: readInt("DEVICE_CODE_TTL_SEC", 600),
