@@ -32,7 +32,6 @@ export default defineNuxtConfig({
     }
   },
   runtimeConfig: {
-    compatBackendUrl: process.env.COMPAT_BACKEND_URL || "http://127.0.0.1:8080",
     authDebugLogs: (process.env.AUTH_DEBUG_LOGS || "false").toLowerCase() === "true",
     httpAccessLogs: (process.env.HTTP_ACCESS_LOGS || "true").toLowerCase() === "true",
     public: {

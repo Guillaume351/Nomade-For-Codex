@@ -17,8 +17,8 @@ For temporary auth troubleshooting, export:
 - `HTTP_ACCESS_LOGS=true`
 
 SaaS service:
-- Public app runs on `saas` (`:8080`) with embedded compatibility backend on `:8090` (internal).
-- `tunnel-gateway` must target `CONTROL_API_URL=http://saas:8090`.
+- Public app runs on `saas` (`:8080`) and proxies to the embedded backend process.
+- `tunnel-gateway` must target `CONTROL_API_URL=http://saas:8080`.
 
 ## Pair an agent
 1. Login with device code (prints activation URL):

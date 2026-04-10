@@ -10,7 +10,7 @@ This runbook is the reference for deploying Nomade authentication with:
 ## 1) What Is Already Implemented
 
 Server integration:
-- Better Auth handler mounted at `/api/auth/*` in `services/control-api/src/server.ts` (embedded compatibility backend behind `apps/saas` in deployed setup)
+- Better Auth handler mounted at `/api/auth/*` in `services/control-api/src/server.ts` (embedded backend behind `apps/saas` in deployed setup)
 - Better Auth runtime and providers in `services/control-api/src/better-auth.ts`
 - Device flow compatibility kept (`/auth/device/start`, `/auth/device/poll`, `/auth/device/approve`)
 
@@ -92,9 +92,9 @@ psql "$DATABASE_URL" -f deploy/selfhost/sql/2026-04-03-better-auth.sql
 ## 5) Deployment Steps
 
 1. Backup DB.
-2. Deploy the new `saas` image/code (it embeds the compatibility backend).
+2. Deploy the new `saas` image/code (it embeds the backend).
 3. Set env vars from section 2.
-4. Restart `saas` (this triggers automatic schema migration in the embedded compatibility backend).
+4. Restart `saas` (this triggers automatic schema migration in the embedded backend).
 5. Verify health:
 
 ```bash

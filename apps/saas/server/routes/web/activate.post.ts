@@ -1,15 +1,16 @@
 import { defineEventHandler, getRequestHeaders, readBody, sendRedirect } from 'h3';
+import { internalBackendHttpBaseUrl, waitForInternalBackendStart } from '../../utils/internal-backend';
 
 export default defineEventHandler(async (event) => {
-  const compatBaseUrl = String(useRuntimeConfig(event).compatBackendUrl || "http://127.0.0.1:8080");
   const body = (await readBody<Record<string, unknown>>(event).catch(() => ({}))) ?? {};
   const userCode = typeof body.userCode === 'string' ? body.userCode.trim().toUpperCase() : '';
   if (!userCode) {
     return sendRedirect(event, '/activate', 302);
   }
   try {
+    await waitForInternalBackendStart();
     await $fetch('/auth/device/approve', {
-      baseURL: compatBaseUrl,
+      baseURL: internalBackendHttpBaseUrl,
       method: 'POST',
       headers: {
         cookie: getRequestHeaders(event).cookie

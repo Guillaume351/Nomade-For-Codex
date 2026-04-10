@@ -20,8 +20,7 @@ FROM node:24-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8080
-ENV COMPAT_BACKEND_PORT=8090
-ENV COMPAT_BACKEND_URL=http://127.0.0.1:8090
+ENV INTERNAL_BACKEND_PORT=8090
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/services/control-api/node_modules ./services/control-api/node_modules

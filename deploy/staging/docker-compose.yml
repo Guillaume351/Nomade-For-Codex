@@ -26,8 +26,7 @@ services:
     restart: unless-stopped
     environment:
       PORT: 8080
-      COMPAT_BACKEND_PORT: 8090
-      COMPAT_BACKEND_URL: ${COMPAT_BACKEND_URL:-http://127.0.0.1:8090}
+      INTERNAL_BACKEND_PORT: 8090
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-nomade}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
       INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:?set INTERNAL_GATEWAY_SECRET}
@@ -70,7 +69,7 @@ services:
     restart: unless-stopped
     environment:
       PORT: 8081
-      CONTROL_API_URL: ${CONTROL_API_URL:-http://saas:8090}
+      CONTROL_API_URL: ${CONTROL_API_URL:-http://saas:8080}
       INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:?set INTERNAL_GATEWAY_SECRET}
       PREVIEW_BASE_DOMAIN: ${PREVIEW_BASE_DOMAIN:-preview.localhost}
     depends_on:

@@ -40,5 +40,4 @@
 - Telemetry: no command/payload persistence in this v1 scaffold.
 
 ## Current v1 limits
-- Tunnel WebSocket upgrade proxying is not implemented yet in gateway.
 - Session runtime uses shell child processes (interactive but not full PTY emulation).

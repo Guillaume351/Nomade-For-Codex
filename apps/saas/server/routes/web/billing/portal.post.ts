@@ -1,10 +1,11 @@
 import { defineEventHandler, getRequestHeaders, sendRedirect } from 'h3';
+import { internalBackendHttpBaseUrl, waitForInternalBackendStart } from '../../../utils/internal-backend';
 
 export default defineEventHandler(async (event) => {
-  const compatBaseUrl = String(useRuntimeConfig(event).compatBackendUrl || "http://127.0.0.1:8080");
   try {
+    await waitForInternalBackendStart();
     const payload = await $fetch<{ url?: string | null }>('/billing/portal-session', {
-      baseURL: compatBaseUrl,
+      baseURL: internalBackendHttpBaseUrl,
       method: 'POST',
       headers: {
         cookie: getRequestHeaders(event).cookie

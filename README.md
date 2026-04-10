@@ -4,8 +4,8 @@ Monorepo for remote control of `codex-cli` and localhost preview tunneling.
 
 ## Components
 - `apps/saas`: Nuxt fullstack app for `nomade.*` (canonical SaaS UI: login/signup/account/billing/devices/activate) and public API surface.
-- `services/control-api`: compatibility backend logic (embedded by SaaS runtime for API/device/tunnel contracts).
-- `services/tunnel-gateway`: public preview subdomain gateway that proxies through control-api to the agent.
+- `services/control-api`: backend logic embedded by SaaS runtime for API/device/tunnel contracts.
+- `services/tunnel-gateway`: public preview subdomain gateway that proxies through SaaS backend routes to the agent.
 - `agent/nomade-agent`: host daemon + CLI (`login`, `whoami`, `pair`, `run`) for shell session execution and local HTTP tunnel fetches.
 - `apps/mobile`: Flutter scaffold for login + pairing code generation.
 
@@ -37,6 +37,5 @@ Nuxt SaaS cutover checklist: [`docs/saas-nuxt-big-bang-checklist.md`](./docs/saa
 Use [`deploy/selfhost/docker-compose.yml`](./deploy/selfhost/docker-compose.yml).
 
 ## Notes
-- Tunnel WebSocket upgrade proxying is not yet implemented in the gateway.
 - Shell sessions use spawned shell processes (interactive), not a full native PTY implementation yet.
 - Public device login uses Better Auth web session (`/api/auth/*`), no external OIDC server required.

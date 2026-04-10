@@ -5,8 +5,8 @@ This checklist is for the `nomade.d1.guillaumeclaverie.com` cutover where Nuxt b
 ## 1) Current architecture in repo
 
 - Public service: `apps/saas` (Nuxt fullstack).
-- Legacy API compatibility is preserved through an embedded compatibility backend (same contracts as before).
-- `tunnel-gateway` stays a separate service and must call `CONTROL_API_URL=http://saas:8090`.
+- Backend contracts are preserved through an embedded backend in the same SaaS process.
+- `tunnel-gateway` stays a separate service and must call `CONTROL_API_URL=http://saas:8080`.
 - Canonical web routes are:
   - `/login`, `/signup`, `/forgot-password`, `/reset-password`, `/verify-email`
   - `/activate`, `/account`, `/devices`, `/billing`
@@ -46,7 +46,7 @@ Optional Stripe:
 - `STRIPE_PRO_PRICE_ID`
 
 Gateway wiring:
-- `CONTROL_API_URL=http://saas:8090`
+- `CONTROL_API_URL=http://saas:8080`
 
 ## 3) Database migrations
 
@@ -65,7 +65,7 @@ psql "$DATABASE_URL" -f deploy/selfhost/sql/2026-04-03-better-auth.sql
 ## 4) Deployment cutover steps
 
 1. Publish/pull `saas` and `tunnel-gateway` images.
-2. Update compose env (`SAAS_IMAGE`, `CONTROL_API_URL=http://saas:8090`, SMTP vars).
+2. Update compose env (`SAAS_IMAGE`, `CONTROL_API_URL=http://saas:8080`, SMTP vars).
 3. `docker compose up -d`.
 4. Check logs:
 
@@ -109,10 +109,10 @@ Expected logs in `saas` output:
 - `[saas-auth] login_query_prefill` for `/login?email=...` (masked)
 - `[saas-auth-http]` for `/api/auth/*`
 - `[saas-billing-http]` for `/billing/*`
-- `[billing-checkout]` / `[billing-portal]` for Stripe session creation (embedded compatibility backend)
+- `[billing-checkout]` / `[billing-portal]` for Stripe session creation (embedded backend)
 - `[billing-webhook]` with Stripe `eventId` / `eventType`
 - existing auth mail logs for SMTP attempt/success/failure
 
 ## 7) Final cleanup milestone
 
-After full endpoint rewrite inside Nuxt (no compatibility backend dependency), remove `services/control-api` from repo and image build graph.
+After full endpoint rewrite inside Nuxt (no embedded backend dependency), remove `services/control-api` from repo and image build graph.

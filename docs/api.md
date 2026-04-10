@@ -45,7 +45,7 @@
 - `POST /tunnels` body `{ workspaceId, agentId, targetPort, ttlSec? }`
 - `GET /tunnels?workspaceId=...`
 
-## Internal endpoint (gateway -> saas compatibility API)
+## Internal endpoint (gateway -> saas backend API)
 - `POST /internal/tunnels/:slug/proxy`
 - `GET /internal/tunnels/:slug/ws` (WebSocket upgrade)
 - Requires `x-gateway-secret`.
