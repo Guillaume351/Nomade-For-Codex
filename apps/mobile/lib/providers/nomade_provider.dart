@@ -89,6 +89,10 @@ class NomadeProvider with ChangeNotifier {
   String? accessToken;
   String? refreshToken;
   DateTime? accessTokenExpiresAt;
+  String? planCode;
+  int? currentAgents;
+  int? maxAgents;
+  bool? deviceLimitReached;
 
   List<Agent> agents = [];
   List<Workspace> workspaces = [];
@@ -111,11 +115,22 @@ class NomadeProvider with ChangeNotifier {
   String? _pendingScanPayload;
   String? _pendingScanShortCode;
   bool _strictFailureInProgress = false;
+  bool _cancelLoginWait = false;
+  bool _secureScanApprovalInProgress = false;
 
   bool get e2eReady => _e2eRuntime?.isReady == true;
   String? get securityError => _securityError;
   String? get pendingScanPayload => _pendingScanPayload;
   String? get pendingScanShortCode => _pendingScanShortCode;
+  int? get remainingAgentSlots {
+    final current = currentAgents;
+    final max = maxAgents;
+    if (current == null || max == null) {
+      return null;
+    }
+    final remaining = max - current;
+    return remaining < 0 ? 0 : remaining;
+  }
 
   Agent? _selectedAgent;
   Agent? get selectedAgent => _selectedAgent;
@@ -197,6 +212,9 @@ class NomadeProvider with ChangeNotifier {
     final events = debugEventsForConversation(conversationId, limit: 20);
     final agent = selectedAgent;
     final workspace = selectedWorkspace;
+    final rateSnapshot = activeCodexRateLimitSnapshot;
+    final primaryWindow = _asStringKeyedMap(rateSnapshot?['primary']);
+    final secondaryWindow = _asStringKeyedMap(rateSnapshot?['secondary']);
 
     final lines = <String>[
       'generatedAt=${DateTime.now().toIso8601String()}',
@@ -215,6 +233,11 @@ class NomadeProvider with ChangeNotifier {
       'selectedApproval=${selectedApprovalPolicy ?? "-"}',
       'selectedSandbox=${selectedSandboxMode ?? "-"}',
       'selectedEffort=${selectedEffort ?? "-"}',
+      'codexRateLimitId=${rateSnapshot?['limitId']?.toString() ?? "-"}',
+      'codexRatePrimaryUsedPct=${primaryWindow?['usedPercent']?.toString() ?? "-"}',
+      'codexRatePrimaryWindowMins=${primaryWindow?['windowDurationMins']?.toString() ?? "-"}',
+      'codexRateSecondaryUsedPct=${secondaryWindow?['usedPercent']?.toString() ?? "-"}',
+      'codexRateSecondaryWindowMins=${secondaryWindow?['windowDurationMins']?.toString() ?? "-"}',
       'selectedCollaborationMode=${selectedCollaborationModeSlug ?? "-"}',
       'selectedSkills=${_selectedSkillPaths.isEmpty ? "-" : _selectedSkillPaths.join(",")}',
       'runtimeTurnId=${runtime?.turnId ?? "-"}',
@@ -253,6 +276,8 @@ class NomadeProvider with ChangeNotifier {
   List<Map<String, dynamic>> codexModels = [];
   List<Map<String, dynamic>> codexCollaborationModes = [];
   List<Map<String, dynamic>> codexSkills = [];
+  Map<String, dynamic>? codexRateLimits;
+  Map<String, Map<String, dynamic>> codexRateLimitsByLimitId = {};
   List<String> codexApprovalPolicies = [
     'untrusted',
     'on-failure',
@@ -272,6 +297,17 @@ class NomadeProvider with ChangeNotifier {
     'high',
     'xhigh'
   ];
+
+  Map<String, dynamic>? get activeCodexRateLimitSnapshot {
+    final codexBucket = codexRateLimitsByLimitId['codex'];
+    if (codexBucket != null) {
+      return codexBucket;
+    }
+    if (codexRateLimitsByLimitId.isNotEmpty) {
+      return codexRateLimitsByLimitId.values.first;
+    }
+    return codexRateLimits;
+  }
 
   String? _selectedModel;
   String? get selectedModel => _selectedModel;
@@ -377,6 +413,75 @@ class NomadeProvider with ChangeNotifier {
 
   bool get isAuthenticated => accessToken != null;
 
+  int? _asInt(dynamic value) {
+    if (value is num) {
+      return value.toInt();
+    }
+    if (value is String) {
+      return int.tryParse(value.trim());
+    }
+    return null;
+  }
+
+  Map<String, dynamic>? _asStringKeyedMap(dynamic value) {
+    if (value is Map) {
+      return value.cast<String, dynamic>();
+    }
+    return null;
+  }
+
+  Map<String, Map<String, dynamic>> _normalizeRateLimitsByLimitId(
+    dynamic value,
+  ) {
+    final normalized = <String, Map<String, dynamic>>{};
+    if (value is! Map) {
+      return normalized;
+    }
+    final source = value.cast<String, dynamic>();
+    for (final entry in source.entries) {
+      final limitId = entry.key.trim();
+      if (limitId.isEmpty) {
+        continue;
+      }
+      final snapshot = _asStringKeyedMap(entry.value);
+      if (snapshot == null) {
+        continue;
+      }
+      normalized[limitId] = snapshot;
+    }
+    return normalized;
+  }
+
+  bool _isRateLimitedApiError(Object error) {
+    if (error is! ApiException) {
+      return false;
+    }
+    if (error.statusCode == 429) {
+      return true;
+    }
+    return error.errorCode?.trim().toLowerCase() == 'rate_limited';
+  }
+
+  int _resolveRateLimitWaitSec(ApiException error,
+      {int fallbackSec = 2, int maxSec = 20}) {
+    final retry = error.retryAfterSec ?? fallbackSec;
+    if (retry < 1) {
+      return 1;
+    }
+    if (retry > maxSec) {
+      return maxSec;
+    }
+    return retry;
+  }
+
+  Future<void> _waitOnRateLimit(ApiException error,
+      {required String context}) async {
+    final waitSec = _resolveRateLimitWaitSec(error);
+    status = '$context rate limited. Retrying in ${waitSec}s...';
+    notifyListeners();
+    await Future.delayed(Duration(seconds: waitSec));
+  }
+
   Future<String?> _readStorage(
     String key, {
     bool strictDeviceOnly = false,
@@ -464,9 +569,8 @@ class NomadeProvider with ChangeNotifier {
     String? scanPayload,
     String? scanShortCode,
   }) async {
-    _pendingScanPayload = scanPayload?.trim().isEmpty == true
-        ? null
-        : scanPayload?.trim();
+    _pendingScanPayload =
+        scanPayload?.trim().isEmpty == true ? null : scanPayload?.trim();
     _pendingScanShortCode = scanShortCode?.trim().isEmpty == true
         ? null
         : scanShortCode?.trim().toUpperCase();
@@ -535,8 +639,7 @@ class NomadeProvider with ChangeNotifier {
           await _readStorage(_selectedApprovalPolicyKey) ??
               _selectedApprovalPolicy;
       _selectedSandboxMode =
-          await _readStorage(_selectedSandboxModeKey) ??
-              _selectedSandboxMode;
+          await _readStorage(_selectedSandboxModeKey) ?? _selectedSandboxMode;
       _selectedEffort =
           await _readStorage(_selectedEffortKey) ?? _selectedEffort;
       _selectedCollaborationModeSlug =
@@ -612,19 +715,19 @@ class NomadeProvider with ChangeNotifier {
         _writeStorage(_accessTokenKey, value: accessToken),
         _writeStorage(_refreshTokenKey, value: refreshToken),
         if (accessTokenExpiresAt != null)
-          _writeStorage(
-              _accessTokenExpiryKey,
+          _writeStorage(_accessTokenExpiryKey,
               value: accessTokenExpiresAt!.toIso8601String()),
         _writeStorage(_selectedAgentKey, value: _selectedAgent?.id),
         _writeStorage(_selectedWorkspaceKey, value: _selectedWorkspace?.id),
         _writeStorage(_selectedModelKey, value: _selectedModel),
-        _writeStorage(_selectedApprovalPolicyKey, value: _selectedApprovalPolicy),
+        _writeStorage(_selectedApprovalPolicyKey,
+            value: _selectedApprovalPolicy),
         _writeStorage(_selectedSandboxModeKey, value: _selectedSandboxMode),
         _writeStorage(_selectedEffortKey, value: _selectedEffort),
-        _writeStorage(
-            _selectedCollaborationModeKey,
+        _writeStorage(_selectedCollaborationModeKey,
             value: _selectedCollaborationModeSlug),
-        _writeStorage(_selectedSkillsKey, value: jsonEncode(_selectedSkillPaths)),
+        _writeStorage(_selectedSkillsKey,
+            value: jsonEncode(_selectedSkillPaths)),
         _persistE2ERuntime(),
         _persistPendingScan(),
         _setSecurityError(_securityError),
@@ -645,6 +748,10 @@ class NomadeProvider with ChangeNotifier {
     accessToken = null;
     refreshToken = null;
     accessTokenExpiresAt = null;
+    planCode = null;
+    currentAgents = null;
+    maxAgents = null;
+    deviceLimitReached = null;
     agents = [];
     workspaces = [];
     conversations = [];
@@ -667,6 +774,7 @@ class NomadeProvider with ChangeNotifier {
     _pendingScanPayload = null;
     _pendingScanShortCode = null;
     _securityError = null;
+    _secureScanApprovalInProgress = false;
     activeTurnId = null;
     status = 'Logged out';
 
@@ -735,11 +843,51 @@ class NomadeProvider with ChangeNotifier {
     return true;
   }
 
+  Future<void> loadEntitlements({bool notifyListenersNow = true}) async {
+    if (accessToken == null) {
+      return;
+    }
+    try {
+      final payload = await api.getEntitlements(accessToken!);
+      planCode = payload['planCode']?.toString() ??
+          payload['plan_code']?.toString() ??
+          planCode;
+      currentAgents =
+          _asInt(payload['currentAgents'] ?? payload['current_agents']) ??
+              currentAgents;
+      maxAgents =
+          _asInt(payload['maxAgents'] ?? payload['max_agents']) ?? maxAgents;
+      final rawLimit = payload['limitReached'] ?? payload['limit_reached'];
+      if (rawLimit is bool) {
+        deviceLimitReached = rawLimit;
+      } else if (rawLimit is num) {
+        deviceLimitReached = rawLimit != 0;
+      } else if (rawLimit is String) {
+        final normalized = rawLimit.trim().toLowerCase();
+        if (normalized == 'true' || normalized == '1') {
+          deviceLimitReached = true;
+        } else if (normalized == 'false' || normalized == '0') {
+          deviceLimitReached = false;
+        }
+      } else if (currentAgents != null && maxAgents != null) {
+        deviceLimitReached = currentAgents! >= maxAgents!;
+      }
+      if (notifyListenersNow) {
+        notifyListeners();
+      }
+    } catch (error) {
+      if (await _logoutIfUnauthorized(error)) {
+        return;
+      }
+    }
+  }
+
   Future<void> bootstrapData(
       {String? storedAgentId, String? storedWorkspaceId}) async {
     loadingData = true;
     notifyListeners();
     try {
+      await loadEntitlements(notifyListenersNow: false);
       final loadedAgents = await api.listAgents(accessToken!);
       agents = loadedAgents.map((e) => Agent.fromJson(e)).toList();
 
@@ -864,8 +1012,18 @@ class NomadeProvider with ChangeNotifier {
       unawaited(_persistE2ERuntime());
       notifyListeners();
     } on E2ERuntimeException catch (error) {
-      unawaited(_triggerStrictSecurityFailure('e2e_turn_hydration_failed',
-          cause: error));
+      debugPrint(
+        '[mobile-auth] turn hydration failed for $conversationId with code=${error.code}',
+      );
+      turns = [];
+      if (error.code == 'e2e_runtime_unavailable') {
+        status =
+            'Login complete. Secure scan is required to read encrypted history.';
+      } else {
+        status =
+            'Encrypted history could not be decrypted (${error.code}). Start a new conversation or complete secure scan.';
+      }
+      notifyListeners();
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return;
@@ -900,6 +1058,9 @@ class NomadeProvider with ChangeNotifier {
           .whereType<Map>()
           .map((entry) => entry.cast<String, dynamic>())
           .toList();
+      codexRateLimits = _asStringKeyedMap(payload['rateLimits']);
+      codexRateLimitsByLimitId =
+          _normalizeRateLimitsByLimitId(payload['rateLimitsByLimitId']);
 
       final approvalPolicies = ((payload['approvalPolicies'] as List?) ?? [])
           .whereType<String>()
@@ -1230,7 +1391,9 @@ class NomadeProvider with ChangeNotifier {
     if (socket == null) return;
     final runtime = _e2eRuntime;
     if (runtime == null || !runtime.isReady) {
-      unawaited(_triggerStrictSecurityFailure('e2e_runtime_unavailable'));
+      status =
+          'Secure scan required before sending terminal input. Approve secure scan first.';
+      notifyListeners();
       return;
     }
     try {
@@ -1245,6 +1408,19 @@ class NomadeProvider with ChangeNotifier {
         'data': '',
         'e2eEnvelope': envelope,
       }));
+    } on E2ERuntimeException catch (error) {
+      if (error.code == 'e2e_runtime_unavailable') {
+        status =
+            'Secure scan required before sending terminal input. Approve secure scan first.';
+        notifyListeners();
+        return;
+      }
+      unawaited(
+        _triggerStrictSecurityFailure(
+          'e2e_session_input_encrypt_failed',
+          cause: error,
+        ),
+      );
     } catch (error) {
       unawaited(
         _triggerStrictSecurityFailure(
@@ -1267,7 +1443,9 @@ class NomadeProvider with ChangeNotifier {
     }
     final runtime = _e2eRuntime;
     if (runtime == null || !runtime.isReady) {
-      unawaited(_triggerStrictSecurityFailure('e2e_runtime_unavailable'));
+      status =
+          'Secure scan required before approving server actions. Approve secure scan first.';
+      notifyListeners();
       return;
     }
     try {
@@ -1286,6 +1464,20 @@ class NomadeProvider with ChangeNotifier {
         'requestId': requestId,
         'e2eEnvelope': envelope,
       }));
+    } on E2ERuntimeException catch (decryptError) {
+      if (decryptError.code == 'e2e_runtime_unavailable') {
+        status =
+            'Secure scan required before approving server actions. Approve secure scan first.';
+        notifyListeners();
+        return;
+      }
+      unawaited(
+        _triggerStrictSecurityFailure(
+          'e2e_server_response_encrypt_failed',
+          cause: decryptError,
+        ),
+      );
+      return;
     } catch (decryptError) {
       unawaited(
         _triggerStrictSecurityFailure(
@@ -1301,7 +1493,7 @@ class NomadeProvider with ChangeNotifier {
       itemId: 'server-request-$requestId',
       itemType: 'serverRequest',
     );
-    final status = error != null && error.trim().isNotEmpty
+    final requestStatus = error != null && error.trim().isNotEmpty
         ? 'failed'
         : result is String &&
                 (result == 'decline' ||
@@ -1310,7 +1502,7 @@ class NomadeProvider with ChangeNotifier {
             ? 'declined'
             : 'completed';
     item.applyCompleted(itemType: 'serverRequest', payload: {
-      'status': status,
+      'status': requestStatus,
       if (result != null) 'result': result,
       if (error != null && error.trim().isNotEmpty) 'error': error.trim(),
     });
@@ -1318,7 +1510,7 @@ class NomadeProvider with ChangeNotifier {
       conversationId: conversationId,
       type: 'server.response',
       message:
-          'turn=$turnId request=$requestId status=$status${error != null && error.trim().isNotEmpty ? ' error=$error' : ''}',
+          'turn=$turnId request=$requestId status=$requestStatus${error != null && error.trim().isNotEmpty ? ' error=$error' : ''}',
     );
     notifyListeners();
   }
@@ -1590,7 +1782,8 @@ class NomadeProvider with ChangeNotifier {
       event['diff'] = payload['diff']?.toString() ?? '';
       return event;
     }
-    if (type == 'conversation.item.started' || type == 'conversation.item.completed') {
+    if (type == 'conversation.item.started' ||
+        type == 'conversation.item.completed') {
       final item = payload['item'];
       if (item is! Map) {
         throw const E2ERuntimeException('e2e_event_item_missing');
@@ -1768,6 +1961,12 @@ class NomadeProvider with ChangeNotifier {
       event = jsonDecode(raw as String) as Map<String, dynamic>;
       event = _decodeSocketEventStrict(event);
     } on E2ERuntimeException catch (error) {
+      if (error.code == 'e2e_runtime_unavailable') {
+        status =
+            'Realtime encrypted updates are paused. Complete secure scan to continue.';
+        notifyListeners();
+        return;
+      }
       unawaited(
         _triggerStrictSecurityFailure('e2e_socket_event_rejected',
             cause: error),
@@ -2082,6 +2281,20 @@ class NomadeProvider with ChangeNotifier {
         );
       }
       return;
+    } else if (type == 'account.rate_limits.updated') {
+      final updated = _asStringKeyedMap(event['rateLimits']);
+      if (updated != null) {
+        codexRateLimits = updated;
+        final limitId = updated['limitId']?.toString().trim();
+        if (limitId != null && limitId.isNotEmpty) {
+          final next =
+              Map<String, Map<String, dynamic>>.from(codexRateLimitsByLimitId);
+          next[limitId] = updated;
+          codexRateLimitsByLimitId = next;
+        }
+      }
+      notifyListeners();
+      return;
     } else if (type == 'conversation.thread.token_usage.updated') {
       final conversationId = event['conversationId']?.toString() ?? '';
       if (conversationId.isNotEmpty) {
@@ -2359,7 +2572,9 @@ class NomadeProvider with ChangeNotifier {
       final requestedEffort = selectedEffort;
       final e2eRuntime = _e2eRuntime;
       if (e2eRuntime == null || !e2eRuntime.isReady) {
-        await _triggerStrictSecurityFailure('e2e_runtime_unavailable');
+        status =
+            'Secure scan required before sending messages. Tap the shield icon to approve secure scan.';
+        notifyListeners();
         return;
       }
 
@@ -2412,6 +2627,12 @@ class NomadeProvider with ChangeNotifier {
           }),
         );
       } on E2ERuntimeException catch (error) {
+        if (error.code == 'e2e_runtime_unavailable') {
+          status =
+              'Secure scan required before sending messages. Tap the shield icon to approve secure scan.';
+          notifyListeners();
+          return;
+        }
         await _triggerStrictSecurityFailure('e2e_prompt_encrypt_failed',
             cause: error);
         return;
@@ -2577,8 +2798,8 @@ class NomadeProvider with ChangeNotifier {
       return null;
     }
     try {
-      final claims =
-          jsonDecode(utf8.decode(fromBase64Url(parts[1]))) as Map<String, dynamic>;
+      final claims = jsonDecode(utf8.decode(fromBase64Url(parts[1])))
+          as Map<String, dynamic>;
       final deviceCode = claims['deviceCode']?.toString() ?? '';
       if (deviceCode.isEmpty) {
         return null;
@@ -2591,7 +2812,8 @@ class NomadeProvider with ChangeNotifier {
 
   String? _scanScopeFromBundle(Map<String, dynamic> bundle) {
     try {
-      final decodedAad = utf8.decode(fromBase64Url(bundle['aad']?.toString() ?? ''));
+      final decodedAad =
+          utf8.decode(fromBase64Url(bundle['aad']?.toString() ?? ''));
       final aad = jsonDecode(decodedAad) as Map<String, dynamic>;
       final scope = aad['scope']?.toString() ?? '';
       return scope.isEmpty ? null : scope;
@@ -2654,6 +2876,7 @@ class NomadeProvider with ChangeNotifier {
   }
 
   Future<Map<String, String>> startLogin() async {
+    _cancelLoginWait = false;
     final started = await api.startDeviceCode();
     deviceCode = started['deviceCode'] as String;
     userCode = started['userCode'] as String;
@@ -2667,12 +2890,21 @@ class NomadeProvider with ChangeNotifier {
         ? verificationUriComplete
         : '$fallbackVerificationUri?user_code=${Uri.encodeComponent(userCode!)}';
     status = 'Awaiting browser authorization...';
+    debugPrint('[mobile-auth] device code started');
     notifyListeners();
     return {
       'userCode': userCode!,
       'deviceCode': deviceCode!,
       'verificationUriComplete': launchUrl,
     };
+  }
+
+  Future<void> cancelLoginAttempt() async {
+    _cancelLoginWait = true;
+    deviceCode = null;
+    userCode = null;
+    status = 'Login canceled';
+    notifyListeners();
   }
 
   Future<void> approveSecureScan({
@@ -2682,6 +2914,11 @@ class NomadeProvider with ChangeNotifier {
     if (accessToken == null) {
       throw Exception('auth_required');
     }
+    if (_secureScanApprovalInProgress) {
+      status = 'Secure scan already in progress...';
+      notifyListeners();
+      return;
+    }
     final normalizedPayload = scanPayload?.trim();
     final normalizedShortCode = scanShortCode?.trim().toUpperCase();
     if ((normalizedPayload == null || normalizedPayload.isEmpty) &&
@@ -2689,134 +2926,201 @@ class NomadeProvider with ChangeNotifier {
       throw Exception('scan_payload_or_short_code_required');
     }
 
-    await _setPendingScan(
-      scanPayload: normalizedPayload,
-      scanShortCode: normalizedShortCode,
-    );
-
-    final identity = await _ensureScanDeviceIdentity();
-    final exchangeKeyPair =
-        await MobileE2ERuntime.generateOneTimeScanExchangeKeyPair();
-    await api.approveScanSecure(
-      accessToken: accessToken!,
-      scanPayload: normalizedPayload,
-      scanShortCode: normalizedShortCode,
-      mobileDevice: {
-        'deviceId': identity.deviceId,
-        'name': 'Nomade Mobile',
-        'platform': defaultTargetPlatform.name,
-        'encPublicKey': identity.encPublicKey,
-        'signPublicKey': identity.signPublicKey,
-        'exchangePublicKey': exchangeKeyPair.publicKey,
-      },
-    );
-
-    final startedAt = DateTime.now();
-    while (DateTime.now().difference(startedAt).inSeconds < 120) {
-      final state = await api.scanMobileAck(
-        accessToken: accessToken!,
+    _secureScanApprovalInProgress = true;
+    try {
+      await _setPendingScan(
         scanPayload: normalizedPayload,
         scanShortCode: normalizedShortCode,
       );
-      final statusValue = state['status']?.toString() ?? 'pending';
-      if (statusValue == 'ready') {
-        final hostBundleRaw = state['hostBundle'];
-        if (hostBundleRaw is! Map) {
-          throw Exception('scan_host_bundle_missing');
-        }
-        final hostBundle = hostBundleRaw.cast<String, dynamic>();
-        final hostExchangePublicKey =
-            state['hostExchangePublicKey']?.toString() ?? '';
-        if (hostExchangePublicKey.isEmpty) {
-          throw Exception('scan_host_exchange_key_missing');
-        }
-        final scanScope = _scanScopeFromPayload(normalizedPayload) ??
-            _scanScopeFromBundle(hostBundle);
-        if (scanScope == null || scanScope.isEmpty) {
-          throw Exception('scan_scope_missing');
-        }
-        ScanBootstrapState bootstrap;
+
+      final identity = await _ensureScanDeviceIdentity();
+      final exchangeKeyPair =
+          await MobileE2ERuntime.generateOneTimeScanExchangeKeyPair();
+      final startedAt = DateTime.now();
+
+      while (true) {
         try {
-          bootstrap = await MobileE2ERuntime.decryptScanBootstrap(
-            hostBundle: hostBundle,
-            scanScope: scanScope,
-            mobileExchangePrivateKey: exchangeKeyPair.privateKey,
-            hostExchangePublicKey: hostExchangePublicKey,
-          );
-          final snapshot = MobileE2ESnapshot(
-            epoch: bootstrap.epoch,
-            rootKey: bootstrap.rootKey,
-            device: identity,
-            peers: {
-              bootstrap.hostDeviceId: MobilePeerDevice(
-                deviceId: bootstrap.hostDeviceId,
-                encPublicKey: bootstrap.hostEncPublicKey,
-                signPublicKey: bootstrap.hostSignPublicKey,
-                addedAt: DateTime.now().toUtc().toIso8601String(),
-              ),
+          await api.approveScanSecure(
+            accessToken: accessToken!,
+            scanPayload: normalizedPayload,
+            scanShortCode: normalizedShortCode,
+            mobileDevice: {
+              'deviceId': identity.deviceId,
+              'name': 'Nomade Mobile',
+              'platform': defaultTargetPlatform.name,
+              'encPublicKey': identity.encPublicKey,
+              'signPublicKey': identity.signPublicKey,
+              'exchangePublicKey': exchangeKeyPair.publicKey,
             },
-            seqByScope: const {},
           );
-          _e2eRuntime = await MobileE2ERuntime.fromSnapshot(snapshot);
-          if (_e2eRuntime == null || !_e2eRuntime!.isReady) {
-            throw const E2ERuntimeException('e2e_runtime_init_failed');
+          break;
+        } on ApiException catch (error) {
+          if (!_isRateLimitedApiError(error)) {
+            rethrow;
           }
-        } on E2ERuntimeException catch (error) {
-          await _triggerStrictSecurityFailure('e2e_scan_bootstrap_failed',
-              cause: error);
-          rethrow;
-        } catch (error) {
-          await _triggerStrictSecurityFailure('e2e_scan_bootstrap_failed',
-              cause: error);
-          rethrow;
+          if (DateTime.now().difference(startedAt).inSeconds >= 120) {
+            throw Exception('scan_rate_limited_timeout');
+          }
+          await _waitOnRateLimit(error, context: 'Secure scan');
         }
-        await _setSecurityError(null);
-        await _persistE2ERuntime();
-        await api.scanMobileAck(
-          accessToken: accessToken!,
-          scanPayload: normalizedPayload,
-          scanShortCode: normalizedShortCode,
-          ack: true,
-        );
-        await clearPendingScan();
-        status = 'Secure scan approved';
-        notifyListeners();
-        return;
       }
-      if (statusValue == 'pending_key_exchange' || statusValue == 'pending') {
-        await Future.delayed(const Duration(seconds: 1));
-        continue;
+
+      while (DateTime.now().difference(startedAt).inSeconds < 120) {
+        Map<String, dynamic> state;
+        try {
+          state = await api.scanMobileAck(
+            accessToken: accessToken!,
+            scanPayload: normalizedPayload,
+            scanShortCode: normalizedShortCode,
+          );
+        } on ApiException catch (error) {
+          if (!_isRateLimitedApiError(error)) {
+            rethrow;
+          }
+          await _waitOnRateLimit(error, context: 'Secure scan');
+          continue;
+        }
+
+        final statusValue = state['status']?.toString() ?? 'pending';
+        if (statusValue == 'ready') {
+          final hostBundleRaw = state['hostBundle'];
+          if (hostBundleRaw is! Map) {
+            throw Exception('scan_host_bundle_missing');
+          }
+          final hostBundle = hostBundleRaw.cast<String, dynamic>();
+          final hostExchangePublicKey =
+              state['hostExchangePublicKey']?.toString() ?? '';
+          if (hostExchangePublicKey.isEmpty) {
+            throw Exception('scan_host_exchange_key_missing');
+          }
+          final scanScope = _scanScopeFromPayload(normalizedPayload) ??
+              _scanScopeFromBundle(hostBundle);
+          if (scanScope == null || scanScope.isEmpty) {
+            throw Exception('scan_scope_missing');
+          }
+          ScanBootstrapState bootstrap;
+          try {
+            bootstrap = await MobileE2ERuntime.decryptScanBootstrap(
+              hostBundle: hostBundle,
+              scanScope: scanScope,
+              mobileExchangePrivateKey: exchangeKeyPair.privateKey,
+              hostExchangePublicKey: hostExchangePublicKey,
+            );
+            final snapshot = MobileE2ESnapshot(
+              epoch: bootstrap.epoch,
+              rootKey: bootstrap.rootKey,
+              device: identity,
+              peers: {
+                bootstrap.hostDeviceId: MobilePeerDevice(
+                  deviceId: bootstrap.hostDeviceId,
+                  encPublicKey: bootstrap.hostEncPublicKey,
+                  signPublicKey: bootstrap.hostSignPublicKey,
+                  addedAt: DateTime.now().toUtc().toIso8601String(),
+                ),
+              },
+              seqByScope: const {},
+            );
+            _e2eRuntime = await MobileE2ERuntime.fromSnapshot(snapshot);
+            if (_e2eRuntime == null || !_e2eRuntime!.isReady) {
+              throw const E2ERuntimeException('e2e_runtime_init_failed');
+            }
+          } on E2ERuntimeException catch (error) {
+            await _triggerStrictSecurityFailure('e2e_scan_bootstrap_failed',
+                cause: error);
+            rethrow;
+          } catch (error) {
+            await _triggerStrictSecurityFailure('e2e_scan_bootstrap_failed',
+                cause: error);
+            rethrow;
+          }
+          await _setSecurityError(null);
+          await _persistE2ERuntime();
+
+          while (true) {
+            try {
+              await api.scanMobileAck(
+                accessToken: accessToken!,
+                scanPayload: normalizedPayload,
+                scanShortCode: normalizedShortCode,
+                ack: true,
+              );
+              break;
+            } on ApiException catch (error) {
+              if (!_isRateLimitedApiError(error)) {
+                rethrow;
+              }
+              if (DateTime.now().difference(startedAt).inSeconds >= 120) {
+                throw Exception('scan_rate_limited_timeout');
+              }
+              await _waitOnRateLimit(error, context: 'Secure scan');
+            }
+          }
+
+          await clearPendingScan();
+          status = 'Secure scan approved';
+          notifyListeners();
+          return;
+        }
+        if (statusValue == 'pending_key_exchange' || statusValue == 'pending') {
+          await Future.delayed(const Duration(seconds: 2));
+          continue;
+        }
+        throw Exception('scan_state_unexpected:$statusValue');
       }
-      throw Exception('scan_state_unexpected:$statusValue');
+      throw Exception('scan_key_exchange_timeout');
+    } finally {
+      _secureScanApprovalInProgress = false;
     }
-    throw Exception('scan_key_exchange_timeout');
   }
 
   Future<void> waitForBrowserApproval() async {
     if (deviceCode == null) {
       throw Exception('device_code_missing');
     }
+    _cancelLoginWait = false;
+    String? lastPollStatus;
     while (true) {
+      if (_cancelLoginWait) {
+        break;
+      }
       final polled = await api.pollDeviceCode(deviceCode!);
       final pollStatus = polled['status'] as String? ?? 'pending';
+      if (pollStatus != lastPollStatus) {
+        debugPrint('[mobile-auth] device poll status=$pollStatus');
+        lastPollStatus = pollStatus;
+      }
       if (pollStatus == 'ok') {
         _setTokensFromPayload(polled);
         await persistSession();
         status = 'Authenticated';
         try {
           await approvePendingSecureScanIfAny();
-        } catch (_) {
+        } catch (error) {
+          debugPrint(
+            '[mobile-auth] pending secure scan resume failed after auth: $error',
+          );
           // Continue account login even if secure scan resume fails.
         }
         await connectSocket();
         await bootstrapData();
+        debugPrint('[mobile-auth] browser authorization completed');
         break;
       } else if (pollStatus == 'expired') {
         status = 'Expired';
         break;
+      } else if (pollStatus == 'pending_scan') {
+        status = 'Waiting for secure scan approval...';
+      } else if (pollStatus == 'pending_key_exchange') {
+        status = 'Waiting for secure key exchange...';
+      } else {
+        status = 'Waiting for browser authorization...';
       }
+      notifyListeners();
       await Future.delayed(const Duration(seconds: 2));
     }
+    deviceCode = null;
+    userCode = null;
+    _cancelLoginWait = false;
     notifyListeners();
   }
 

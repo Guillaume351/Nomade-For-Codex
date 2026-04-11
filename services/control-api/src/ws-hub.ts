@@ -101,6 +101,8 @@ export interface CodexRuntimeOptions {
   reasoningEfforts: string[];
   collaborationModes: Array<Record<string, unknown>>;
   skills: Array<{ name: string; path: string }>;
+  rateLimits?: Record<string, unknown>;
+  rateLimitsByLimitId?: Record<string, Record<string, unknown>> | null;
   defaults: {
     model?: string;
     approvalPolicy?: string;
@@ -879,6 +881,26 @@ export class WsHub {
         .filter((entry) => entry.path.length > 0);
 
       const defaultsRaw = (options.defaults as Record<string, unknown> | undefined) ?? {};
+      const rateLimitsRaw =
+        options.rateLimits && typeof options.rateLimits === "object"
+          ? (options.rateLimits as Record<string, unknown>)
+          : undefined;
+      const rateLimitsByLimitIdRaw = options.rateLimitsByLimitId;
+      let rateLimitsByLimitId: Record<string, Record<string, unknown>> | null =
+        null;
+      if (rateLimitsByLimitIdRaw && typeof rateLimitsByLimitIdRaw === "object") {
+        const normalized: Record<string, Record<string, unknown>> = {};
+        for (const [limitId, value] of Object.entries(
+          rateLimitsByLimitIdRaw as Record<string, unknown>
+        )) {
+          if (!value || typeof value !== "object") {
+            continue;
+          }
+          normalized[limitId] = value as Record<string, unknown>;
+        }
+        rateLimitsByLimitId =
+          Object.keys(normalized).length > 0 ? normalized : null;
+      }
       pending.resolve({
         models,
         approvalPolicies: toStringList(options.approvalPolicies),
@@ -886,6 +908,8 @@ export class WsHub {
         reasoningEfforts: toStringList(options.reasoningEfforts),
         collaborationModes,
         skills,
+        rateLimits: rateLimitsRaw,
+        rateLimitsByLimitId,
         defaults: {
           model: typeof defaultsRaw.model === "string" ? defaultsRaw.model : undefined,
           approvalPolicy: typeof defaultsRaw.approvalPolicy === "string" ? defaultsRaw.approvalPolicy : undefined,
@@ -903,6 +927,11 @@ export class WsHub {
 
     if (type === "agent.heartbeat") {
       void this.repositories.touchAgentLastSeen(agentId);
+      return;
+    }
+
+    if (type === "account.rate_limits.updated") {
+      this.broadcastToUser(defaultUserId, msg);
       return;
     }
 

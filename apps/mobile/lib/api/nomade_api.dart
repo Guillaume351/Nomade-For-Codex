@@ -9,11 +9,13 @@ class ApiException implements Exception {
     this.message, {
     this.statusCode,
     this.errorCode,
+    this.retryAfterSec,
   });
 
   final String message;
   final int? statusCode;
   final String? errorCode;
+  final int? retryAfterSec;
 
   @override
   String toString() => message;
@@ -56,6 +58,15 @@ class NomadeApi {
       payload = decoded.cast<String, dynamic>();
     }
 
+    int? retryAfterSec;
+    final retryAfterPayload = payload['retryAfterSec'];
+    if (retryAfterPayload is num) {
+      retryAfterSec = retryAfterPayload.toInt();
+    } else if (retryAfterPayload is String) {
+      retryAfterSec = int.tryParse(retryAfterPayload.trim());
+    }
+    retryAfterSec ??= int.tryParse(response.headers['retry-after'] ?? '');
+
     if (response.statusCode < 200 || response.statusCode >= 300) {
       final rawError = payload['error'];
       final reason = rawError is String && rawError.isNotEmpty
@@ -65,6 +76,7 @@ class NomadeApi {
         'API ${response.statusCode}: $reason',
         statusCode: response.statusCode,
         errorCode: rawError is String ? rawError : null,
+        retryAfterSec: retryAfterSec,
       );
     }
 
@@ -232,6 +244,16 @@ class NomadeApi {
         .cast<Map>()
         .map((item) => item.cast<String, dynamic>())
         .toList();
+  }
+
+  Future<Map<String, dynamic>> getEntitlements(String accessToken) async {
+    final response = await _send(
+      () => http.get(
+        _uri('/me/entitlements'),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    return _decodeObject(response);
   }
 
   Future<List<Map<String, dynamic>>> listWorkspaces(

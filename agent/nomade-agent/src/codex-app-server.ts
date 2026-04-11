@@ -74,6 +74,11 @@ interface ConfigReadResult {
   config?: unknown;
 }
 
+interface AccountRateLimitsReadResult {
+  rateLimits?: unknown;
+  rateLimitsByLimitId?: unknown;
+}
+
 export interface AppServerNotification {
   method: string;
   params: Record<string, unknown>;
@@ -412,6 +417,42 @@ export class CodexAppServerClient {
     return response.config as Record<string, unknown>;
   }
 
+  async accountRateLimitsRead(): Promise<{
+    rateLimits: Record<string, unknown>;
+    rateLimitsByLimitId: Record<string, Record<string, unknown>> | null;
+  }> {
+    const response = (await this.request(
+      "account/rateLimits/read",
+      null
+    )) as AccountRateLimitsReadResult;
+    const rawRateLimits =
+      response?.rateLimits && typeof response.rateLimits === "object"
+        ? (response.rateLimits as Record<string, unknown>)
+        : {};
+
+    const rawByLimitId = response?.rateLimitsByLimitId;
+    let rateLimitsByLimitId: Record<string, Record<string, unknown>> | null =
+      null;
+    if (rawByLimitId && typeof rawByLimitId === "object") {
+      const normalized: Record<string, Record<string, unknown>> = {};
+      for (const [key, value] of Object.entries(
+        rawByLimitId as Record<string, unknown>
+      )) {
+        if (!value || typeof value !== "object") {
+          continue;
+        }
+        normalized[key] = value as Record<string, unknown>;
+      }
+      rateLimitsByLimitId =
+        Object.keys(normalized).length > 0 ? normalized : null;
+    }
+
+    return {
+      rateLimits: rawRateLimits,
+      rateLimitsByLimitId
+    };
+  }
+
   close(): void {
     if (!this.child) {
       return;
@@ -524,7 +565,7 @@ export class CodexAppServerClient {
     pending.reject(error);
   }
 
-  private async request(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private async request(method: string, params: unknown): Promise<unknown> {
     if (!this.child) {
       throw new Error("codex_app_server_not_started");
     }

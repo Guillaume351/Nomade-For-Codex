@@ -101,8 +101,15 @@ class _HomeScreenState extends State<HomeScreen> {
         const SnackBar(content: Text('Secure scan approved')),
       );
     } catch (error) {
+      final normalizedStatus = provider.status.trim();
       messenger.showSnackBar(
-        SnackBar(content: Text('Secure scan failed: $error')),
+        SnackBar(
+          content: Text(
+            normalizedStatus.isEmpty
+                ? 'Secure scan failed: $error'
+                : normalizedStatus,
+          ),
+        ),
       );
     }
   }
@@ -263,6 +270,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 padding: const EdgeInsets.only(right: 8),
                 child: _buildRunningBadge(theme, scheme),
               ),
+            if (_hasCodexRateLimit(provider))
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: _buildCodexQuotaBadge(provider, theme, scheme),
+              ),
             _buildTopAction(
               icon: Icons.menu_book_outlined,
               tooltip: 'Guide E2E',
@@ -364,6 +376,130 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  bool _hasCodexRateLimit(NomadeProvider provider) {
+    return provider.activeCodexRateLimitSnapshot != null;
+  }
+
+  int? _toInt(dynamic value) {
+    if (value is num) {
+      return value.toInt();
+    }
+    if (value is String) {
+      return int.tryParse(value.trim());
+    }
+    return null;
+  }
+
+  Map<String, dynamic>? _extractRateWindow(
+    Map<String, dynamic>? snapshot,
+    String key,
+  ) {
+    if (snapshot == null) {
+      return null;
+    }
+    final value = snapshot[key];
+    if (value is Map) {
+      return value.cast<String, dynamic>();
+    }
+    return null;
+  }
+
+  String _formatWindowLabel(Map<String, dynamic> window, int fallbackIndex) {
+    final durationMins =
+        _toInt(window['windowDurationMins'] ?? window['window_minutes']);
+    if (durationMins == null || durationMins <= 0) {
+      return fallbackIndex == 0 ? 'fenêtre 1' : 'fenêtre 2';
+    }
+    if (durationMins % (24 * 60) == 0) {
+      final days = durationMins ~/ (24 * 60);
+      return '${days}j';
+    }
+    if (durationMins % 60 == 0) {
+      final hours = durationMins ~/ 60;
+      return '${hours}h';
+    }
+    return '${durationMins}m';
+  }
+
+  String _formatResetShort(Map<String, dynamic> window) {
+    final resetsAt =
+        _toInt(window['resetsAt'] ?? window['resets_at'] ?? window['resetAt']);
+    if (resetsAt == null || resetsAt <= 0) {
+      return '';
+    }
+    final dateTime =
+        DateTime.fromMillisecondsSinceEpoch(resetsAt * 1000, isUtc: true)
+            .toLocal();
+    final hh = dateTime.hour.toString().padLeft(2, '0');
+    final mm = dateTime.minute.toString().padLeft(2, '0');
+    return ' reset $hh:$mm';
+  }
+
+  Widget _buildCodexQuotaBadge(
+    NomadeProvider provider,
+    ThemeData theme,
+    ColorScheme scheme,
+  ) {
+    final snapshot = provider.activeCodexRateLimitSnapshot;
+    if (snapshot == null) {
+      return const SizedBox.shrink();
+    }
+    final windows = <Map<String, dynamic>>[];
+    final primary = _extractRateWindow(snapshot, 'primary');
+    final secondary = _extractRateWindow(snapshot, 'secondary');
+    if (primary != null) {
+      windows.add(primary);
+    }
+    if (secondary != null) {
+      windows.add(secondary);
+    }
+    if (windows.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    windows.sort((a, b) {
+      final left =
+          _toInt(a['windowDurationMins'] ?? a['window_minutes']) ?? 999999;
+      final right =
+          _toInt(b['windowDurationMins'] ?? b['window_minutes']) ?? 999999;
+      return left.compareTo(right);
+    });
+    final pieces = <String>[];
+    var minRemaining = 100;
+    for (var i = 0; i < windows.length && i < 2; i++) {
+      final window = windows[i];
+      final used =
+          (_toInt(window['usedPercent'] ?? window['used_percent']) ?? 0)
+              .clamp(0, 100);
+      final remaining = (100 - used).clamp(0, 100);
+      if (remaining < minRemaining) {
+        minRemaining = remaining;
+      }
+      final label = _formatWindowLabel(window, i);
+      final resetSuffix = _formatResetShort(window);
+      pieces.add('$label $remaining%$resetSuffix');
+    }
+
+    final badgeColor = minRemaining <= 5
+        ? scheme.error
+        : minRemaining <= 20
+            ? scheme.tertiary
+            : scheme.primary;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: badgeColor.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        'Codex restant ${pieces.join(' · ')}',
+        style: theme.textTheme.bodySmall?.copyWith(
+          color: badgeColor,
+          fontWeight: FontWeight.w700,
+        ),
       ),
     );
   }

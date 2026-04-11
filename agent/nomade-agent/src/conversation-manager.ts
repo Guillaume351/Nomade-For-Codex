@@ -81,6 +81,8 @@ export interface CodexRuntimeOptions {
   reasoningEfforts: CodexReasoningEffort[];
   collaborationModes: CodexCollaborationModeSummary[];
   skills: CodexSkillSummary[];
+  rateLimits?: Record<string, unknown>;
+  rateLimitsByLimitId?: Record<string, Record<string, unknown>> | null;
   defaults: {
     model?: string;
     approvalPolicy?: CodexApprovalPolicy;
@@ -360,14 +362,15 @@ export class ConversationManager {
   async getRuntimeOptions(params?: { cwd?: string }): Promise<CodexRuntimeOptions> {
     await this.codexClient.start();
 
-    const [modelPage, config, collaborationModes, skills] = await Promise.all([
+    const [modelPage, config, collaborationModes, skills, rateLimitSnapshot] = await Promise.all([
       this.codexClient.modelList({
         limit: 200,
         includeHidden: false
       }),
       this.codexClient.configRead({ cwd: params?.cwd ?? null }),
       this.codexClient.collaborationModeList({ cwd: params?.cwd ?? null }).catch(() => []),
-      params?.cwd ? this.codexClient.skillsList({ cwd: params.cwd }).catch(() => []) : Promise.resolve([])
+      params?.cwd ? this.codexClient.skillsList({ cwd: params.cwd }).catch(() => []) : Promise.resolve([]),
+      this.codexClient.accountRateLimitsRead().catch(() => null)
     ]);
 
     const approvalRaw = config.approval_policy;
@@ -396,6 +399,8 @@ export class ConversationManager {
       reasoningEfforts: codexReasoningEfforts,
       collaborationModes,
       skills,
+      rateLimits: rateLimitSnapshot?.rateLimits,
+      rateLimitsByLimitId: rateLimitSnapshot?.rateLimitsByLimitId ?? null,
       defaults
     };
   }
@@ -478,6 +483,19 @@ export class ConversationManager {
   private onNotification(notification: AppServerNotification): void {
     const method = notification.method;
     const params = notification.params;
+
+    if (method === "account/rateLimits/updated") {
+      const rateLimits =
+        params.rateLimits && typeof params.rateLimits === "object"
+          ? (params.rateLimits as Record<string, unknown>)
+          : {};
+      this.emit({
+        type: "account.rate_limits.updated",
+        rateLimits
+      });
+      return;
+    }
+
     const threadId = typeof params.threadId === "string" ? params.threadId : "";
     const codexTurnId = this.extractTurnId(method, params);
     let context = threadId && codexTurnId ? this.turnByCodex.get(buildTurnKey(threadId, codexTurnId)) : undefined;

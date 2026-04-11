@@ -47,7 +47,19 @@ class _LoginScreenState extends State<LoginScreen> {
           context,
           MaterialPageRoute(builder: (_) => const HomeScreen()),
         );
+        return;
       }
+      final message = provider.status.trim().isEmpty
+          ? 'Authorization did not complete. Please retry.'
+          : provider.status;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+      setState(() {
+        _showCode = false;
+        _userCode = null;
+        _verificationUri = null;
+      });
     } catch (e) {
       if (!mounted) {
         return;
@@ -57,6 +69,19 @@ class _LoginScreenState extends State<LoginScreen> {
       );
       setState(() => _isLoading = false);
     }
+  }
+
+  Future<void> _cancelLoginFlow() async {
+    await context.read<NomadeProvider>().cancelLoginAttempt();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _isLoading = false;
+      _showCode = false;
+      _userCode = null;
+      _verificationUri = null;
+    });
   }
 
   Future<void> _openVerificationPage() async {
@@ -162,9 +187,9 @@ class _LoginScreenState extends State<LoginScreen> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final provider = context.watch<NomadeProvider>();
-    final hasPendingScan = (provider.pendingScanPayload?.trim().isNotEmpty ??
-            false) ||
-        (provider.pendingScanShortCode?.trim().isNotEmpty ?? false);
+    final hasPendingScan =
+        (provider.pendingScanPayload?.trim().isNotEmpty ?? false) ||
+            (provider.pendingScanShortCode?.trim().isNotEmpty ?? false);
 
     return Column(
       key: const ValueKey('email-step'),
@@ -236,6 +261,10 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget _buildCodeStep(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final provider = context.watch<NomadeProvider>();
+    final statusText = provider.status.trim().isEmpty
+        ? 'Waiting for authorization...'
+        : provider.status.trim();
 
     return Column(
       key: const ValueKey('code-step'),
@@ -276,16 +305,28 @@ class _LoginScreenState extends State<LoginScreen> {
         ),
         const SizedBox(height: 16),
         Text(
-          'Waiting for authorization...',
+          statusText,
           style: theme.textTheme.bodyMedium?.copyWith(
             color: scheme.onSurfaceVariant,
           ),
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: 10),
-        OutlinedButton(
-          onPressed: _verificationUri == null ? null : _openVerificationPage,
-          child: const Text('Open browser again'),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed:
+                    _verificationUri == null ? null : _openVerificationPage,
+                child: const Text('Open browser again'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            TextButton(
+              onPressed: _cancelLoginFlow,
+              child: const Text('Cancel'),
+            ),
+          ],
         ),
         const SizedBox(height: 14),
         ClipRRect(
