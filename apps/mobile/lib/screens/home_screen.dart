@@ -11,6 +11,16 @@ import '../widgets/e2e_guide_sheet.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/tunnel_manager_sheet.dart';
 
+enum _TopBarMenuAction {
+  turnOptions,
+  copyUsefulLogs,
+  toggleDiagnostics,
+  e2eGuide,
+  approveSecureScan,
+  tunnelManager,
+  serviceTerminal,
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -114,6 +124,61 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _copyUsefulLogs(NomadeProvider provider) async {
+    final conversation = provider.selectedConversation;
+    if (conversation == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Sélectionne une conversation pour copier les logs.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+    final report = provider.buildConversationDebugReport(conversation.id);
+    await Clipboard.setData(ClipboardData(text: report));
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Logs utiles copiés'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+  }
+
+  Future<void> _handleTopBarMenuAction(
+    _TopBarMenuAction action,
+    NomadeProvider provider,
+  ) async {
+    switch (action) {
+      case _TopBarMenuAction.turnOptions:
+        _showOptionsBottomSheet(context);
+        return;
+      case _TopBarMenuAction.copyUsefulLogs:
+        await _copyUsefulLogs(provider);
+        return;
+      case _TopBarMenuAction.toggleDiagnostics:
+        setState(() {
+          _showDiagnostics = !_showDiagnostics;
+        });
+        return;
+      case _TopBarMenuAction.e2eGuide:
+        showE2eGuideSheet(context);
+        return;
+      case _TopBarMenuAction.approveSecureScan:
+        await _startSecureScanApproval();
+        return;
+      case _TopBarMenuAction.tunnelManager:
+        showTunnelManagerSheet(context);
+        return;
+      case _TopBarMenuAction.serviceTerminal:
+        _showTerminalSheet(context);
+        return;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<NomadeProvider>();
@@ -191,6 +256,9 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildTopBar(NomadeProvider provider, bool isWideLayout) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final topBarWidth = MediaQuery.of(context).size.width;
+    final isCompactTopBar = topBarWidth < 1220;
+    final isUltraCompactTopBar = topBarWidth < 860;
     final conversation = provider.selectedConversation;
     final hasRunningTurn =
         provider.activeTurnId != null || conversation?.status == 'running';
@@ -253,68 +321,162 @@ class _HomeScreenState extends State<HomeScreen> {
                       letterSpacing: -0.2,
                     ),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    _buildContextSubtitle(provider),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: scheme.onSurfaceVariant,
+                  if (!isUltraCompactTopBar) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      _buildContextSubtitle(provider),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
-                  ),
+                  ],
                 ],
               ),
             ),
             if (hasRunningTurn)
               Padding(
                 padding: const EdgeInsets.only(right: 8),
-                child: _buildRunningBadge(theme, scheme),
+                child: isUltraCompactTopBar
+                    ? _buildRunningDotBadge(theme, scheme)
+                    : _buildRunningBadge(
+                        theme,
+                        scheme,
+                        compact: isCompactTopBar,
+                      ),
               ),
             if (_hasCodexRateLimit(provider))
               Padding(
                 padding: const EdgeInsets.only(right: 6),
-                child: _buildCodexQuotaBadge(provider, theme, scheme),
+                child: isUltraCompactTopBar
+                    ? _buildCompactQuotaBadge(provider, theme, scheme)
+                    : _buildCodexQuotaBadge(
+                        provider,
+                        theme,
+                        scheme,
+                        compact: isCompactTopBar,
+                      ),
               ),
-            _buildTopAction(
-              icon: Icons.menu_book_outlined,
-              tooltip: 'Guide E2E',
-              onPressed: () => showE2eGuideSheet(context),
-            ),
-            _buildTopAction(
-              icon: Icons.qr_code_scanner_rounded,
-              tooltip: 'Approve secure scan',
-              onPressed: _startSecureScanApproval,
-            ),
-            if (provider.selectedWorkspace != null)
+            if (!isCompactTopBar) ...[
               _buildTopAction(
-                icon: Icons.wifi_tethering_rounded,
-                tooltip: 'Tunnel management',
-                onPressed: () => showTunnelManagerSheet(context),
+                icon: Icons.menu_book_outlined,
+                tooltip: 'Guide E2E',
+                onPressed: () => showE2eGuideSheet(context),
               ),
-            if (provider.selectedService != null)
               _buildTopAction(
-                icon: Icons.terminal_rounded,
-                tooltip: 'Service terminal',
-                onPressed: () => _showTerminalSheet(context),
+                icon: Icons.qr_code_scanner_rounded,
+                tooltip: 'Approve secure scan',
+                onPressed: _startSecureScanApproval,
               ),
-            _buildTopAction(
-              icon: Icons.tune_rounded,
-              tooltip: 'Turn options',
-              onPressed: () => _showOptionsBottomSheet(context),
-            ),
+              if (provider.selectedWorkspace != null)
+                _buildTopAction(
+                  icon: Icons.wifi_tethering_rounded,
+                  tooltip: 'Tunnel management',
+                  onPressed: () => showTunnelManagerSheet(context),
+                ),
+              if (provider.selectedService != null)
+                _buildTopAction(
+                  icon: Icons.terminal_rounded,
+                  tooltip: 'Service terminal',
+                  onPressed: () => _showTerminalSheet(context),
+                ),
+              _buildTopAction(
+                icon: Icons.tune_rounded,
+                tooltip: 'Turn options',
+                onPressed: () => _showOptionsBottomSheet(context),
+              ),
+              _buildTopAction(
+                icon: Icons.copy_all_rounded,
+                tooltip: 'Copier logs utiles',
+                onPressed: () => _copyUsefulLogs(provider),
+              ),
+            ],
             _buildTopAction(
               icon: _showDiagnostics
                   ? Icons.bug_report_outlined
                   : Icons.bug_report_rounded,
-              tooltip: _showDiagnostics
-                  ? 'Hide conversation diagnostics'
-                  : 'Show conversation diagnostics',
+              tooltip: 'Diagnostics & logs',
               onPressed: () {
                 setState(() {
                   _showDiagnostics = !_showDiagnostics;
                 });
               },
             ),
+            if (isCompactTopBar)
+              Padding(
+                padding: const EdgeInsets.only(left: 4),
+                child: PopupMenuButton<_TopBarMenuAction>(
+                  tooltip: 'Actions',
+                  icon: const Icon(Icons.more_horiz_rounded),
+                  itemBuilder: (_) => [
+                    const PopupMenuItem(
+                      value: _TopBarMenuAction.copyUsefulLogs,
+                      child: ListTile(
+                        dense: true,
+                        leading: Icon(Icons.copy_all_rounded),
+                        title: Text('Copier logs utiles'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: _TopBarMenuAction.toggleDiagnostics,
+                      child: ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.bug_report_outlined),
+                        title: Text(
+                          _showDiagnostics
+                              ? 'Masquer diagnostics'
+                              : 'Afficher diagnostics',
+                        ),
+                      ),
+                    ),
+                    const PopupMenuItem(
+                      value: _TopBarMenuAction.turnOptions,
+                      child: ListTile(
+                        dense: true,
+                        leading: Icon(Icons.tune_rounded),
+                        title: Text('Turn options'),
+                      ),
+                    ),
+                    const PopupMenuItem(
+                      value: _TopBarMenuAction.e2eGuide,
+                      child: ListTile(
+                        dense: true,
+                        leading: Icon(Icons.menu_book_outlined),
+                        title: Text('Guide E2E'),
+                      ),
+                    ),
+                    const PopupMenuItem(
+                      value: _TopBarMenuAction.approveSecureScan,
+                      child: ListTile(
+                        dense: true,
+                        leading: Icon(Icons.qr_code_scanner_rounded),
+                        title: Text('Approve secure scan'),
+                      ),
+                    ),
+                    if (provider.selectedWorkspace != null)
+                      const PopupMenuItem(
+                        value: _TopBarMenuAction.tunnelManager,
+                        child: ListTile(
+                          dense: true,
+                          leading: Icon(Icons.wifi_tethering_rounded),
+                          title: Text('Tunnel management'),
+                        ),
+                      ),
+                    if (provider.selectedService != null)
+                      const PopupMenuItem(
+                        value: _TopBarMenuAction.serviceTerminal,
+                        child: ListTile(
+                          dense: true,
+                          leading: Icon(Icons.terminal_rounded),
+                          title: Text('Service terminal'),
+                        ),
+                      ),
+                  ],
+                  onSelected: (value) =>
+                      _handleTopBarMenuAction(value, provider),
+                ),
+              ),
           ],
         ),
       ),
@@ -349,9 +511,16 @@ class _HomeScreenState extends State<HomeScreen> {
     return '$agent • $socket';
   }
 
-  Widget _buildRunningBadge(ThemeData theme, ColorScheme scheme) {
+  Widget _buildRunningBadge(
+    ThemeData theme,
+    ColorScheme scheme, {
+    bool compact = false,
+  }) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 8 : 10,
+        vertical: compact ? 5 : 6,
+      ),
       decoration: BoxDecoration(
         color: scheme.primary.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(999),
@@ -367,15 +536,37 @@ class _HomeScreenState extends State<HomeScreen> {
               color: scheme.primary,
             ),
           ),
-          const SizedBox(width: 6),
-          Text(
-            'running',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.primary,
-              fontWeight: FontWeight.w700,
+          if (!compact) ...[
+            const SizedBox(width: 6),
+            Text(
+              'running',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.primary,
+                fontWeight: FontWeight.w700,
+              ),
             ),
-          ),
+          ],
         ],
+      ),
+    );
+  }
+
+  Widget _buildRunningDotBadge(ThemeData theme, ColorScheme scheme) {
+    return Container(
+      width: 24,
+      height: 24,
+      decoration: BoxDecoration(
+        color: scheme.primary.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      alignment: Alignment.center,
+      child: SizedBox(
+        width: 9,
+        height: 9,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: scheme.primary,
+        ),
       ),
     );
   }
@@ -442,8 +633,9 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildCodexQuotaBadge(
     NomadeProvider provider,
     ThemeData theme,
-    ColorScheme scheme,
-  ) {
+    ColorScheme scheme, {
+    bool compact = false,
+  }) {
     final snapshot = provider.activeCodexRateLimitSnapshot;
     if (snapshot == null) {
       return const SizedBox.shrink();
@@ -468,6 +660,7 @@ class _HomeScreenState extends State<HomeScreen> {
       return left.compareTo(right);
     });
     final pieces = <String>[];
+    final compactPieces = <String>[];
     var minRemaining = 100;
     for (var i = 0; i < windows.length && i < 2; i++) {
       final window = windows[i];
@@ -481,6 +674,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final label = _formatWindowLabel(window, i);
       final resetSuffix = _formatResetShort(window);
       pieces.add('$label $remaining%$resetSuffix');
+      compactPieces.add('$label:$remaining%');
     }
 
     final badgeColor = minRemaining <= 5
@@ -489,16 +683,75 @@ class _HomeScreenState extends State<HomeScreen> {
             ? scheme.tertiary
             : scheme.primary;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 8 : 10,
+        vertical: compact ? 5 : 6,
+      ),
       decoration: BoxDecoration(
         color: badgeColor.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
-        'Codex restant ${pieces.join(' · ')}',
+        compact
+            ? compactPieces.join(' ')
+            : 'Codex restant ${pieces.join(' · ')}',
         style: theme.textTheme.bodySmall?.copyWith(
           color: badgeColor,
           fontWeight: FontWeight.w700,
+          fontSize: compact ? 11 : null,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCompactQuotaBadge(
+    NomadeProvider provider,
+    ThemeData theme,
+    ColorScheme scheme,
+  ) {
+    final snapshot = provider.activeCodexRateLimitSnapshot;
+    if (snapshot == null) {
+      return const SizedBox.shrink();
+    }
+    final windows = <Map<String, dynamic>>[];
+    final primary = _extractRateWindow(snapshot, 'primary');
+    final secondary = _extractRateWindow(snapshot, 'secondary');
+    if (primary != null) {
+      windows.add(primary);
+    }
+    if (secondary != null) {
+      windows.add(secondary);
+    }
+    if (windows.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    var minRemaining = 100;
+    for (final window in windows) {
+      final used =
+          (_toInt(window['usedPercent'] ?? window['used_percent']) ?? 0)
+              .clamp(0, 100);
+      final remaining = (100 - used).clamp(0, 100);
+      if (remaining < minRemaining) {
+        minRemaining = remaining;
+      }
+    }
+    final badgeColor = minRemaining <= 5
+        ? scheme.error
+        : minRemaining <= 20
+            ? scheme.tertiary
+            : scheme.primary;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+      decoration: BoxDecoration(
+        color: badgeColor.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        'Q $minRemaining%',
+        style: theme.textTheme.bodySmall?.copyWith(
+          color: badgeColor,
+          fontWeight: FontWeight.w700,
+          fontSize: 11,
         ),
       ),
     );
@@ -574,23 +827,19 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ),
-              IconButton(
+              TextButton.icon(
+                onPressed: () => _copyUsefulLogs(provider),
                 icon: const Icon(Icons.copy_all_rounded, size: 17),
-                tooltip: 'Copy debug report',
-                visualDensity: VisualDensity.compact,
-                onPressed: () {
-                  final report =
-                      provider.buildConversationDebugReport(conversation.id);
-                  Clipboard.setData(ClipboardData(text: report));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Debug report copied'),
-                      duration: Duration(seconds: 1),
-                    ),
-                  );
-                },
+                label: const Text('Copier logs utiles'),
               ),
             ],
+          ),
+          const SizedBox(height: 2),
+          Text(
+            'Inclut runtime/events/E2E/turns pour debug.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
           ),
           if (agentOffline || turnRejectedOffline) ...[
             const SizedBox(height: 8),
@@ -1170,6 +1419,40 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               textAlign: TextAlign.center,
             ),
+            if (provider.status.trim().isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Text(
+                provider.status.trim(),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
+            if (provider.selectedConversation != null) ...[
+              const SizedBox(height: 14),
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      setState(() {
+                        _showDiagnostics = true;
+                      });
+                    },
+                    icon: const Icon(Icons.bug_report_outlined, size: 16),
+                    label: const Text('Afficher diagnostics'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: () => _copyUsefulLogs(provider),
+                    icon: const Icon(Icons.copy_all_rounded, size: 16),
+                    label: const Text('Copier logs utiles'),
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ),

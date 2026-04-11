@@ -212,62 +212,407 @@ class NomadeProvider with ChangeNotifier {
     final events = debugEventsForConversation(conversationId, limit: 20);
     final agent = selectedAgent;
     final workspace = selectedWorkspace;
+    final now = DateTime.now().toUtc();
+    final targetConversationId = conversation?.id ?? conversationId;
+    final conversationTurns = turns
+        .where((turn) => targetConversationId.isEmpty
+            ? true
+            : turn.conversationId == targetConversationId)
+        .toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final turnsSnapshot = conversationTurns.take(10).toList(growable: false);
+    final timelineTurn = _selectTimelineTurnForSupportBundle(conversationTurns);
+    final timeline =
+        timelineTurn == null ? null : tryTimelineForTurn(timelineTurn.id);
     final rateSnapshot = activeCodexRateLimitSnapshot;
     final primaryWindow = _asStringKeyedMap(rateSnapshot?['primary']);
     final secondaryWindow = _asStringKeyedMap(rateSnapshot?['secondary']);
 
-    final lines = <String>[
-      'generatedAt=${DateTime.now().toIso8601String()}',
-      'apiBaseUrl=${api.baseUrl}',
-      'status=$status',
-      'socket=${realtimeConnected ? "connected" : "disconnected"}',
-      'agentId=${agent?.id ?? "-"}',
-      'agentOnline=${agent?.isOnline == true ? "true" : "false"}',
-      'workspaceId=${workspace?.id ?? "-"}',
-      'workspacePath=${workspace?.path ?? "-"}',
-      'workspaceTrustedDev=${trustedDevMode ? "true" : "false"}',
-      'conversationId=${conversation?.id ?? conversationId}',
-      'conversationStatus=${conversation?.status ?? "-"}',
-      'conversationThread=${conversation?.codexThreadId ?? "-"}',
-      'selectedModel=${selectedModel ?? "-"}',
-      'selectedApproval=${selectedApprovalPolicy ?? "-"}',
-      'selectedSandbox=${selectedSandboxMode ?? "-"}',
-      'selectedEffort=${selectedEffort ?? "-"}',
-      'codexRateLimitId=${rateSnapshot?['limitId']?.toString() ?? "-"}',
-      'codexRatePrimaryUsedPct=${primaryWindow?['usedPercent']?.toString() ?? "-"}',
-      'codexRatePrimaryWindowMins=${primaryWindow?['windowDurationMins']?.toString() ?? "-"}',
-      'codexRateSecondaryUsedPct=${secondaryWindow?['usedPercent']?.toString() ?? "-"}',
-      'codexRateSecondaryWindowMins=${secondaryWindow?['windowDurationMins']?.toString() ?? "-"}',
-      'selectedCollaborationMode=${selectedCollaborationModeSlug ?? "-"}',
-      'selectedSkills=${_selectedSkillPaths.isEmpty ? "-" : _selectedSkillPaths.join(",")}',
-      'runtimeTurnId=${runtime?.turnId ?? "-"}',
-      'runtimeCodexTurnId=${runtime?.codexTurnId ?? "-"}',
-      'runtimeThreadId=${runtime?.threadId ?? "-"}',
-      'runtimeTurnStatus=${runtime?.turnStatus ?? "-"}',
-      'runtimeTurnError=${runtime?.turnError ?? "-"}',
-      'runtimeRequestedAt=${runtime?.requestedAt?.toIso8601String() ?? "-"}',
-      'runtimeStartedAt=${runtime?.startedAt?.toIso8601String() ?? "-"}',
-      'runtimeCompletedAt=${runtime?.completedAt?.toIso8601String() ?? "-"}',
-      'runtimeRequestedCwd=${runtime?.requestedCwd ?? "-"}',
-      'runtimeRequestedModel=${runtime?.requestedModel ?? "-"}',
-      'runtimeRequestedApproval=${runtime?.requestedApprovalPolicy ?? "-"}',
-      'runtimeRequestedSandbox=${runtime?.requestedSandboxMode ?? "-"}',
-      'runtimeRequestedEffort=${runtime?.requestedEffort ?? "-"}',
-      'eventsReceived=${runtime?.eventsReceived ?? 0}',
-      'eventsRendered=${runtime?.eventsRendered ?? 0}',
-      'eventsNotRenderedMethods=${runtime == null || runtime.unsupportedMethods.isEmpty ? "-" : runtime.unsupportedMethods.join(",")}',
-    ];
+    final lines = <String>['supportBundleVersion=1'];
 
-    if (events.isNotEmpty) {
-      lines.add('events=');
-      for (final event in events) {
+    _appendSupportSectionHeader(lines, 'context');
+    _appendSupportKeyValue(lines, 'generatedAt', now.toIso8601String());
+    _appendSupportKeyValue(lines, 'apiBaseUrl', api.baseUrl);
+    _appendSupportKeyValue(lines, 'status', status);
+    _appendSupportKeyValue(
+      lines,
+      'socket',
+      realtimeConnected ? 'connected' : 'disconnected',
+    );
+    _appendSupportKeyValue(lines, 'agentId', agent?.id ?? '-');
+    _appendSupportKeyValue(
+      lines,
+      'agentOnline',
+      agent?.isOnline == true ? 'true' : 'false',
+    );
+    _appendSupportKeyValue(lines, 'workspaceId', workspace?.id ?? '-');
+    _appendSupportKeyValue(lines, 'workspacePath', workspace?.path ?? '-');
+    _appendSupportKeyValue(
+      lines,
+      'workspaceTrustedDev',
+      trustedDevMode ? 'true' : 'false',
+    );
+    _appendSupportKeyValue(lines, 'conversationId', targetConversationId);
+    _appendSupportKeyValue(
+      lines,
+      'conversationStatus',
+      conversation?.status ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'conversationThread',
+      conversation?.codexThreadId ?? '-',
+    );
+    _appendSupportKeyValue(lines, 'selectedModel', selectedModel ?? '-');
+    _appendSupportKeyValue(
+      lines,
+      'selectedApproval',
+      selectedApprovalPolicy ?? '-',
+    );
+    _appendSupportKeyValue(
+        lines, 'selectedSandbox', selectedSandboxMode ?? '-');
+    _appendSupportKeyValue(lines, 'selectedEffort', selectedEffort ?? '-');
+    _appendSupportKeyValue(
+      lines,
+      'selectedCollaborationMode',
+      selectedCollaborationModeSlug ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'selectedSkills',
+      _selectedSkillPaths.isEmpty ? '-' : _selectedSkillPaths.join(','),
+    );
+    _appendSupportKeyValue(
+      lines,
+      'codexRateLimitId',
+      rateSnapshot?['limitId']?.toString() ?? '-',
+    );
+    _appendSupportRateWindow(lines, 'codexRatePrimary', primaryWindow);
+    _appendSupportRateWindow(lines, 'codexRateSecondary', secondaryWindow);
+
+    _appendSupportSectionHeader(lines, 'security');
+    _appendSupportKeyValue(lines, 'e2eReady', e2eReady ? 'true' : 'false');
+    _appendSupportKeyValue(lines, 'securityError', securityError ?? '-');
+    _appendSupportKeyValue(
+      lines,
+      'pendingScanPayload',
+      pendingScanPayload ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'pendingScanShortCode',
+      pendingScanShortCode ?? '-',
+    );
+
+    _appendSupportSectionHeader(lines, 'runtime');
+    _appendSupportKeyValue(lines, 'runtimeTurnId', runtime?.turnId ?? '-');
+    _appendSupportKeyValue(
+      lines,
+      'runtimeCodexTurnId',
+      runtime?.codexTurnId ?? '-',
+    );
+    _appendSupportKeyValue(lines, 'runtimeThreadId', runtime?.threadId ?? '-');
+    _appendSupportKeyValue(
+      lines,
+      'runtimeTurnStatus',
+      runtime?.turnStatus ?? '-',
+    );
+    _appendSupportKeyValue(
+        lines, 'runtimeTurnError', runtime?.turnError ?? '-');
+    _appendSupportKeyValue(
+      lines,
+      'runtimeRequestedAt',
+      runtime?.requestedAt?.toIso8601String() ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'runtimeStartedAt',
+      runtime?.startedAt?.toIso8601String() ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'runtimeCompletedAt',
+      runtime?.completedAt?.toIso8601String() ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'runtimeRequestedCwd',
+      runtime?.requestedCwd ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'runtimeRequestedModel',
+      runtime?.requestedModel ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'runtimeRequestedApproval',
+      runtime?.requestedApprovalPolicy ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'runtimeRequestedSandbox',
+      runtime?.requestedSandboxMode ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'runtimeRequestedEffort',
+      runtime?.requestedEffort ?? '-',
+    );
+    _appendSupportKeyValue(
+        lines, 'eventsReceived', runtime?.eventsReceived ?? 0);
+    _appendSupportKeyValue(
+        lines, 'eventsRendered', runtime?.eventsRendered ?? 0);
+    _appendSupportKeyValue(
+      lines,
+      'eventsNotRenderedMethods',
+      runtime == null || runtime.unsupportedMethods.isEmpty
+          ? '-'
+          : runtime.unsupportedMethods.join(','),
+    );
+
+    _appendSupportSectionHeader(lines, 'events');
+    _appendSupportKeyValue(lines, 'count', events.length);
+    for (var index = 0; index < events.length; index += 1) {
+      final event = events[index];
+      final compact = _formatSupportInlineFields({
+        'at': event.at.toIso8601String(),
+        'type': event.type,
+        'message': event.message,
+      });
+      lines.add('event[$index]=$compact');
+    }
+
+    _appendSupportSectionHeader(lines, 'turns');
+    _appendSupportKeyValue(lines, 'count', turnsSnapshot.length);
+    for (var index = 0; index < turnsSnapshot.length; index += 1) {
+      final turn = turnsSnapshot[index];
+      lines.add(
+        'turn[$index]=${_formatSupportInlineFields({
+              'id': turn.id,
+              'status': turn.status,
+              'codexTurnId': turn.codexTurnId ?? '-',
+              'error': turn.error ?? '-',
+              'createdAt': turn.createdAt.toIso8601String(),
+              'updatedAt': turn.updatedAt.toIso8601String(),
+              'completedAt': turn.completedAt?.toIso8601String() ?? '-',
+              'itemsCount': turn.items.length,
+            })}',
+      );
+    }
+
+    _appendSupportSectionHeader(lines, 'timeline');
+    _appendSupportKeyValue(lines, 'turnId', timelineTurn?.id ?? '-');
+    _appendSupportKeyValue(lines, 'turnStatus', timelineTurn?.status ?? '-');
+    _appendSupportKeyValue(
+        lines, 'turnCodexTurnId', timelineTurn?.codexTurnId ?? '-');
+    _appendSupportKeyValue(lines, 'itemCount', timeline?.items.length ?? 0);
+    if (timeline == null && timelineTurn != null) {
+      _appendSupportKeyValue(lines, 'note', 'timeline_not_initialized');
+    }
+    if (timeline != null) {
+      final items = timeline.items;
+      for (var index = 0; index < items.length; index += 1) {
+        final item = items[index];
         lines.add(
-          '  ${event.at.toIso8601String()} ${event.type} ${event.message}',
+          'item[$index]=${_formatSupportInlineFields({
+                'itemId': item.itemId,
+                'itemType': item.itemType,
+                'stream': item.stream ?? '-',
+                'status': item.statusLabel,
+                'exitCode': item.exitCode?.toString() ?? '-',
+                'durationMs': item.durationMs?.toString() ?? '-',
+                'startedAt': item.startedAt.toIso8601String(),
+                'completedAt': item.completedAt?.toIso8601String() ?? '-',
+              })}',
         );
       }
     }
 
     return lines.join('\n');
+  }
+
+  static const _redactedValue = '[REDACTED]';
+  static const _sensitiveKeyMarkers = <String>[
+    'token',
+    'secret',
+    'key',
+    'sig',
+    'ciphertext',
+    'nonce',
+    'aad',
+    'authorization',
+    'envelope',
+  ];
+  static final RegExp _jwtRegex = RegExp(
+    r'\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b',
+  );
+  static final RegExp _bearerRegex = RegExp(
+    r'\bbearer\s+[A-Za-z0-9._~+/\-=]{10,}\b',
+    caseSensitive: false,
+  );
+  static final RegExp _basicRegex = RegExp(
+    r'\bbasic\s+[A-Za-z0-9+/=]{8,}\b',
+    caseSensitive: false,
+  );
+  static final RegExp _secretAssignmentRegex = RegExp(
+    r'\b([a-z0-9_.-]*(?:token|secret|key|sig|ciphertext|nonce|aad|authorization|envelope)[a-z0-9_.-]*)\b(\s*[:=]\s*)([^\s,;]+)',
+    caseSensitive: false,
+  );
+
+  void _appendSupportSectionHeader(List<String> lines, String name) {
+    lines.add('');
+    lines.add('[$name]');
+  }
+
+  void _appendSupportKeyValue(List<String> lines, String key, Object? value) {
+    lines.add('$key=${_redactSupportValue(key, _formatSupportValue(value))}');
+  }
+
+  void _appendSupportRateWindow(
+    List<String> lines,
+    String prefix,
+    Map<String, dynamic>? window,
+  ) {
+    _appendSupportKeyValue(
+      lines,
+      '${prefix}UsedPct',
+      window?['usedPercent']?.toString() ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      '${prefix}RemainingPct',
+      window?['remainingPercent']?.toString() ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      '${prefix}WindowMins',
+      window?['windowDurationMins']?.toString() ?? '-',
+    );
+    _appendSupportKeyValue(
+      lines,
+      '${prefix}ResetAt',
+      window?['resetAt']?.toString() ?? '-',
+    );
+  }
+
+  Turn? _selectTimelineTurnForSupportBundle(List<Turn> conversationTurns) {
+    final activeId = activeTurnId;
+    if (activeId != null && activeId.isNotEmpty) {
+      for (final turn in conversationTurns) {
+        if (turn.id == activeId) {
+          return turn;
+        }
+      }
+    }
+    for (final turn in conversationTurns) {
+      if (turn.status == 'running' || turn.status == 'queued') {
+        return turn;
+      }
+    }
+    if (conversationTurns.isEmpty) {
+      return null;
+    }
+    return conversationTurns.first;
+  }
+
+  String _formatSupportInlineFields(Map<String, Object?> fields) {
+    final parts = <String>[];
+    for (final entry in fields.entries) {
+      parts.add(
+        '${entry.key}=${_redactSupportValue(entry.key, _formatSupportValue(entry.value))}',
+      );
+    }
+    return parts.join(' ');
+  }
+
+  String _formatSupportValue(Object? value) {
+    if (value == null) {
+      return '-';
+    }
+    if (value is String) {
+      final trimmed = value.trim();
+      return trimmed.isEmpty ? '-' : trimmed;
+    }
+    if (value is DateTime) {
+      return value.toIso8601String();
+    }
+    if (value is bool) {
+      return value ? 'true' : 'false';
+    }
+    return value.toString();
+  }
+
+  String _redactSupportValue(String key, String value) {
+    if (value == '-') {
+      return value;
+    }
+    if (_isSensitiveSupportKey(key)) {
+      return _redactedValue;
+    }
+    var output = value;
+    if (key == 'apiBaseUrl') {
+      output = _redactUrlSensitiveParts(output);
+    }
+    output = _redactSensitiveFragments(output);
+    return output;
+  }
+
+  bool _isSensitiveSupportKey(String key) {
+    final normalized = key.trim().toLowerCase();
+    if (normalized.isEmpty) {
+      return false;
+    }
+    for (final marker in _sensitiveKeyMarkers) {
+      if (normalized.contains(marker)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  String _redactUrlSensitiveParts(String value) {
+    final parsed = Uri.tryParse(value);
+    if (parsed == null) {
+      return value;
+    }
+    const uriSafeRedacted = 'REDACTED';
+    var changed = false;
+    var updated = parsed;
+    if (parsed.userInfo.isNotEmpty) {
+      updated = updated.replace(userInfo: uriSafeRedacted);
+      changed = true;
+    }
+    if (parsed.queryParameters.isNotEmpty) {
+      final nextQuery = <String, String>{};
+      for (final entry in parsed.queryParameters.entries) {
+        final nextValue =
+            _isSensitiveSupportKey(entry.key) ? uriSafeRedacted : entry.value;
+        if (nextValue != entry.value) {
+          changed = true;
+        }
+        nextQuery[entry.key] = nextValue;
+      }
+      if (changed) {
+        updated = updated.replace(queryParameters: nextQuery);
+      }
+    }
+    return changed ? updated.toString() : value;
+  }
+
+  String _redactSensitiveFragments(String value) {
+    var output = value;
+    output =
+        output.replaceAllMapped(_bearerRegex, (_) => 'Bearer $_redactedValue');
+    output =
+        output.replaceAllMapped(_basicRegex, (_) => 'Basic $_redactedValue');
+    output = output.replaceAllMapped(_jwtRegex, (_) => _redactedValue);
+    output = output.replaceAllMapped(_secretAssignmentRegex, (match) {
+      final name = match.group(1) ?? 'secret';
+      final sep = match.group(2) ?? '=';
+      return '$name$sep$_redactedValue';
+    });
+    return output;
   }
 
   String? activeTurnId;
@@ -787,6 +1132,14 @@ class NomadeProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  @override
+  void dispose() {
+    reconnectTimer?.cancel();
+    socketSub?.cancel();
+    socket?.sink.close();
+    super.dispose();
+  }
+
   Future<bool> ensureFreshToken() async {
     if (accessToken == null && refreshToken == null) return false;
 
@@ -1000,14 +1353,22 @@ class NomadeProvider with ChangeNotifier {
     try {
       final loaded = await api.listConversationTurns(
           accessToken: accessToken!, conversationId: conversationId);
-      final decryptedTurns = <Turn>[];
-      for (final raw in loaded) {
-        final parsed = Turn.fromJson(raw);
-        decryptedTurns.add(_decryptTurnForUi(parsed));
-      }
-      turns = decryptedTurns;
+      turns = loaded
+          .map((raw) => _decryptTurnForUi(Turn.fromJson(raw)))
+          .toList(growable: false);
       for (final turn in turns) {
         _hydrateTimelineFromTurn(turn);
+      }
+      String? runningTurnId;
+      for (final turn in turns) {
+        if (turn.status == 'running' || turn.status == 'queued') {
+          runningTurnId = turn.id;
+        }
+      }
+      if (runningTurnId != null) {
+        activeTurnId = runningTurnId;
+      } else if (_selectedConversation?.id == conversationId) {
+        activeTurnId = null;
       }
       unawaited(_persistE2ERuntime());
       notifyListeners();
@@ -1629,20 +1990,29 @@ class NomadeProvider with ChangeNotifier {
   String _decryptEnvelopeToString({
     required String scope,
     required Map<String, dynamic> envelope,
+    bool enforceReplayProtection = true,
   }) {
     final runtime = _e2eRuntime;
     if (runtime == null || !runtime.isReady) {
       throw const E2ERuntimeException('e2e_runtime_unavailable');
     }
-    return runtime.decryptEnvelope(scope: scope, envelope: envelope);
+    return runtime.decryptEnvelope(
+      scope: scope,
+      envelope: envelope,
+      enforceReplayProtection: enforceReplayProtection,
+    );
   }
 
   Map<String, dynamic> _decryptEnvelopeToObject({
     required String scope,
     required Map<String, dynamic> envelope,
+    bool enforceReplayProtection = true,
   }) {
-    final plaintext =
-        _decryptEnvelopeToString(scope: scope, envelope: envelope).trim();
+    final plaintext = _decryptEnvelopeToString(
+      scope: scope,
+      envelope: envelope,
+      enforceReplayProtection: enforceReplayProtection,
+    ).trim();
     if (plaintext.isEmpty) {
       return <String, dynamic>{};
     }
@@ -1676,6 +2046,7 @@ class NomadeProvider with ChangeNotifier {
 
   Turn _decryptTurnForUi(Turn turn) {
     final scope = 'conversation:${turn.conversationId}';
+    const replaySafeForHistory = false;
     var userPrompt = turn.userPrompt;
     if (userPrompt.trim().isNotEmpty) {
       final parsedPrompt = _tryParseJsonObject(userPrompt);
@@ -1684,8 +2055,11 @@ class NomadeProvider with ChangeNotifier {
       if (promptEnvelope == null) {
         throw const E2ERuntimeException('e2e_turn_prompt_missing_envelope');
       }
-      final promptPlain =
-          _decryptEnvelopeToString(scope: scope, envelope: promptEnvelope);
+      final promptPlain = _decryptEnvelopeToString(
+        scope: scope,
+        envelope: promptEnvelope,
+        enforceReplayProtection: replaySafeForHistory,
+      );
       final promptParsed = _tryParseJsonObject(promptPlain);
       if (promptParsed != null && promptParsed['prompt'] != null) {
         userPrompt = promptParsed['prompt']?.toString() ?? '';
@@ -1704,8 +2078,11 @@ class NomadeProvider with ChangeNotifier {
       if (diffEnvelope == null) {
         throw const E2ERuntimeException('e2e_turn_diff_missing_envelope');
       }
-      final diffPayload =
-          _decryptEnvelopeToObject(scope: scope, envelope: diffEnvelope);
+      final diffPayload = _decryptEnvelopeToObject(
+        scope: scope,
+        envelope: diffEnvelope,
+        enforceReplayProtection: replaySafeForHistory,
+      );
       diff = diffPayload['diff']?.toString() ?? '';
     }
 
@@ -1720,8 +2097,11 @@ class NomadeProvider with ChangeNotifier {
         decryptedItems.add(item);
         continue;
       }
-      final itemPayload =
-          _decryptEnvelopeToObject(scope: scope, envelope: envelope);
+      final itemPayload = _decryptEnvelopeToObject(
+        scope: scope,
+        envelope: envelope,
+        enforceReplayProtection: replaySafeForHistory,
+      );
       final value = itemPayload['item'];
       final normalizedPayload = value is Map
           ? value.cast<String, dynamic>()
@@ -1946,6 +2326,8 @@ class NomadeProvider with ChangeNotifier {
         onDone: () => _handleSocketDisconnected('Socket closed'),
       );
       realtimeConnected = true;
+      reconnectAttempts = 0;
+      reconnectTimer?.cancel();
       final conversationId = _selectedConversation?.id;
       if (conversationId != null) {
         _appendConversationDebugEvent(
@@ -1953,6 +2335,10 @@ class NomadeProvider with ChangeNotifier {
           type: 'socket.connected',
           message: 'Realtime stream opened',
         );
+        if (activeTurnId != null ||
+            _hasRunningTurnForConversation(conversationId)) {
+          unawaited(loadTurns(conversationId));
+        }
       }
       notifyListeners();
     } catch (e) {
@@ -2455,7 +2841,9 @@ class NomadeProvider with ChangeNotifier {
       if (turnId != null) {
         final timeline = timelineForTurn(turnId);
         timeline.executionCollapsed = true;
-        if (activeTurnId == turnId) activeTurnId = null;
+        if (activeTurnId == turnId) {
+          activeTurnId = null;
+        }
         // Reload turns to get metrics and final state
         if (conversationId.isNotEmpty) {
           loadTurns(conversationId);
@@ -2530,6 +2918,9 @@ class NomadeProvider with ChangeNotifier {
   }
 
   void _handleSocketDisconnected(String reason) {
+    if (accessToken == null) {
+      return;
+    }
     realtimeConnected = false;
     status = reason;
     final conversationId = _selectedConversation?.id;
@@ -2541,7 +2932,31 @@ class NomadeProvider with ChangeNotifier {
       );
     }
     notifyListeners();
-    // Reconnect logic...
+    _scheduleSocketReconnect();
+  }
+
+  bool _hasRunningTurnForConversation(String conversationId) {
+    for (final turn in turns) {
+      if (turn.conversationId != conversationId) {
+        continue;
+      }
+      if (turn.status == 'running' || turn.status == 'queued') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void _scheduleSocketReconnect() {
+    reconnectTimer?.cancel();
+    reconnectAttempts += 1;
+    final backoffSec = (1 << (reconnectAttempts - 1)).clamp(1, 20);
+    reconnectTimer = Timer(Duration(seconds: backoffSec), () async {
+      if (accessToken == null || realtimeConnected) {
+        return;
+      }
+      await connectSocket();
+    });
   }
 
   Future<void> sendPrompt(String prompt) async {

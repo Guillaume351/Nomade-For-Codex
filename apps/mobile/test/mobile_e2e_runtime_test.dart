@@ -48,7 +48,8 @@ void main() {
 
       runtime.decryptEnvelope(scope: 'session:sess_1', envelope: envelope);
       expect(
-        () => runtime.decryptEnvelope(scope: 'session:sess_1', envelope: envelope),
+        () => runtime.decryptEnvelope(
+            scope: 'session:sess_1', envelope: envelope),
         throwsA(
           predicate(
             (error) =>
@@ -57,6 +58,33 @@ void main() {
           ),
         ),
       );
+    });
+
+    test('allows replayed envelope when replay protection is disabled',
+        () async {
+      final identity = await MobileE2ERuntime.generateDeviceIdentity();
+      final snapshot = MobileE2ESnapshot(
+        epoch: 1,
+        rootKey: toBase64Url(Uint8List.fromList(List<int>.filled(32, 21))),
+        device: identity,
+        peers: const {},
+        seqByScope: const {},
+      );
+      final runtime = await MobileE2ERuntime.fromSnapshot(snapshot);
+      expect(runtime, isNotNull);
+
+      final envelope = runtime!.encryptEnvelope(
+        scope: 'conversation:conv_2',
+        plaintext: '{"prompt":"hello"}',
+      );
+
+      runtime.decryptEnvelope(scope: 'conversation:conv_2', envelope: envelope);
+      final plaintext = runtime.decryptEnvelope(
+        scope: 'conversation:conv_2',
+        envelope: envelope,
+        enforceReplayProtection: false,
+      );
+      expect(plaintext, '{"prompt":"hello"}');
     });
   });
 }

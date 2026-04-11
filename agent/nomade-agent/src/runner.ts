@@ -1,6 +1,14 @@
 import WebSocket from "ws";
+import { createHash } from "node:crypto";
 import { randomToken } from "@nomade/shared";
-import { defaultConfigPath, defaultSessionPath, readConfig, readUserSession } from "./config.js";
+import {
+  defaultConfigPath,
+  defaultSessionPath,
+  readConfig,
+  readUserSession,
+  writeUserSession,
+  type UserSessionConfig
+} from "./config.js";
 import { SessionManager } from "./session-manager.js";
 import { TunnelManager } from "./tunnel-manager.js";
 import { ConversationManager } from "./conversation-manager.js";
@@ -134,6 +142,31 @@ const parseEnvelope = (value: unknown):
     ciphertext: raw.ciphertext,
     sig: raw.sig
   };
+};
+
+const hashFingerprint = (value: string): string => {
+  return createHash("sha256").update(value).digest("hex").slice(0, 12);
+};
+
+export const normalizeE2EDecryptErrorCode = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error ?? "e2e_decrypt_failed");
+  const lowered = message.toLowerCase();
+  if (lowered.includes("invalid tag")) {
+    return "e2e_key_mismatch_or_corrupted_payload";
+  }
+  if (lowered.includes("e2e_replay_detected")) {
+    return "e2e_replay_detected";
+  }
+  if (lowered.includes("e2e_unknown_sender_device")) {
+    return "e2e_unknown_sender_device";
+  }
+  if (lowered.includes("e2e_invalid_signature")) {
+    return "e2e_invalid_signature";
+  }
+  if (lowered.includes("e2e_")) {
+    return lowered.replace(/[^a-z0-9_.:-]/g, "_").slice(0, 96);
+  }
+  return "e2e_decrypt_failed";
 };
 
 const enrichConversationEventWithE2E = (
@@ -313,12 +346,33 @@ const openLocalWsWithFallback = async (params: {
 
 export const runAgent = async (args: RunArgs): Promise<void> => {
   const config = await readConfig(args.configPath ?? defaultConfigPath());
+  const sessionPath = defaultSessionPath();
   const tunnelManager = new TunnelManager();
   let e2eRuntime: ReturnType<typeof createE2ERuntime> = null;
+  let sessionForPersistence: UserSessionConfig | null = null;
+  let e2eDebug:
+    | {
+        epoch: number;
+        selfDeviceId: string;
+        peers: number;
+        rootKeyFp: string;
+      }
+    | null = null;
   try {
-    const session = await readUserSession(defaultSessionPath());
+    const session = await readUserSession(sessionPath);
     if (session.controlHttpUrl.replace(/\/$/, "") === config.controlHttpUrl.replace(/\/$/, "")) {
       e2eRuntime = createE2ERuntime(session.e2e);
+      if (session.e2e && e2eRuntime) {
+        sessionForPersistence = session;
+      }
+      if (session.e2e) {
+        e2eDebug = {
+          epoch: Math.max(1, Number(session.e2e.epoch ?? 1)),
+          selfDeviceId: session.e2e.device.deviceId,
+          peers: Object.keys(session.e2e.peers ?? {}).length,
+          rootKeyFp: hashFingerprint(session.e2e.rootKey)
+        };
+      }
     }
   } catch {
     // no-op
@@ -331,14 +385,123 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       ws.send(JSON.stringify(payload));
     }
   };
+  const sameSeqByScope = (
+    left: Record<string, number> | undefined,
+    right: Record<string, number>
+  ): boolean => {
+    const leftEntries = Object.entries(left ?? {});
+    const rightEntries = Object.entries(right);
+    if (leftEntries.length !== rightEntries.length) {
+      return false;
+    }
+    for (const [scope, seq] of rightEntries) {
+      if ((left ?? {})[scope] !== seq) {
+        return false;
+      }
+    }
+    return true;
+  };
+  let persistSeqTimer: NodeJS.Timeout | null = null;
+  let persistSeqInFlight = false;
+  let persistSeqQueued = false;
+  const flushPersistedSeqByScope = async (): Promise<void> => {
+    if (!e2eRuntime || !sessionForPersistence?.e2e) {
+      return;
+    }
+    if (persistSeqInFlight) {
+      persistSeqQueued = true;
+      return;
+    }
+    persistSeqInFlight = true;
+    try {
+      const nextSeqByScope = e2eRuntime.exportSeqByScope();
+      if (sameSeqByScope(sessionForPersistence.e2e.seqByScope, nextSeqByScope)) {
+        return;
+      }
+      sessionForPersistence = {
+        ...sessionForPersistence,
+        e2e: {
+          ...sessionForPersistence.e2e,
+          seqByScope: nextSeqByScope
+        }
+      };
+      await writeUserSession(sessionPath, sessionForPersistence);
+    } catch (error) {
+      console.error("[agent] failed to persist e2e seq state", error);
+    } finally {
+      persistSeqInFlight = false;
+      if (persistSeqQueued) {
+        persistSeqQueued = false;
+        schedulePersistSeqByScope();
+      }
+    }
+  };
+  const schedulePersistSeqByScope = (): void => {
+    if (!e2eRuntime || !sessionForPersistence?.e2e) {
+      return;
+    }
+    if (persistSeqTimer) {
+      return;
+    }
+    persistSeqTimer = setTimeout(() => {
+      persistSeqTimer = null;
+      void flushPersistedSeqByScope();
+    }, 300);
+  };
+  const reportE2EDecryptFailure = (params: {
+    context: string;
+    error: unknown;
+    envelope: ReturnType<typeof parseEnvelope> | null;
+    conversationId?: string;
+    turnId?: string;
+    requestId?: string;
+    failTurn?: boolean;
+  }): void => {
+    const code = normalizeE2EDecryptErrorCode(params.error);
+    const details = {
+      context: params.context,
+      code,
+      conversationId: params.conversationId ?? "",
+      turnId: params.turnId ?? "",
+      requestId: params.requestId ?? "",
+      envelopeSender: params.envelope?.senderDeviceId ?? "",
+      envelopeEpoch: params.envelope?.epoch ?? "",
+      envelopeSeq: params.envelope?.seq ?? "",
+      e2e: e2eDebug
+    };
+    console.error("[agent] e2e decrypt failed", details, params.error);
+    sendToControl({
+      type: "error",
+      code,
+      message: `${params.context}: ${code}. Re-login with secure scan on mobile and agent.`
+    });
+    if (params.failTurn && params.conversationId && params.turnId) {
+      sendToControl({
+        type: "conversation.turn.completed",
+        conversationId: params.conversationId,
+        turnId: params.turnId,
+        threadId: "",
+        codexTurnId: "",
+        status: "failed",
+        error: code
+      });
+    }
+  };
   const conversationManager = new ConversationManager((payload) => {
-    sendToControl(enrichConversationEventWithE2E(payload, e2eRuntime));
+    const enriched = enrichConversationEventWithE2E(payload, e2eRuntime);
+    sendToControl(enriched);
+    if (enriched !== payload) {
+      schedulePersistSeqByScope();
+    }
   });
 
   const sessionManager = new SessionManager({
     onOutput: (sessionId, stream, data, cursor) => {
       const e2eEnvelope =
         e2eRuntime && data.length > 0 ? e2eRuntime.encrypt(`session:${sessionId}`, data) : undefined;
+      if (e2eEnvelope) {
+        schedulePersistSeqByScope();
+      }
       ws.send(
         JSON.stringify({
           type: "session.output",
@@ -366,6 +529,11 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
     console.log("[agent] connected");
     if (e2eRuntime) {
       console.log("[agent] e2e runtime enabled");
+      if (e2eDebug) {
+        console.log(
+          `[agent] e2e session epoch=${e2eDebug.epoch} self=${e2eDebug.selfDeviceId} peers=${e2eDebug.peers} rootKeyFp=${e2eDebug.rootKeyFp}`
+        );
+      }
     }
     ws.send(JSON.stringify({ type: "agent.hello", agentId: config.agentId, name: config.name }));
 
@@ -392,7 +560,16 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         let command = String(msg.command ?? "");
         const e2eCommandEnvelope = parseEnvelope(msg.e2eCommandEnvelope);
         if (e2eCommandEnvelope && e2eRuntime) {
-          command = e2eRuntime.decrypt(`session:${sessionId}`, e2eCommandEnvelope);
+          try {
+            command = e2eRuntime.decrypt(`session:${sessionId}`, e2eCommandEnvelope);
+          } catch (error) {
+            reportE2EDecryptFailure({
+              context: "session.create",
+              error,
+              envelope: e2eCommandEnvelope
+            });
+            return;
+          }
         }
         sessionManager.createSession({
           sessionId,
@@ -408,7 +585,16 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         let data = String(msg.data ?? "");
         const e2eEnvelope = parseEnvelope(msg.e2eEnvelope);
         if (e2eEnvelope && e2eRuntime) {
-          data = e2eRuntime.decrypt(`session:${sessionId}`, e2eEnvelope);
+          try {
+            data = e2eRuntime.decrypt(`session:${sessionId}`, e2eEnvelope);
+          } catch (error) {
+            reportE2EDecryptFailure({
+              context: "session.input",
+              error,
+              envelope: e2eEnvelope
+            });
+            return;
+          }
         }
         sessionManager.input(sessionId, data);
         return;
@@ -440,7 +626,20 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           : undefined;
         const e2ePromptEnvelope = parseEnvelope(msg.e2ePromptEnvelope);
         if (e2ePromptEnvelope && e2eRuntime && conversationId) {
-          const decrypted = e2eRuntime.decrypt(`conversation:${conversationId}`, e2ePromptEnvelope);
+          let decrypted = "";
+          try {
+            decrypted = e2eRuntime.decrypt(`conversation:${conversationId}`, e2ePromptEnvelope);
+          } catch (error) {
+            reportE2EDecryptFailure({
+              context: "conversation.turn.start",
+              error,
+              envelope: e2ePromptEnvelope,
+              conversationId,
+              turnId,
+              failTurn: true
+            });
+            return;
+          }
           try {
             const parsed = JSON.parse(decrypted) as Record<string, unknown>;
             if (typeof parsed.prompt === "string" && parsed.prompt.trim().length > 0) {
@@ -487,7 +686,24 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         let result = msg.result;
         const e2eEnvelope = parseEnvelope(msg.e2eEnvelope);
         if (e2eEnvelope && e2eRuntime && conversationId) {
-          const decrypted = e2eRuntime.decrypt(`conversation:${conversationId}`, e2eEnvelope);
+          let decrypted = "";
+          try {
+            decrypted = e2eRuntime.decrypt(`conversation:${conversationId}`, e2eEnvelope);
+          } catch (decryptError) {
+            reportE2EDecryptFailure({
+              context: "conversation.server.response",
+              error: decryptError,
+              envelope: e2eEnvelope,
+              conversationId,
+              turnId: typeof msg.turnId === "string" ? msg.turnId : undefined,
+              requestId
+            });
+            conversationManager.resolveServerRequest({
+              requestId,
+              error: normalizeE2EDecryptErrorCode(decryptError)
+            });
+            return;
+          }
           try {
             const parsed = JSON.parse(decrypted) as Record<string, unknown>;
             error = typeof parsed.error === "string" ? parsed.error : undefined;
@@ -815,15 +1031,27 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
     }
   });
 
-  ws.on("close", () => {
+  const shutdown = (message: string, error?: unknown): void => {
     conversationManager.close();
-    console.error("[agent] connection closed");
-    process.exit(1);
+    if (persistSeqTimer) {
+      clearTimeout(persistSeqTimer);
+      persistSeqTimer = null;
+    }
+    void flushPersistedSeqByScope().finally(() => {
+      if (error) {
+        console.error(message, error);
+      } else {
+        console.error(message);
+      }
+      process.exit(1);
+    });
+  };
+
+  ws.on("close", () => {
+    shutdown("[agent] connection closed");
   });
 
   ws.on("error", (error) => {
-    conversationManager.close();
-    console.error("[agent] websocket error", error);
-    process.exit(1);
+    shutdown("[agent] websocket error", error);
   });
 };

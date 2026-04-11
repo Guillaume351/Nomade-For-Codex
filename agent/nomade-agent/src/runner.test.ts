@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { normalizeTunnelHttpProxyError, normalizeTunnelWsOpenError } from "./runner.js";
+import {
+  normalizeE2EDecryptErrorCode,
+  normalizeTunnelHttpProxyError,
+  normalizeTunnelWsOpenError
+} from "./runner.js";
 
 describe("normalizeTunnelHttpProxyError", () => {
   it("maps loopback network failures to local_service_unreachable", () => {
@@ -49,5 +53,23 @@ describe("normalizeTunnelWsOpenError", () => {
       }
     ]);
     expect(code).toBe("local_service_unreachable");
+  });
+});
+
+describe("normalizeE2EDecryptErrorCode", () => {
+  it("maps invalid tag to key mismatch code", () => {
+    expect(normalizeE2EDecryptErrorCode(new Error("invalid tag"))).toBe(
+      "e2e_key_mismatch_or_corrupted_payload"
+    );
+  });
+
+  it("keeps known e2e codes", () => {
+    expect(normalizeE2EDecryptErrorCode(new Error("e2e_invalid_signature"))).toBe(
+      "e2e_invalid_signature"
+    );
+  });
+
+  it("falls back to generic code", () => {
+    expect(normalizeE2EDecryptErrorCode(new Error("boom"))).toBe("e2e_decrypt_failed");
   });
 });

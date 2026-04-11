@@ -74,6 +74,14 @@ export class E2ERuntime {
     return plaintext;
   }
 
+  exportSeqByScope(): Record<string, number> {
+    const snapshot: Record<string, number> = {};
+    for (const [scope, seq] of this.seqByScope.entries()) {
+      snapshot[scope] = seq;
+    }
+    return snapshot;
+  }
+
   private resolveSignPublicKey(senderDeviceId: string): string {
     if (senderDeviceId === this.selfDeviceId) {
       return this.selfSignPublicKey;
@@ -92,4 +100,3 @@ export const createE2ERuntime = (session?: UserSessionConfig["e2e"]): E2ERuntime
   }
   return new E2ERuntime(session);
 };
-

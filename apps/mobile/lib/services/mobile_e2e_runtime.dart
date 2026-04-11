@@ -234,7 +234,8 @@ class MobileE2ERuntime {
     }
   }
 
-  static Future<ScanExchangeKeyPair> generateOneTimeScanExchangeKeyPair() async {
+  static Future<ScanExchangeKeyPair>
+      generateOneTimeScanExchangeKeyPair() async {
     final sodium = await _resolveSodium();
     final keyPair = sodium.crypto.kx.keyPair();
     try {
@@ -256,7 +257,8 @@ class MobileE2ERuntime {
     final sodium = await _resolveSodium();
     final nonce = fromBase64Url(hostBundle['nonce']?.toString() ?? '');
     final aad = fromBase64Url(hostBundle['aad']?.toString() ?? '');
-    final ciphertext = fromBase64Url(hostBundle['ciphertext']?.toString() ?? '');
+    final ciphertext =
+        fromBase64Url(hostBundle['ciphertext']?.toString() ?? '');
     if (nonce.isEmpty || aad.isEmpty || ciphertext.isEmpty) {
       throw const E2ERuntimeException('e2e_scan_bundle_invalid');
     }
@@ -428,6 +430,7 @@ class MobileE2ERuntime {
   String decryptEnvelope({
     required String scope,
     required Map<String, dynamic> envelope,
+    bool enforceReplayProtection = true,
   }) {
     if (!isReady) {
       throw const E2ERuntimeException('e2e_runtime_unavailable');
@@ -442,7 +445,7 @@ class MobileE2ERuntime {
 
     final replayKey = '$scope:$senderDeviceId';
     final lastSeen = _lastSeenByScopeSender[replayKey] ?? -1;
-    if (seq <= lastSeen) {
+    if (enforceReplayProtection && seq <= lastSeen) {
       throw const E2ERuntimeException('e2e_replay_detected');
     }
 
@@ -480,7 +483,9 @@ class MobileE2ERuntime {
       } catch (_) {
         throw const E2ERuntimeException('e2e_envelope_decrypt_failed');
       }
-      _lastSeenByScopeSender[replayKey] = seq;
+      if (enforceReplayProtection) {
+        _lastSeenByScopeSender[replayKey] = seq;
+      }
       return utf8.decode(plaintext);
     } finally {
       key.dispose();
@@ -499,7 +504,8 @@ class MobileE2ERuntime {
   }
 
   String _signPayload(Map<String, dynamic> payload, String signPrivateKey) {
-    final privateKey = SecureKey.fromList(_sodium, fromBase64Url(signPrivateKey));
+    final privateKey =
+        SecureKey.fromList(_sodium, fromBase64Url(signPrivateKey));
     try {
       final encoded = Uint8List.fromList(utf8.encode(_canonicalize(payload)));
       final signature = _sodium.crypto.sign.detached(
@@ -525,7 +531,8 @@ class MobileE2ERuntime {
     );
   }
 
-  static Map<String, dynamic> _normalizeEnvelopePayload(Map<String, dynamic> raw) {
+  static Map<String, dynamic> _normalizeEnvelopePayload(
+      Map<String, dynamic> raw) {
     final payload = <String, dynamic>{
       'v': (raw['v'] as num?)?.toInt(),
       'alg': raw['alg']?.toString(),
@@ -601,7 +608,9 @@ class MobileE2ERuntime {
   static String _randomToken(int length) {
     final random = Random.secure();
     final bytes = List<int>.generate(length, (_) => random.nextInt(256));
-    return toBase64Url(Uint8List.fromList(bytes)).replaceAll('-', '').replaceAll('_', '');
+    return toBase64Url(Uint8List.fromList(bytes))
+        .replaceAll('-', '')
+        .replaceAll('_', '');
   }
 }
 
@@ -634,10 +643,12 @@ String _canonicalize(dynamic value) {
   }
   if (value is Map) {
     final entries = value.entries.toList()
-      ..sort((left, right) => left.key.toString().compareTo(right.key.toString()));
+      ..sort(
+          (left, right) => left.key.toString().compareTo(right.key.toString()));
     final parts = <String>[];
     for (final entry in entries) {
-      parts.add('${jsonEncode(entry.key.toString())}:${_canonicalize(entry.value)}');
+      parts.add(
+          '${jsonEncode(entry.key.toString())}:${_canonicalize(entry.value)}');
     }
     return '{${parts.join(',')}}';
   }

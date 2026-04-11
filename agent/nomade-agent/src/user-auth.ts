@@ -163,6 +163,35 @@ const saveSession = async (params: {
   return value;
 };
 
+const normalizeServerUrl = (value: string): string => value.replace(/\/$/, "");
+
+const loadReusableE2EState = async (params: {
+  serverUrl: string;
+  sessionPath: string;
+}): Promise<NonNullable<UserSessionConfig["e2e"]> | null> => {
+  try {
+    const session = await readUserSession(params.sessionPath);
+    if (normalizeServerUrl(session.controlHttpUrl) !== normalizeServerUrl(params.serverUrl)) {
+      return null;
+    }
+    const e2e = session.e2e;
+    if (
+      !e2e ||
+      !e2e.rootKey ||
+      !e2e.device?.deviceId ||
+      !e2e.device?.encPublicKey ||
+      !e2e.device?.encPrivateKey ||
+      !e2e.device?.signPublicKey ||
+      !e2e.device?.signPrivateKey
+    ) {
+      return null;
+    }
+    return e2e;
+  } catch {
+    return null;
+  }
+};
+
 export const ensureSession = async (params: {
   serverUrl: string;
   sessionPath?: string;
@@ -202,7 +231,12 @@ export const loginWithDeviceCode = async (params: {
 }): Promise<void> => {
   const serverUrl = params.serverUrl.replace(/\/$/, "");
   const sessionPath = params.sessionPath ?? defaultSessionPath();
-  const hostDevice = generateDeviceKeyMaterial();
+  const reusableE2E = await loadReusableE2EState({ serverUrl, sessionPath });
+  const hostDevice = reusableE2E
+    ? {
+        ...reusableE2E.device
+      }
+    : generateDeviceKeyMaterial();
   const exchangeKeyPair = generateExchangeKeyPair();
   const startResponse = await fetch(`${serverUrl}/auth/device/start`, {
     method: "POST",
@@ -259,7 +293,7 @@ export const loginWithDeviceCode = async (params: {
 
   const intervalSec = started.intervalSec ?? 2;
   const expiresAtMs = Date.parse(started.expiresAt);
-  let hostRootKey: Uint8Array | null = null;
+  let hostRootKeyBase64: string | null = reusableE2E?.rootKey ?? null;
   let hostBundleSent = false;
   let mobilePeer:
     | {
@@ -308,7 +342,7 @@ export const loginWithDeviceCode = async (params: {
         };
       }
       if (!hostBundleSent && polled.mobileExchangePublicKey) {
-        hostRootKey ??= randomBytes(32);
+        hostRootKeyBase64 ??= toBase64Url(randomBytes(32));
         const sharedSecret = deriveSharedSecret({
           privateKey: exchangeKeyPair.privateKey,
           remotePublicKey: polled.mobileExchangePublicKey
@@ -317,7 +351,7 @@ export const loginWithDeviceCode = async (params: {
           sharedSecret,
           scope: `scan:${started.deviceCode}`,
           payload: {
-            rootKey: toBase64Url(hostRootKey),
+            rootKey: hostRootKeyBase64,
             epoch: 1,
             hostDevice: {
               deviceId: hostDevice.deviceId,
@@ -361,10 +395,10 @@ export const loginWithDeviceCode = async (params: {
         expiresInSec: polled.expiresInSec,
         email: me?.email,
         e2e:
-          hostRootKey && started.mode === "scan_secure"
+          hostRootKeyBase64 && started.mode === "scan_secure"
             ? {
                 epoch: 1,
-                rootKey: toBase64Url(hostRootKey),
+                rootKey: hostRootKeyBase64,
                 device: {
                   deviceId: hostDevice.deviceId,
                   encPublicKey: hostDevice.encPublicKey,
@@ -373,15 +407,18 @@ export const loginWithDeviceCode = async (params: {
                   signPrivateKey: hostDevice.signPrivateKey,
                   createdAt: hostDevice.createdAt
                 },
-                peers: mobilePeer
-                  ? {
-                      [mobilePeer.deviceId]: {
-                        ...mobilePeer,
-                        addedAt: new Date().toISOString()
+                peers: {
+                  ...(reusableE2E?.peers ?? {}),
+                  ...(mobilePeer
+                    ? {
+                        [mobilePeer.deviceId]: {
+                          ...mobilePeer,
+                          addedAt: new Date().toISOString()
+                        }
                       }
-                    }
-                  : {},
-                seqByScope: {}
+                    : {})
+                },
+                seqByScope: reusableE2E?.seqByScope ?? {}
               }
             : undefined
       });

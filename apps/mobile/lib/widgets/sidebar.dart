@@ -11,6 +11,36 @@ import 'tunnel_manager_sheet.dart';
 class Sidebar extends StatelessWidget {
   const Sidebar({super.key});
 
+  Future<void> _copyUsefulLogs(
+    BuildContext context,
+    NomadeProvider provider,
+  ) async {
+    final conversation = provider.selectedConversation ??
+        (provider.conversations.isNotEmpty
+            ? provider.conversations.first
+            : null);
+    if (conversation == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Sélectionne une conversation pour copier les logs.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+    final report = provider.buildConversationDebugReport(conversation.id);
+    await Clipboard.setData(ClipboardData(text: report));
+    if (!context.mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Logs utiles copiés'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+  }
+
   Color _serviceColor(String state) {
     switch (state) {
       case 'healthy':
@@ -512,6 +542,16 @@ class Sidebar extends StatelessWidget {
             title: const Text('Guide E2E dev'),
             onTap: () async {
               await showE2eGuideSheet(context);
+            },
+          ),
+          ListTile(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            leading: const Icon(Icons.copy_all_rounded),
+            title: const Text('Copier logs utiles'),
+            onTap: () async {
+              await _copyUsefulLogs(context, provider);
             },
           ),
           ListTile(
