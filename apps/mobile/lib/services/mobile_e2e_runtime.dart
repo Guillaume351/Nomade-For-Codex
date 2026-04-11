@@ -290,12 +290,17 @@ class MobileE2ERuntime {
       );
       final key = SecureKey.fromList(sodium, keyBytes);
       try {
-        final plaintextBytes = sodium.crypto.aeadXChaCha20Poly1305IETF.decrypt(
-          cipherText: ciphertext,
-          nonce: nonce,
-          key: key,
-          additionalData: aad,
-        );
+        late final Uint8List plaintextBytes;
+        try {
+          plaintextBytes = sodium.crypto.aeadXChaCha20Poly1305IETF.decrypt(
+            cipherText: ciphertext,
+            nonce: nonce,
+            key: key,
+            additionalData: aad,
+          );
+        } catch (_) {
+          throw const E2ERuntimeException('e2e_scan_bundle_decrypt_failed');
+        }
         final decoded =
             jsonDecode(utf8.decode(plaintextBytes)) as Map<String, dynamic>;
         final hostDevice =
@@ -456,14 +461,25 @@ class MobileE2ERuntime {
       scope: scope,
       context: _e2eEnvelopeContext,
     );
+    final nonce = fromBase64Url(payload['nonce']?.toString() ?? '');
+    final aad = fromBase64Url(payload['aad']?.toString() ?? '');
+    final ciphertext = fromBase64Url(payload['ciphertext']?.toString() ?? '');
+    if (nonce.isEmpty || aad.isEmpty || ciphertext.isEmpty) {
+      throw const E2ERuntimeException('e2e_envelope_invalid');
+    }
     final key = SecureKey.fromList(_sodium, keyBytes);
     try {
-      final plaintext = _sodium.crypto.aeadXChaCha20Poly1305IETF.decrypt(
-        cipherText: fromBase64Url(payload['ciphertext']?.toString() ?? ''),
-        nonce: fromBase64Url(payload['nonce']?.toString() ?? ''),
-        key: key,
-        additionalData: fromBase64Url(payload['aad']?.toString() ?? ''),
-      );
+      late final Uint8List plaintext;
+      try {
+        plaintext = _sodium.crypto.aeadXChaCha20Poly1305IETF.decrypt(
+          cipherText: ciphertext,
+          nonce: nonce,
+          key: key,
+          additionalData: aad,
+        );
+      } catch (_) {
+        throw const E2ERuntimeException('e2e_envelope_decrypt_failed');
+      }
       _lastSeenByScopeSender[replayKey] = seq;
       return utf8.decode(plaintext);
     } finally {

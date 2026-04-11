@@ -1491,15 +1491,28 @@ export const createServer = async (): Promise<http.Server> => {
       res.status(400).type("html").send(htmlPage({ title: "Missing code", body: "<h1>Missing code</h1>" }));
       return;
     }
-    const approved = await repositories.approveDeviceCode(userCode, user.userId);
+    const approval = await repositories.approveDeviceCode(userCode, user.userId);
     await repositories.writeAuditEvent({
       userId: user.userId,
       actorType: "user",
       actorId: user.userId,
-      action: approved ? "auth.device_code.approved" : "auth.device_code.rejected",
-      metadata: { userCode }
+      action: approval === "approved" ? "auth.device_code.approved" : "auth.device_code.rejected",
+      metadata: { userCode, result: approval }
     });
-    if (!approved) {
+    if (approval === "secure_scan_required") {
+      res
+        .status(409)
+        .type("html")
+        .send(
+          htmlPage({
+            title: "Secure Scan Required",
+            body:
+              "<h1>Secure scan required</h1><p>This login code must be approved from Nomade Mobile (QR secure scan). Browser approval is disabled for secure sessions.</p>"
+          })
+        );
+      return;
+    }
+    if (approval !== "approved") {
       res
         .status(404)
         .type("html")
@@ -1699,8 +1712,12 @@ export const createServer = async (): Promise<http.Server> => {
       return;
     }
 
-    const approved = await repositories.approveDeviceCode(parsed.data.userCode.toUpperCase(), user.userId);
-    if (!approved) {
+    const approval = await repositories.approveDeviceCode(parsed.data.userCode.toUpperCase(), user.userId);
+    if (approval === "secure_scan_required") {
+      res.status(409).json({ error: "secure_scan_required" });
+      return;
+    }
+    if (approval !== "approved") {
       res.status(404).json({ error: "invalid_or_expired_user_code" });
       return;
     }

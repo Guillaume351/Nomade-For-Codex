@@ -29,7 +29,7 @@ const main = async (): Promise<void> => {
     await loginWithDeviceCode({
       serverUrl,
       sessionPath: readArg("session") ?? defaultSessionPath(),
-      openBrowser: hasFlag("no-open") ? false : true
+      openBrowser: hasFlag("open-browser")
     });
     return;
   }

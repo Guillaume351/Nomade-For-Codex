@@ -243,17 +243,17 @@ export const loginWithDeviceCode = async (params: {
     if (started.scanShortCode) {
       console.log(`Fallback short code: ${started.scanShortCode}`);
     }
+    console.log("Secure scan is mandatory for this login; browser code approval is disabled.");
   } else {
     console.log(`Open this URL on any device: ${verificationUriComplete}`);
   }
-  console.log(`Open this URL on any device: ${verificationUriComplete}`);
   console.log(`Manual URL: ${verificationUri}`);
   console.log("");
   console.log("QR:");
   await printLocalQr(secureScanUri);
   console.log("");
 
-  if (params.openBrowser !== false) {
+  if (params.openBrowser && started.mode !== "scan_secure") {
     await openInBrowser(verificationUriComplete);
   }
 

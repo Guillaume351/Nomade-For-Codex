@@ -46,6 +46,11 @@ export class DeviceLimitReachedError extends Error {
 
 export type DeviceCodeStartMode = "legacy" | "scan_secure";
 
+export type DeviceCodeApprovalResult =
+  | "approved"
+  | "secure_scan_required"
+  | "invalid_or_expired";
+
 export interface ScanStartHostDevice {
   deviceId: string;
   name: string;
@@ -331,7 +336,7 @@ export class Repositories {
     };
   }
 
-  async approveDeviceCode(userCode: string, userId: string): Promise<boolean> {
+  async approveDeviceCode(userCode: string, userId: string): Promise<DeviceCodeApprovalResult> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -341,13 +346,33 @@ export class Repositories {
          WHERE user_code = $2
            AND status IN ('pending', 'pending_key_exchange')
            AND expires_at > NOW()
+           AND EXISTS (
+             SELECT 1
+             FROM device_scan_flows sf
+             WHERE sf.device_code_id = device_codes.id
+               AND sf.mode = 'legacy'
+           )
          RETURNING id`,
         [userId, userCode]
       );
       const row = result.rows[0];
       if (!row) {
+        const secureScan = await client.query<{ id: string }>(
+          `SELECT dc.id
+           FROM device_codes dc
+           JOIN device_scan_flows sf ON sf.device_code_id = dc.id
+           WHERE dc.user_code = $1
+             AND dc.status IN ('pending', 'pending_key_exchange')
+             AND dc.expires_at > NOW()
+             AND sf.mode = 'scan_secure'
+           LIMIT 1`,
+          [userCode]
+        );
         await client.query("ROLLBACK");
-        return false;
+        if ((secureScan.rowCount ?? 0) > 0) {
+          return "secure_scan_required";
+        }
+        return "invalid_or_expired";
       }
       await client.query(
         `UPDATE device_scan_flows
@@ -356,7 +381,7 @@ export class Repositories {
         [row.id]
       );
       await client.query("COMMIT");
-      return true;
+      return "approved";
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

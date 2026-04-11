@@ -1646,7 +1646,12 @@ class NomadeProvider with ChangeNotifier {
     if (plaintext.isEmpty) {
       return <String, dynamic>{};
     }
-    final decoded = jsonDecode(plaintext);
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(plaintext);
+    } catch (_) {
+      throw const E2ERuntimeException('e2e_payload_invalid_json');
+    }
     if (decoded is! Map) {
       throw const E2ERuntimeException('e2e_payload_invalid_json');
     }
