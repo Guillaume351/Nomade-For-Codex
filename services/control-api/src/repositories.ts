@@ -1111,6 +1111,24 @@ export class Repositories {
     ]);
   }
 
+  async listConversationTurnCounts(conversationIds: string[]): Promise<Map<string, number>> {
+    if (conversationIds.length === 0) {
+      return new Map();
+    }
+    const result = await this.pool.query<{ conversation_id: string; turn_count: number | string }>(
+      `SELECT conversation_id, COUNT(*)::int AS turn_count
+       FROM conversation_turns
+       WHERE conversation_id = ANY($1::text[])
+       GROUP BY conversation_id`,
+      [conversationIds]
+    );
+    const counts = new Map<string, number>();
+    for (const row of result.rows) {
+      counts.set(row.conversation_id, Number(row.turn_count) || 0);
+    }
+    return counts;
+  }
+
   async createConversationTurn(params: {
     conversationId: string;
     prompt: string;

@@ -437,6 +437,7 @@ export class WsHub {
     agentId: string;
     threadId: string;
     conversationId?: string;
+    timeoutMs?: number;
   }): Promise<CodexThreadReadSummary> {
     const requestId = randomToken("cr");
     const conn = this.agentSockets.get(params.agentId);
@@ -452,10 +453,11 @@ export class WsHub {
     };
 
     return new Promise<CodexThreadReadSummary>((resolve, reject) => {
+      const timeoutMs = Math.max(5_000, Math.min(params.timeoutMs ?? 20_000, 120_000));
       const timeout = setTimeout(() => {
         this.pendingThreadRead.delete(requestId);
         reject(new Error("thread_read_timeout"));
-      }, 20_000);
+      }, timeoutMs);
 
       this.pendingThreadRead.set(requestId, { resolve, reject, timeout });
       conn.ws.send(JSON.stringify(payload));

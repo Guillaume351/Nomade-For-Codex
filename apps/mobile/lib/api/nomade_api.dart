@@ -26,6 +26,7 @@ class NomadeApi {
 
   final String baseUrl;
   static const _requestTimeout = Duration(seconds: 12);
+  static const _importRequestTimeout = Duration(minutes: 6);
 
   Uri _uri(String path, {Map<String, String>? queryParameters}) {
     final base = Uri.parse(baseUrl);
@@ -35,11 +36,10 @@ class NomadeApi {
     );
   }
 
-  Future<http.Response> _send(
-    Future<http.Response> Function() request,
-  ) async {
+  Future<http.Response> _send(Future<http.Response> Function() request,
+      {Duration? timeout}) async {
     try {
-      return await request().timeout(_requestTimeout);
+      return await request().timeout(timeout ?? _requestTimeout);
     } on TimeoutException {
       throw ApiException('Request timed out while contacting $baseUrl');
     } on http.ClientException catch (error) {
@@ -221,6 +221,7 @@ class NomadeApi {
         },
         body: jsonEncode({'limit': limit}),
       ),
+      timeout: _importRequestTimeout,
     );
     return _decodeObject(response);
   }

@@ -886,6 +886,7 @@ export const createServer = async (): Promise<http.Server> => {
   };
 
   const tunnelDiagnostics = new Map<string, TunnelDiagnostic>();
+  const codexImportLocks = new Set<string>();
 
   const tunnelStatusFromRecord = (
     tunnel: TunnelRecord
@@ -2360,7 +2361,8 @@ export const createServer = async (): Promise<http.Server> => {
 
   app.post("/agents/:agentId/codex/import", requireHybridUserAuth, async (req, res) => {
     const schema = z.object({
-      limit: z.number().int().min(1).max(500).optional()
+      limit: z.number().int().min(1).max(500).optional(),
+      threadReadTimeoutMs: z.number().int().min(5_000).max(120_000).optional()
     });
     const parsed = schema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -2377,210 +2379,267 @@ export const createServer = async (): Promise<http.Server> => {
       return;
     }
 
-    let threads: Array<{
-      threadId: string;
-      title: string;
-      preview: string;
-      cwd: string;
-      updatedAt: number;
-    }> = [];
-
-    try {
-      threads = await wsHub.listCodexThreadsThroughAgent({
-        agentId,
-        limit: parsed.data.limit ?? 500
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "thread_list_failed";
-      const status = message === "agent_offline" ? 409 : 502;
-      res.status(status).json({ error: message });
+    const importLockKey = `${userId}:${agentId}`;
+    if (codexImportLocks.has(importLockKey)) {
+      res.status(409).json({ error: "import_in_progress" });
       return;
     }
 
-    const existingWorkspaces = await repositories.listWorkspaces(userId);
-    const workspaceByPath = new Map<string, { id: string; name: string; path: string; agent_id: string }>();
-    for (const workspace of existingWorkspaces) {
-      if (workspace.agent_id === agentId) {
-        workspaceByPath.set(workspace.path, workspace);
-      }
-    }
+    codexImportLocks.add(importLockKey);
+    try {
+      const threadReadTimeoutMs = parsed.data.threadReadTimeoutMs ?? 45_000;
+      let threads: Array<{
+        threadId: string;
+        title: string;
+        preview: string;
+        cwd: string;
+        updatedAt: number;
+      }> = [];
 
-    const conversationByThreadId = new Map<string, string>();
-    for (const workspace of workspaceByPath.values()) {
-      const conversations = await repositories.listConversations(userId, workspace.id);
-      for (const conversation of conversations) {
-        if (conversation.codex_thread_id) {
-          conversationByThreadId.set(conversation.codex_thread_id, conversation.id);
-        }
-      }
-    }
-
-    let importedWorkspaces = 0;
-    let importedConversations = 0;
-    let skippedConversations = 0;
-    let hydratedOrRepaired = 0;
-    let failedHydrations = 0;
-
-    for (const thread of threads) {
-      const normalizedPath = thread.cwd.trim() || ".";
-      let workspace = workspaceByPath.get(normalizedPath);
-
-      if (!workspace) {
-        const baseName = path.basename(normalizedPath) || "Workspace";
-        workspace = await repositories.createWorkspace({
-          userId,
-          agentId,
-          name: baseName.length > 120 ? `${baseName.substring(0, 120)}...` : baseName,
-          path: normalizedPath
-        });
-        workspaceByPath.set(normalizedPath, workspace);
-        importedWorkspaces += 1;
-      }
-
-      let conversationId = conversationByThreadId.get(thread.threadId);
-      if (conversationId) {
-        skippedConversations += 1;
-      } else {
-        const fallback = thread.preview
-          .split("\n")
-          .find((line) => line.trim().length > 0)
-          ?.trim() ?? "Imported Codex thread";
-        const rawTitle = thread.title.trim().length > 0 ? thread.title.trim() : fallback;
-        const title = rawTitle.length > 240 ? `${rawTitle.substring(0, 240)}...` : rawTitle;
-
-        const conversation = await repositories.createConversation({
-          userId,
-          workspaceId: workspace.id,
-          agentId,
-          title
-        });
-        await repositories.updateConversationThreadId(conversation.id, thread.threadId);
-        await repositories.updateConversationStatus(conversation.id, "idle");
-        wsHub.rememberConversationOwner(conversation.id, userId, agentId);
-
-        conversationByThreadId.set(thread.threadId, conversation.id);
-        conversationId = conversation.id;
-        importedConversations += 1;
-      }
-
-      if (!conversationId) {
-        failedHydrations += 1;
-        continue;
-      }
-
-      wsHub.rememberConversationOwner(conversationId, userId, agentId);
-
-      let threadDetail:
-        | {
-            turns: Array<{
-              turnId: string;
-              status: "running" | "completed" | "interrupted" | "failed";
-              error?: string;
-              userPrompt: string;
-              items: Array<{
-                itemId: string;
-                itemType: string;
-                payload: Record<string, unknown>;
-              }>;
-            }>;
-          }
-        | null = null;
       try {
-        threadDetail = await wsHub.readCodexThreadThroughAgent({
+        threads = await wsHub.listCodexThreadsThroughAgent({
           agentId,
-          threadId: thread.threadId,
-          conversationId
+          limit: parsed.data.limit ?? 500
         });
       } catch (error) {
-        failedHydrations += 1;
-        const message = error instanceof Error ? error.message : "thread_read_failed";
-        console.warn("[control-api] codex thread read failed", {
-          conversationId,
-          threadId: thread.threadId,
-          error: message
-        });
-        continue;
+        const message = error instanceof Error ? error.message : "thread_list_failed";
+        const status = message === "agent_offline" ? 409 : 502;
+        res.status(status).json({ error: message });
+        return;
       }
 
-      try {
-        await repositories.deleteConversationTurns(conversationId);
-        let lastTurnStatus: "running" | "completed" | "interrupted" | "failed" | undefined;
-        for (const importedTurn of threadDetail.turns) {
-          const createdTurn = await repositories.createConversationTurn({
-            conversationId,
-            prompt: importedTurn.userPrompt ?? ""
+      const existingWorkspaces = await repositories.listWorkspaces(userId);
+      const workspaceByPath = new Map<string, { id: string; name: string; path: string; agent_id: string }>();
+      for (const workspace of existingWorkspaces) {
+        if (workspace.agent_id === agentId) {
+          workspaceByPath.set(workspace.path, workspace);
+        }
+      }
+
+      const conversationByThreadId = new Map<string, { id: string; updatedAtMs: number }>();
+      for (const workspace of workspaceByPath.values()) {
+        const conversations = await repositories.listConversations(userId, workspace.id);
+        for (const conversation of conversations) {
+          if (conversation.codex_thread_id) {
+            conversationByThreadId.set(conversation.codex_thread_id, {
+              id: conversation.id,
+              updatedAtMs: conversation.updated_at.getTime()
+            });
+          }
+        }
+      }
+
+      const existingConversationIds = Array.from(conversationByThreadId.values(), (entry) => entry.id);
+      const turnCountByConversationId = await repositories.listConversationTurnCounts(existingConversationIds);
+
+      let importedWorkspaces = 0;
+      let importedConversations = 0;
+      let skippedConversations = 0;
+      let hydrationSkipped = 0;
+      let hydrationAttempts = 0;
+      let hydratedOrRepaired = 0;
+      let failedHydrations = 0;
+      let threadReadTimeouts = 0;
+
+      for (const thread of threads) {
+        const normalizedPath = thread.cwd.trim() || ".";
+        let workspace = workspaceByPath.get(normalizedPath);
+
+        if (!workspace) {
+          const baseName = path.basename(normalizedPath) || "Workspace";
+          workspace = await repositories.createWorkspace({
+            userId,
+            agentId,
+            name: baseName.length > 120 ? `${baseName.substring(0, 120)}...` : baseName,
+            path: normalizedPath
           });
-          const codexTurnId = importedTurn.turnId?.trim() ?? "";
-          if (codexTurnId.length > 0) {
-            await repositories.markConversationTurnStarted({
-              turnId: createdTurn.id,
-              codexTurnId
-            });
-          }
-          const importedItems = Array.isArray(importedTurn.items) ? importedTurn.items : [];
-          for (let itemIndex = 0; itemIndex < importedItems.length; itemIndex += 1) {
-            const item = importedItems[itemIndex]!;
-            const itemId = item.itemId?.trim() || `item-${itemIndex + 1}`;
-            const itemType = item.itemType?.trim() || "unknown";
-            const payload =
-              item.payload && typeof item.payload === "object"
-                ? item.payload
-                : { value: item.payload };
-            await repositories.upsertConversationItem({
-              turnId: createdTurn.id,
-              itemId,
-              itemType,
-              payload
-            });
-          }
-          if (
-            importedTurn.status === "completed" ||
-            importedTurn.status === "interrupted" ||
-            importedTurn.status === "failed"
-          ) {
-            await repositories.completeConversationTurn({
-              turnId: createdTurn.id,
-              status: importedTurn.status,
-              error: importedTurn.error
-            });
-          }
-          lastTurnStatus = importedTurn.status;
+          workspaceByPath.set(normalizedPath, workspace);
+          importedWorkspaces += 1;
         }
 
-        const conversationStatus =
-          lastTurnStatus === "running"
-            ? "running"
-            : lastTurnStatus === "interrupted"
-              ? "interrupted"
-              : lastTurnStatus === "failed"
-                ? "failed"
-                : "idle";
-        await repositories.updateConversationStatus(conversationId, conversationStatus);
-        hydratedOrRepaired += 1;
-      } catch (error) {
-        failedHydrations += 1;
-        const message = error instanceof Error ? error.message : "thread_hydration_failed";
-        console.warn("[control-api] codex thread hydration failed", {
-          conversationId,
-          threadId: thread.threadId,
-          error: message
-        });
-      }
-    }
+        let conversationMeta = conversationByThreadId.get(thread.threadId);
+        let conversationId = conversationMeta?.id;
+        let createdConversation = false;
+        if (conversationId) {
+          skippedConversations += 1;
+        } else {
+          const fallback = thread.preview
+            .split("\n")
+            .find((line) => line.trim().length > 0)
+            ?.trim() ?? "Imported Codex thread";
+          const rawTitle = thread.title.trim().length > 0 ? thread.title.trim() : fallback;
+          const title = rawTitle.length > 240 ? `${rawTitle.substring(0, 240)}...` : rawTitle;
 
-    res.json({
-      threadsScanned: threads.length,
-      importedWorkspaces,
-      importedConversations,
-      skippedConversations,
-      hydratedOrRepaired,
-      failedHydrations,
-      threads_scanned: threads.length,
-      imported: importedConversations,
-      skipped: skippedConversations,
-      hydrated_or_repaired: hydratedOrRepaired,
-      failed_hydrations: failedHydrations
-    });
+          const conversation = await repositories.createConversation({
+            userId,
+            workspaceId: workspace.id,
+            agentId,
+            title
+          });
+          await repositories.updateConversationThreadId(conversation.id, thread.threadId);
+          await repositories.updateConversationStatus(conversation.id, "idle");
+          wsHub.rememberConversationOwner(conversation.id, userId, agentId);
+
+          conversationMeta = {
+            id: conversation.id,
+            updatedAtMs: conversation.updated_at.getTime()
+          };
+          conversationByThreadId.set(thread.threadId, conversationMeta);
+          turnCountByConversationId.set(conversation.id, 0);
+          conversationId = conversation.id;
+          createdConversation = true;
+          importedConversations += 1;
+        }
+
+        if (!conversationId) {
+          failedHydrations += 1;
+          continue;
+        }
+
+        const existingTurnCount = turnCountByConversationId.get(conversationId) ?? 0;
+        const conversationUpdatedAtMs = conversationMeta?.updatedAtMs ?? 0;
+        const threadUpdatedAtMs = Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0;
+        const threadAppearsNewer = threadUpdatedAtMs > conversationUpdatedAtMs + 1_000;
+        const shouldHydrate = createdConversation || existingTurnCount === 0 || threadAppearsNewer;
+        if (!shouldHydrate) {
+          hydrationSkipped += 1;
+          continue;
+        }
+
+        wsHub.rememberConversationOwner(conversationId, userId, agentId);
+        hydrationAttempts += 1;
+
+        let threadDetail:
+          | {
+              turns: Array<{
+                turnId: string;
+                status: "running" | "completed" | "interrupted" | "failed";
+                error?: string;
+                userPrompt: string;
+                items: Array<{
+                  itemId: string;
+                  itemType: string;
+                  payload: Record<string, unknown>;
+                }>;
+              }>;
+            }
+          | null = null;
+        try {
+          threadDetail = await wsHub.readCodexThreadThroughAgent({
+            agentId,
+            threadId: thread.threadId,
+            conversationId,
+            timeoutMs: threadReadTimeoutMs
+          });
+        } catch (error) {
+          failedHydrations += 1;
+          const message = error instanceof Error ? error.message : "thread_read_failed";
+          if (message === "thread_read_timeout") {
+            threadReadTimeouts += 1;
+          }
+          console.warn("[control-api] codex thread read failed", {
+            conversationId,
+            threadId: thread.threadId,
+            error: message
+          });
+          continue;
+        }
+
+        try {
+          await repositories.deleteConversationTurns(conversationId);
+          let lastTurnStatus: "running" | "completed" | "interrupted" | "failed" | undefined;
+          for (const importedTurn of threadDetail.turns) {
+            const createdTurn = await repositories.createConversationTurn({
+              conversationId,
+              prompt: importedTurn.userPrompt ?? ""
+            });
+            const codexTurnId = importedTurn.turnId?.trim() ?? "";
+            if (codexTurnId.length > 0) {
+              await repositories.markConversationTurnStarted({
+                turnId: createdTurn.id,
+                codexTurnId
+              });
+            }
+            const importedItems = Array.isArray(importedTurn.items) ? importedTurn.items : [];
+            for (let itemIndex = 0; itemIndex < importedItems.length; itemIndex += 1) {
+              const item = importedItems[itemIndex]!;
+              const itemId = item.itemId?.trim() || `item-${itemIndex + 1}`;
+              const itemType = item.itemType?.trim() || "unknown";
+              const payload =
+                item.payload && typeof item.payload === "object"
+                  ? item.payload
+                  : { value: item.payload };
+              await repositories.upsertConversationItem({
+                turnId: createdTurn.id,
+                itemId,
+                itemType,
+                payload
+              });
+            }
+            if (
+              importedTurn.status === "completed" ||
+              importedTurn.status === "interrupted" ||
+              importedTurn.status === "failed"
+            ) {
+              await repositories.completeConversationTurn({
+                turnId: createdTurn.id,
+                status: importedTurn.status,
+                error: importedTurn.error
+              });
+            }
+            lastTurnStatus = importedTurn.status;
+          }
+
+          const conversationStatus =
+            lastTurnStatus === "running"
+              ? "running"
+              : lastTurnStatus === "interrupted"
+                ? "interrupted"
+                : lastTurnStatus === "failed"
+                  ? "failed"
+                  : "idle";
+          await repositories.updateConversationStatus(conversationId, conversationStatus);
+          turnCountByConversationId.set(conversationId, threadDetail.turns.length);
+          conversationByThreadId.set(thread.threadId, {
+            id: conversationId,
+            updatedAtMs: Date.now()
+          });
+          hydratedOrRepaired += 1;
+        } catch (error) {
+          failedHydrations += 1;
+          const message = error instanceof Error ? error.message : "thread_hydration_failed";
+          console.warn("[control-api] codex thread hydration failed", {
+            conversationId,
+            threadId: thread.threadId,
+            error: message
+          });
+        }
+      }
+
+      res.json({
+        threadsScanned: threads.length,
+        importedWorkspaces,
+        importedConversations,
+        skippedConversations,
+        hydrationAttempts,
+        hydrationSkipped,
+        hydratedOrRepaired,
+        failedHydrations,
+        threadReadTimeouts,
+        threadReadTimeoutMs,
+        threads_scanned: threads.length,
+        imported: importedConversations,
+        skipped: skippedConversations,
+        hydration_attempts: hydrationAttempts,
+        hydration_skipped: hydrationSkipped,
+        hydrated_or_repaired: hydratedOrRepaired,
+        failed_hydrations: failedHydrations,
+        thread_read_timeouts: threadReadTimeouts,
+        thread_read_timeout_ms: threadReadTimeoutMs
+      });
+    } finally {
+      codexImportLocks.delete(importLockKey);
+    }
   });
 
   app.get("/agents/:agentId/codex/options", requireHybridUserAuth, async (req, res) => {

@@ -3826,14 +3826,25 @@ class NomadeProvider with ChangeNotifier {
       if (!silent) {
         final imported = (result['imported'] as num?)?.toInt() ?? 0;
         final repaired = (result['hydrated_or_repaired'] as num?)?.toInt() ?? 0;
-        status = 'Import complete: $imported new, $repaired repaired';
+        final readTimeouts =
+            (result['thread_read_timeouts'] as num?)?.toInt() ?? 0;
+        if (readTimeouts > 0) {
+          status =
+              'Import complete: $imported new, $repaired repaired ($readTimeouts read timeouts)';
+        } else {
+          status = 'Import complete: $imported new, $repaired repaired';
+        }
       }
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return;
       }
       if (!silent) {
-        status = 'Import failed: $e';
+        if (e is ApiException && e.errorCode == 'import_in_progress') {
+          status = 'Import already running on this agent';
+        } else {
+          status = 'Import failed: $e';
+        }
       }
     } finally {
       importingHistory = false;
