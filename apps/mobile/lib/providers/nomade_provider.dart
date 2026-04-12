@@ -1351,8 +1351,28 @@ class NomadeProvider with ChangeNotifier {
 
   Future<void> loadTurns(String conversationId) async {
     try {
-      final loaded = await api.listConversationTurns(
-          accessToken: accessToken!, conversationId: conversationId);
+      var payload = await api.getConversationTurns(
+        accessToken: accessToken!,
+        conversationId: conversationId,
+      );
+      final hydration = _asStringKeyedMap(payload['hydration']);
+      final hydrationReason = hydration?['reason']?.toString().trim();
+      if (hydrationReason == 'legacy_turns_purged') {
+        _appendConversationDebugEvent(
+          conversationId: conversationId,
+          type: 'turns.resync',
+          message: 'legacy detected and purged; strict resync requested',
+        );
+        payload = await api.getConversationTurns(
+          accessToken: accessToken!,
+          conversationId: conversationId,
+          forceHydrate: true,
+        );
+      }
+      final loaded = ((payload['items'] as List?) ?? [])
+          .cast<Map>()
+          .map((item) => item.cast<String, dynamic>())
+          .toList(growable: false);
       turns = loaded
           .map((raw) => _decryptTurnForUi(Turn.fromJson(raw)))
           .toList(growable: false);
@@ -2050,10 +2070,12 @@ class NomadeProvider with ChangeNotifier {
     var userPrompt = turn.userPrompt;
     if (userPrompt.trim().isNotEmpty) {
       final parsedPrompt = _tryParseJsonObject(userPrompt);
-      final promptEnvelope =
-          parsedPrompt == null ? null : _parseEnvelopeMap(parsedPrompt);
-      if (promptEnvelope == null) {
+      if (parsedPrompt == null) {
         throw const E2ERuntimeException('e2e_turn_prompt_missing_envelope');
+      }
+      final promptEnvelope = _parseEnvelopeMap(parsedPrompt);
+      if (promptEnvelope == null) {
+        throw const E2ERuntimeException('e2e_turn_prompt_invalid_envelope');
       }
       final promptPlain = _decryptEnvelopeToString(
         scope: scope,
@@ -2071,12 +2093,16 @@ class NomadeProvider with ChangeNotifier {
     var diff = turn.diff;
     if (diff.trim().isNotEmpty) {
       final parsedDiff = _tryParseJsonObject(diff);
-      final diffEnvelope = parsedDiff == null
-          ? null
-          : _parseEnvelopeMap(parsedDiff['e2eEnvelope']) ??
-              _parseEnvelopeMap(parsedDiff);
-      if (diffEnvelope == null) {
+      if (parsedDiff == null) {
         throw const E2ERuntimeException('e2e_turn_diff_missing_envelope');
+      }
+      final nestedRaw = parsedDiff['e2eEnvelope'];
+      final nestedEnvelope = nestedRaw is Map
+          ? _parseEnvelopeMap(nestedRaw.cast<String, dynamic>())
+          : null;
+      final diffEnvelope = nestedEnvelope ?? _parseEnvelopeMap(parsedDiff);
+      if (diffEnvelope == null) {
+        throw const E2ERuntimeException('e2e_turn_diff_invalid_envelope');
       }
       final diffPayload = _decryptEnvelopeToObject(
         scope: scope,
@@ -2088,14 +2114,13 @@ class NomadeProvider with ChangeNotifier {
 
     final decryptedItems = <TurnItem>[];
     for (final item in turn.items) {
-      final envelope = _parseEnvelopeMap(item.payload['e2eEnvelope']) ??
-          _parseEnvelopeMap(item.payload);
+      final nestedRaw = item.payload['e2eEnvelope'];
+      final nestedEnvelope = nestedRaw is Map
+          ? _parseEnvelopeMap(nestedRaw.cast<String, dynamic>())
+          : null;
+      final envelope = nestedEnvelope ?? _parseEnvelopeMap(item.payload);
       if (envelope == null) {
-        if (item.payload.isNotEmpty) {
-          throw const E2ERuntimeException('e2e_turn_item_missing_envelope');
-        }
-        decryptedItems.add(item);
-        continue;
+        throw const E2ERuntimeException('e2e_turn_item_missing_envelope');
       }
       final itemPayload = _decryptEnvelopeToObject(
         scope: scope,
@@ -2363,7 +2388,15 @@ class NomadeProvider with ChangeNotifier {
             cause: error),
       );
       return;
-    } catch (_) {
+    } catch (error) {
+      final conversationId = _selectedConversation?.id;
+      if (conversationId != null) {
+        _appendConversationDebugEvent(
+          conversationId: conversationId,
+          type: 'socket.decode.error',
+          message: error.toString(),
+        );
+      }
       return;
     }
     final type = event['type'] as String?;
@@ -2997,6 +3030,9 @@ class NomadeProvider with ChangeNotifier {
         notifyListeners();
         return;
       }
+      // Always refresh the realtime socket before a new turn to avoid stale
+      // half-open mobile websocket sessions that can miss turn events.
+      await connectSocket();
 
       _appendConversationDebugEvent(
         conversationId: conversationId,

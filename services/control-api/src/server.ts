@@ -204,10 +204,114 @@ const hasLegacyWrappedItemPayload = (payload: unknown): boolean => {
   return typeof value.itemType === "string" && value.payload !== undefined;
 };
 
+const parseJsonObject = (raw: unknown): Record<string, unknown> | null => {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const decoded = JSON.parse(trimmed);
+    if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
+      return decoded as Record<string, unknown>;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+};
+
+type StrictEnvelope = {
+  v: 1;
+  alg: "xchacha20poly1305";
+  senderDeviceId: string;
+  epoch: number;
+  seq: number;
+  nonce: string;
+  aad: string;
+  ciphertext: string;
+  sig: string;
+};
+
+const isStrictEnvelopeObject = (value: unknown): value is StrictEnvelope => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const envelope = value as Record<string, unknown>;
+  const epoch = envelope.epoch;
+  const seq = envelope.seq;
+  return (
+    envelope.v === 1 &&
+    envelope.alg === "xchacha20poly1305" &&
+    typeof envelope.senderDeviceId === "string" &&
+    envelope.senderDeviceId.trim().length > 0 &&
+    typeof epoch === "number" &&
+    Number.isInteger(epoch) &&
+    epoch > 0 &&
+    typeof seq === "number" &&
+    Number.isInteger(seq) &&
+    seq >= 0 &&
+    typeof envelope.nonce === "string" &&
+    envelope.nonce.trim().length > 0 &&
+    typeof envelope.aad === "string" &&
+    envelope.aad.trim().length > 0 &&
+    typeof envelope.ciphertext === "string" &&
+    envelope.ciphertext.trim().length > 0 &&
+    typeof envelope.sig === "string" &&
+    envelope.sig.trim().length > 0
+  );
+};
+
+const hasEnvelopePayload = (payload: unknown): boolean => {
+  if (isStrictEnvelopeObject(payload)) {
+    return true;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return false;
+  }
+  const nested = (payload as Record<string, unknown>).e2eEnvelope;
+  return isStrictEnvelopeObject(nested);
+};
+
+const userPromptNeedsRepair = (value: unknown): boolean => {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return false;
+  }
+  const parsed = parseJsonObject(value);
+  return parsed === null || !isStrictEnvelopeObject(parsed);
+};
+
+const diffNeedsRepair = (value: unknown): boolean => {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return false;
+  }
+  const parsed = parseJsonObject(value);
+  if (!parsed) {
+    return true;
+  }
+  if (isStrictEnvelopeObject(parsed)) {
+    return false;
+  }
+  const nested = parsed.e2eEnvelope;
+  return !isStrictEnvelopeObject(nested);
+};
+
 const turnsNeedRepair = (
-  turns: Array<{ items?: Array<{ item_type?: unknown; payload?: unknown }> }>
+  turns: Array<{
+    user_prompt?: unknown;
+    diff?: unknown;
+    items?: Array<{ item_type?: unknown; payload?: unknown }>;
+  }>
 ): boolean => {
   for (const turn of turns) {
+    if (userPromptNeedsRepair(turn.user_prompt)) {
+      return true;
+    }
+    if (diffNeedsRepair(turn.diff)) {
+      return true;
+    }
     const items = Array.isArray(turn.items) ? turn.items : [];
     for (const item of items) {
       const itemType = String(item.item_type ?? "");
@@ -215,6 +319,9 @@ const turnsNeedRepair = (
         return true;
       }
       if (hasLegacyWrappedItemPayload(item.payload)) {
+        return true;
+      }
+      if (!hasEnvelopePayload(item.payload)) {
         return true;
       }
     }
@@ -1046,50 +1153,6 @@ export const createServer = async (): Promise<http.Server> => {
       socket.destroy();
     });
   });
-
-  const importThreadHistoryIntoConversation = async (params: {
-    conversationId: string;
-    agentId: string;
-    threadId: string;
-  }): Promise<void> => {
-    const thread = await wsHub.readCodexThreadThroughAgent({
-      agentId: params.agentId,
-      threadId: params.threadId
-    });
-
-    await repositories.deleteConversationTurns(params.conversationId);
-    for (const turn of thread.turns) {
-      const userPrompt = turn.userPrompt.trim().length > 0 ? turn.userPrompt.trim() : "Imported turn";
-      const createdTurn = await repositories.createConversationTurn({
-        conversationId: params.conversationId,
-        prompt: userPrompt
-      });
-
-      await repositories.markConversationTurnStarted({
-        turnId: createdTurn.id,
-        codexTurnId: turn.turnId
-      });
-
-      if (turn.status === "completed" || turn.status === "interrupted" || turn.status === "failed") {
-        await repositories.completeConversationTurn({
-          turnId: createdTurn.id,
-          status: turn.status,
-          error: turn.error
-        });
-      }
-
-      for (const item of turn.items) {
-        await repositories.addConversationItem({
-          turnId: createdTurn.id,
-          itemId: item.itemId,
-          itemType: item.itemType,
-          payload: item.payload
-        });
-      }
-    }
-
-    await repositories.updateConversationStatus(params.conversationId, "idle");
-  };
 
   app.get("/web", (_req, res) => {
     res.redirect("/web/account");
@@ -2364,18 +2427,15 @@ export const createServer = async (): Promise<http.Server> => {
         const existingConversationId = conversationByThreadId.get(thread.threadId);
         if (existingConversationId) {
           const existingTurns = await repositories.listConversationTurns(existingConversationId);
-          const needsRepair = existingTurns.length === 0 || turnsNeedRepair(existingTurns);
+          const needsRepair = turnsNeedRepair(existingTurns);
           if (needsRepair) {
             try {
-              await importThreadHistoryIntoConversation({
-                conversationId: existingConversationId,
-                agentId,
-                threadId: thread.threadId
-              });
+              await repositories.deleteConversationTurns(existingConversationId);
+              await repositories.updateConversationStatus(existingConversationId, "idle");
               hydratedOrRepaired += 1;
             } catch (error) {
-              const message = error instanceof Error ? error.message : "thread_hydration_failed";
-              console.warn("[control-api] import repair skipped", existingConversationId, message);
+              const message = error instanceof Error ? error.message : "legacy_turn_purge_failed";
+              console.warn("[control-api] legacy turn purge skipped", existingConversationId, message);
             }
           }
         }
@@ -2692,9 +2752,6 @@ export const createServer = async (): Promise<http.Server> => {
     let turns = await repositories.listConversationTurns(conversation.id);
     const forceHydrate = isTruthyQuery(req.query.forceHydrate);
     const needsRepair = turnsNeedRepair(turns);
-    const shouldHydrate = Boolean(
-      conversation.codex_thread_id && (forceHydrate || turns.length === 0 || needsRepair)
-    );
     const hydration = {
       attempted: false,
       repaired: false,
@@ -2702,22 +2759,24 @@ export const createServer = async (): Promise<http.Server> => {
       reason: null as string | null
     };
 
-    if (shouldHydrate && conversation.codex_thread_id) {
+    if (needsRepair) {
       hydration.attempted = true;
       try {
-        await importThreadHistoryIntoConversation({
-          conversationId: conversation.id,
-          agentId: conversation.agent_id,
-          threadId: conversation.codex_thread_id
-        });
-        turns = await repositories.listConversationTurns(conversation.id);
+        await repositories.deleteConversationTurns(conversation.id);
+        await repositories.updateConversationStatus(conversation.id, "idle");
+        turns = [];
         hydration.repaired = true;
+        hydration.reason = "legacy_turns_purged";
       } catch (error) {
-        const message = error instanceof Error ? error.message : "thread_hydration_failed";
+        const message = error instanceof Error ? error.message : "legacy_turn_purge_failed";
         hydration.deferred = true;
         hydration.reason = message;
-        console.warn("[control-api] failed to hydrate thread history", conversation.id, message);
+        console.warn("[control-api] failed to purge legacy turns", conversation.id, message);
       }
+    } else if (forceHydrate) {
+      hydration.attempted = true;
+      hydration.repaired = true;
+      hydration.reason = "strict_e2e_resync_noop";
     }
 
     for (const turn of turns) {
@@ -2775,26 +2834,14 @@ export const createServer = async (): Promise<http.Server> => {
     const schema = z.object({
       prompt: z.string().min(1).optional(),
       inputItems: z.array(inputItemSchema).optional(),
-      e2ePromptEnvelope: e2eEnvelopeSchema.optional(),
+      e2ePromptEnvelope: e2eEnvelopeSchema,
       collaborationMode: z.record(z.unknown()).optional(),
       model: z.string().min(1).max(120).optional(),
       cwd: z.string().min(1).optional(),
       approvalPolicy: approvalPolicySchema.optional(),
       sandboxMode: sandboxModeSchema.optional(),
       effort: reasoningEffortSchema.optional()
-    }).refine(
-      (value) => {
-        if (value.e2ePromptEnvelope) {
-          return true;
-        }
-        const prompt = value.prompt?.trim() ?? "";
-        return prompt.length > 0 || (value.inputItems?.length ?? 0) > 0;
-      },
-      {
-        message: "prompt/inputItems or e2ePromptEnvelope is required",
-        path: ["prompt"]
-      }
-    );
+    });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
@@ -2809,13 +2856,7 @@ export const createServer = async (): Promise<http.Server> => {
 
     const workspace = await repositories.findWorkspaceById(req.userId!, conversation.workspace_id);
     const normalizedPrompt = parsed.data.prompt?.trim() ?? "";
-    const userPrompt = parsed.data.e2ePromptEnvelope
-      ? JSON.stringify(parsed.data.e2ePromptEnvelope)
-      : normalizedPrompt.length > 0
-        ? normalizedPrompt
-        : JSON.stringify({
-            inputItems: parsed.data.inputItems ?? []
-          });
+    const userPrompt = JSON.stringify(parsed.data.e2ePromptEnvelope);
     const turn = await repositories.createConversationTurn({
       conversationId: conversation.id,
       prompt: userPrompt
