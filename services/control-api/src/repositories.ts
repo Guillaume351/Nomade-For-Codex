@@ -127,6 +127,16 @@ export interface DeviceScanFlowRecord {
   key_acked_at: Date | null;
 }
 
+export interface UserDeviceRecord {
+  id: string;
+  user_id: string;
+  name: string;
+  platform: string;
+  enc_public_key: string;
+  sign_public_key: string;
+  updated_at: Date;
+}
+
 export interface SessionRecord {
   id: string;
   user_id: string;
@@ -714,6 +724,25 @@ export class Repositories {
     }
     await this.ensureUserBillingDefaults(result.rows[0].id);
     return result.rows[0];
+  }
+
+  async listActiveUserDevices(userId: string): Promise<UserDeviceRecord[]> {
+    const result = await this.pool.query<UserDeviceRecord>(
+      `SELECT
+         id,
+         user_id,
+         name,
+         platform,
+         enc_public_key,
+         sign_public_key,
+         updated_at
+       FROM user_devices
+       WHERE user_id = $1
+         AND revoked_at IS NULL
+       ORDER BY updated_at DESC`,
+      [userId]
+    );
+    return result.rows;
   }
 
   async getUserByStripeCustomerId(stripeCustomerId: string): Promise<User | null> {

@@ -2089,6 +2089,20 @@ export const createServer = async (): Promise<http.Server> => {
     res.json(me);
   });
 
+  app.get("/me/e2e/devices", requireHybridUserAuth, async (req, res) => {
+    const devices = await repositories.listActiveUserDevices(req.userId!);
+    res.json({
+      items: devices.map((device) => ({
+        deviceId: device.id,
+        name: device.name,
+        platform: device.platform,
+        encPublicKey: device.enc_public_key,
+        signPublicKey: device.sign_public_key,
+        updatedAt: device.updated_at.toISOString()
+      }))
+    });
+  });
+
   app.get("/me/entitlements", requireHybridUserAuth, async (req, res) => {
     const entitlements = await repositories.getUserEntitlements(req.userId!);
     res.json(entitlements);

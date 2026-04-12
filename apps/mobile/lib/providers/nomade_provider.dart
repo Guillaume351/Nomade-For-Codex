@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -895,6 +896,66 @@ class NomadeProvider with ChangeNotifier {
     );
   }
 
+  Future<bool> _syncE2EPeersFromServer() async {
+    final token = accessToken;
+    final runtime = _e2eRuntime;
+    if (token == null || runtime == null || !runtime.isReady) {
+      return false;
+    }
+    Map<String, dynamic> payload;
+    try {
+      payload = await api.getE2EDevices(accessToken: token);
+    } catch (error) {
+      if (await _logoutIfUnauthorized(error)) {
+        return false;
+      }
+      debugPrint('[mobile-e2e] peer sync failed: $error');
+      return false;
+    }
+    final items = (payload['items'] as List?) ?? const [];
+    final snapshot = runtime.snapshot();
+    final selfDeviceId = snapshot.device.deviceId;
+    final currentPeers = Map<String, MobilePeerDevice>.from(snapshot.peers);
+    var changed = false;
+    for (final raw in items) {
+      if (raw is! Map) {
+        continue;
+      }
+      final entry = raw.cast<String, dynamic>();
+      final deviceId = entry['deviceId']?.toString().trim() ?? '';
+      final signPublicKey = entry['signPublicKey']?.toString().trim() ?? '';
+      final encPublicKey = entry['encPublicKey']?.toString().trim() ?? '';
+      if (deviceId.isEmpty ||
+          signPublicKey.isEmpty ||
+          deviceId == selfDeviceId) {
+        continue;
+      }
+      final existing = currentPeers[deviceId];
+      final nextEncPublicKey = encPublicKey.isNotEmpty
+          ? encPublicKey
+          : (existing?.encPublicKey ?? '');
+      if (existing != null &&
+          existing.signPublicKey == signPublicKey &&
+          existing.encPublicKey == nextEncPublicKey) {
+        continue;
+      }
+      final peer = MobilePeerDevice(
+        deviceId: deviceId,
+        encPublicKey: nextEncPublicKey,
+        signPublicKey: signPublicKey,
+        addedAt: existing?.addedAt ?? DateTime.now().toUtc().toIso8601String(),
+      );
+      runtime.addOrUpdatePeer(peer);
+      currentPeers[deviceId] = peer;
+      changed = true;
+    }
+    if (!changed) {
+      return false;
+    }
+    await _persistE2ERuntime();
+    return true;
+  }
+
   Future<void> _persistPendingScan() async {
     await Future.wait([
       _writeStorage(
@@ -1026,6 +1087,7 @@ class NomadeProvider with ChangeNotifier {
           } catch (_) {
             // Keep authenticated session even if a stale pending scan cannot be resumed.
           }
+          await _syncE2EPeersFromServer();
           await connectSocket();
           await bootstrapData(
             storedAgentId: storedAgentId,
@@ -1373,9 +1435,22 @@ class NomadeProvider with ChangeNotifier {
           .cast<Map>()
           .map((item) => item.cast<String, dynamic>())
           .toList(growable: false);
-      turns = loaded
-          .map((raw) => _decryptTurnForUi(Turn.fromJson(raw)))
-          .toList(growable: false);
+      try {
+        turns = loaded
+            .map((raw) => _decryptTurnForUi(Turn.fromJson(raw)))
+            .toList(growable: false);
+      } on E2ERuntimeException catch (error) {
+        if (error.code != 'e2e_unknown_sender_device') {
+          rethrow;
+        }
+        final synced = await _syncE2EPeersFromServer();
+        if (!synced) {
+          rethrow;
+        }
+        turns = loaded
+            .map((raw) => _decryptTurnForUi(Turn.fromJson(raw)))
+            .toList(growable: false);
+      }
       for (final turn in turns) {
         _hydrateTimelineFromTurn(turn);
       }
@@ -2007,6 +2082,32 @@ class NomadeProvider with ChangeNotifier {
     }
   }
 
+  Map<String, dynamic> _decodeSocketPayload(dynamic raw) {
+    if (raw is Map) {
+      return raw.cast<String, dynamic>();
+    }
+
+    String payload;
+    if (raw is String) {
+      payload = raw;
+    } else if (raw is Uint8List) {
+      payload = utf8.decode(raw);
+    } else if (raw is ByteBuffer) {
+      payload = utf8.decode(raw.asUint8List());
+    } else if (raw is List<int>) {
+      payload = utf8.decode(raw);
+    } else {
+      throw FormatException(
+          'unsupported socket payload type: ${raw.runtimeType}');
+    }
+
+    final decoded = jsonDecode(payload);
+    if (decoded is! Map) {
+      throw const FormatException('socket payload is not a JSON object');
+    }
+    return decoded.cast<String, dynamic>();
+  }
+
   String _decryptEnvelopeToString({
     required String scope,
     required Map<String, dynamic> envelope,
@@ -2374,7 +2475,7 @@ class NomadeProvider with ChangeNotifier {
   void _onSocketEvent(dynamic raw) {
     Map<String, dynamic> event;
     try {
-      event = jsonDecode(raw as String) as Map<String, dynamic>;
+      event = _decodeSocketPayload(raw);
       event = _decodeSocketEventStrict(event);
     } on E2ERuntimeException catch (error) {
       if (error.code == 'e2e_runtime_unavailable') {
@@ -3512,6 +3613,7 @@ class NomadeProvider with ChangeNotifier {
             }
           }
 
+          await _syncE2EPeersFromServer();
           await clearPendingScan();
           status = 'Secure scan approved';
           notifyListeners();
@@ -3557,6 +3659,7 @@ class NomadeProvider with ChangeNotifier {
           );
           // Continue account login even if secure scan resume fails.
         }
+        await _syncE2EPeersFromServer();
         await connectSocket();
         await bootstrapData();
         debugPrint('[mobile-auth] browser authorization completed');

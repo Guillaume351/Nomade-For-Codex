@@ -193,6 +193,20 @@ class NomadeApi {
     return _decodeObject(response);
   }
 
+  Future<Map<String, dynamic>> getE2EDevices({
+    required String accessToken,
+  }) async {
+    final response = await _send(
+      () => http.get(
+        _uri('/me/e2e/devices'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+        },
+      ),
+    );
+    return _decodeObject(response);
+  }
+
   Future<Map<String, dynamic>> importCodexThreads({
     required String accessToken,
     required String agentId,

@@ -37,6 +37,18 @@ interface ThreadListResult {
   nextCursor: string | null;
 }
 
+type ThreadSourceKind =
+  | "cli"
+  | "vscode"
+  | "exec"
+  | "appServer"
+  | "subAgent"
+  | "subAgentReview"
+  | "subAgentCompact"
+  | "subAgentThreadSpawn"
+  | "subAgentOther"
+  | "unknown";
+
 interface ThreadReadResult {
   thread: Record<string, unknown>;
 }
@@ -124,6 +136,19 @@ export interface CodexSkillSummary {
   name: string;
   path: string;
 }
+
+const defaultThreadSourceKinds: ThreadSourceKind[] = [
+  "cli",
+  "vscode",
+  "exec",
+  "appServer",
+  "subAgent",
+  "subAgentReview",
+  "subAgentCompact",
+  "subAgentThreadSpawn",
+  "subAgentOther",
+  "unknown"
+];
 
 const toSandboxPolicy = (sandboxMode?: CodexSandboxMode): Record<string, unknown> | undefined => {
   if (!sandboxMode) {
@@ -224,7 +249,7 @@ export class CodexAppServerClient {
       model: params.model,
       approvalPolicy: params.approvalPolicy ?? "never",
       sandbox: params.sandboxMode,
-      ephemeral: true
+      ephemeral: false
     })) as ThreadStartResult;
 
     const threadId = response?.thread?.id;
@@ -280,10 +305,18 @@ export class CodexAppServerClient {
     });
   }
 
-  async threadList(params?: { limit?: number; cursor?: string | null }): Promise<ThreadListResult> {
+  async threadList(params?: {
+    limit?: number;
+    cursor?: string | null;
+    sourceKinds?: ThreadSourceKind[];
+  }): Promise<ThreadListResult> {
     const response = (await this.request("thread/list", {
       limit: params?.limit ?? 50,
-      cursor: params?.cursor ?? null
+      cursor: params?.cursor ?? null,
+      sourceKinds:
+        params?.sourceKinds && params.sourceKinds.length > 0
+          ? params.sourceKinds
+          : defaultThreadSourceKinds
     })) as ThreadListResult;
 
     const data = Array.isArray(response?.data)

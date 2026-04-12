@@ -599,6 +599,157 @@ class _HomeScreenState extends State<HomeScreen> {
     return null;
   }
 
+  List<Map<String, dynamic>> _collectRateWindows(
+      Map<String, dynamic>? snapshot) {
+    final windows = <Map<String, dynamic>>[];
+    final primary = _extractRateWindow(snapshot, 'primary');
+    final secondary = _extractRateWindow(snapshot, 'secondary');
+    if (primary != null) {
+      windows.add(primary);
+    }
+    if (secondary != null) {
+      windows.add(secondary);
+    }
+    windows.sort((a, b) {
+      final left =
+          _toInt(a['windowDurationMins'] ?? a['window_minutes']) ?? 999999;
+      final right =
+          _toInt(b['windowDurationMins'] ?? b['window_minutes']) ?? 999999;
+      return left.compareTo(right);
+    });
+    return windows;
+  }
+
+  String _twoDigits(int value) => value.toString().padLeft(2, '0');
+
+  String _formatDateTimeExact(DateTime dateTime) {
+    final yyyy = dateTime.year.toString().padLeft(4, '0');
+    final mm = _twoDigits(dateTime.month);
+    final dd = _twoDigits(dateTime.day);
+    final hh = _twoDigits(dateTime.hour);
+    final mi = _twoDigits(dateTime.minute);
+    final ss = _twoDigits(dateTime.second);
+    return '$yyyy-$mm-$dd $hh:$mi:$ss';
+  }
+
+  String _activeRateLimitId(NomadeProvider provider) {
+    if (provider.codexRateLimitsByLimitId.containsKey('codex')) {
+      return 'codex';
+    }
+    if (provider.codexRateLimitsByLimitId.isNotEmpty) {
+      return provider.codexRateLimitsByLimitId.keys.first;
+    }
+    return '-';
+  }
+
+  String _formatResetExact(Map<String, dynamic> window) {
+    final resetsAt =
+        _toInt(window['resetsAt'] ?? window['resets_at'] ?? window['resetAt']);
+    if (resetsAt == null || resetsAt <= 0) {
+      return '-';
+    }
+    final utc =
+        DateTime.fromMillisecondsSinceEpoch(resetsAt * 1000, isUtc: true);
+    final local = utc.toLocal();
+    return '${_formatDateTimeExact(local)} local (${_formatDateTimeExact(utc)} UTC)';
+  }
+
+  void _showCodexQuotaDetails(
+    NomadeProvider provider,
+    ThemeData theme,
+    ColorScheme scheme,
+  ) {
+    final snapshot = provider.activeCodexRateLimitSnapshot;
+    if (snapshot == null) {
+      return;
+    }
+    final windows = _collectRateWindows(snapshot);
+    if (windows.isEmpty) {
+      return;
+    }
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: scheme.surface,
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 6, 18, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Codex usage windows',
+                  style: theme.textTheme.titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Limit id: ${_activeRateLimitId(provider)}',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: scheme.onSurfaceVariant),
+                ),
+                const SizedBox(height: 12),
+                for (var i = 0; i < windows.length && i < 2; i++) ...[
+                  _buildQuotaWindowDetailRow(theme, scheme, windows[i], i),
+                  if (i < windows.length - 1) const SizedBox(height: 12),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildQuotaWindowDetailRow(
+    ThemeData theme,
+    ColorScheme scheme,
+    Map<String, dynamic> window,
+    int index,
+  ) {
+    final used = (_toInt(window['usedPercent'] ?? window['used_percent']) ?? 0)
+        .clamp(0, 100);
+    final remaining = (100 - used).clamp(0, 100);
+    final label = _formatWindowLabel(window, index);
+    final windowMins =
+        _toInt(window['windowDurationMins'] ?? window['window_minutes']) ?? 0;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(12),
+        border:
+            Border.all(color: scheme.outlineVariant.withValues(alpha: 0.55)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '$label window',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Used: $used%  •  Remaining: $remaining%  •  Duration: ${windowMins}m',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Reset: ${_formatResetExact(window)}',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+
   String _formatWindowLabel(Map<String, dynamic> window, int fallbackIndex) {
     final durationMins =
         _toInt(window['windowDurationMins'] ?? window['window_minutes']);
@@ -640,25 +791,10 @@ class _HomeScreenState extends State<HomeScreen> {
     if (snapshot == null) {
       return const SizedBox.shrink();
     }
-    final windows = <Map<String, dynamic>>[];
-    final primary = _extractRateWindow(snapshot, 'primary');
-    final secondary = _extractRateWindow(snapshot, 'secondary');
-    if (primary != null) {
-      windows.add(primary);
-    }
-    if (secondary != null) {
-      windows.add(secondary);
-    }
+    final windows = _collectRateWindows(snapshot);
     if (windows.isEmpty) {
       return const SizedBox.shrink();
     }
-    windows.sort((a, b) {
-      final left =
-          _toInt(a['windowDurationMins'] ?? a['window_minutes']) ?? 999999;
-      final right =
-          _toInt(b['windowDurationMins'] ?? b['window_minutes']) ?? 999999;
-      return left.compareTo(right);
-    });
     final pieces = <String>[];
     final compactPieces = <String>[];
     var minRemaining = 100;
@@ -682,23 +818,33 @@ class _HomeScreenState extends State<HomeScreen> {
         : minRemaining <= 20
             ? scheme.tertiary
             : scheme.primary;
-    return Container(
-      padding: EdgeInsets.symmetric(
-        horizontal: compact ? 8 : 10,
-        vertical: compact ? 5 : 6,
-      ),
-      decoration: BoxDecoration(
-        color: badgeColor.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        compact
-            ? compactPieces.join(' ')
-            : 'Codex restant ${pieces.join(' · ')}',
-        style: theme.textTheme.bodySmall?.copyWith(
-          color: badgeColor,
-          fontWeight: FontWeight.w700,
-          fontSize: compact ? 11 : null,
+    return Tooltip(
+      message: 'Show exact reset times',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(999),
+          onTap: () => _showCodexQuotaDetails(provider, theme, scheme),
+          child: Container(
+            padding: EdgeInsets.symmetric(
+              horizontal: compact ? 8 : 10,
+              vertical: compact ? 5 : 6,
+            ),
+            decoration: BoxDecoration(
+              color: badgeColor.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Text(
+              compact
+                  ? compactPieces.join(' ')
+                  : 'Codex restant ${pieces.join(' · ')}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: badgeColor,
+                fontWeight: FontWeight.w700,
+                fontSize: compact ? 11 : null,
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -713,15 +859,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (snapshot == null) {
       return const SizedBox.shrink();
     }
-    final windows = <Map<String, dynamic>>[];
-    final primary = _extractRateWindow(snapshot, 'primary');
-    final secondary = _extractRateWindow(snapshot, 'secondary');
-    if (primary != null) {
-      windows.add(primary);
-    }
-    if (secondary != null) {
-      windows.add(secondary);
-    }
+    final windows = _collectRateWindows(snapshot);
     if (windows.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -740,18 +878,28 @@ class _HomeScreenState extends State<HomeScreen> {
         : minRemaining <= 20
             ? scheme.tertiary
             : scheme.primary;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
-      decoration: BoxDecoration(
-        color: badgeColor.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        'Q $minRemaining%',
-        style: theme.textTheme.bodySmall?.copyWith(
-          color: badgeColor,
-          fontWeight: FontWeight.w700,
-          fontSize: 11,
+    return Tooltip(
+      message: 'Show exact reset times',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(999),
+          onTap: () => _showCodexQuotaDetails(provider, theme, scheme),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+            decoration: BoxDecoration(
+              color: badgeColor.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Text(
+              'Q $minRemaining%',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: badgeColor,
+                fontWeight: FontWeight.w700,
+                fontSize: 11,
+              ),
+            ),
+          ),
         ),
       ),
     );

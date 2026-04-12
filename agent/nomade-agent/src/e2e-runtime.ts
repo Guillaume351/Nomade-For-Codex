@@ -82,6 +82,31 @@ export class E2ERuntime {
     return snapshot;
   }
 
+  hasPeer(deviceId: string): boolean {
+    if (deviceId === this.selfDeviceId) {
+      return true;
+    }
+    return this.peers.has(deviceId);
+  }
+
+  upsertPeer(params: { deviceId: string; signPublicKey: string }): boolean {
+    const deviceId = params.deviceId.trim();
+    const signPublicKey = params.signPublicKey.trim();
+    if (!deviceId || !signPublicKey || deviceId === this.selfDeviceId) {
+      return false;
+    }
+    const existing = this.peers.get(deviceId);
+    if (existing?.signPublicKey === signPublicKey) {
+      return false;
+    }
+    this.peers.set(deviceId, { signPublicKey });
+    return true;
+  }
+
+  peerCount(): number {
+    return this.peers.size;
+  }
+
   private resolveSignPublicKey(senderDeviceId: string): string {
     if (senderDeviceId === this.selfDeviceId) {
       return this.selfSignPublicKey;

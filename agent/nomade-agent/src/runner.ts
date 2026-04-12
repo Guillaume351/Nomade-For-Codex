@@ -13,6 +13,7 @@ import { SessionManager } from "./session-manager.js";
 import { TunnelManager } from "./tunnel-manager.js";
 import { ConversationManager } from "./conversation-manager.js";
 import { createE2ERuntime } from "./e2e-runtime.js";
+import { ensureSession } from "./user-auth.js";
 
 interface RunArgs {
   configPath?: string;
@@ -142,6 +143,35 @@ const parseEnvelope = (value: unknown):
     ciphertext: raw.ciphertext,
     sig: raw.sig
   };
+};
+
+interface E2EPeerDevice {
+  deviceId: string;
+  encPublicKey: string;
+  signPublicKey: string;
+}
+
+const parseE2EPeerDeviceList = (value: unknown): E2EPeerDevice[] => {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+  const raw = value as Record<string, unknown>;
+  const items = Array.isArray(raw.items) ? raw.items : [];
+  const peers: E2EPeerDevice[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    const deviceId = typeof record.deviceId === "string" ? record.deviceId.trim() : "";
+    const signPublicKey = typeof record.signPublicKey === "string" ? record.signPublicKey.trim() : "";
+    const encPublicKey = typeof record.encPublicKey === "string" ? record.encPublicKey.trim() : "";
+    if (!deviceId || !signPublicKey) {
+      continue;
+    }
+    peers.push({ deviceId, signPublicKey, encPublicKey });
+  }
+  return peers;
 };
 
 const hashFingerprint = (value: string): string => {
@@ -346,6 +376,7 @@ const openLocalWsWithFallback = async (params: {
 
 export const runAgent = async (args: RunArgs): Promise<void> => {
   const config = await readConfig(args.configPath ?? defaultConfigPath());
+  const normalizedControlHttpUrl = config.controlHttpUrl.replace(/\/$/, "");
   const sessionPath = defaultSessionPath();
   const tunnelManager = new TunnelManager();
   let e2eRuntime: ReturnType<typeof createE2ERuntime> = null;
@@ -359,8 +390,18 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       }
     | null = null;
   try {
-    const session = await readUserSession(sessionPath);
-    if (session.controlHttpUrl.replace(/\/$/, "") === config.controlHttpUrl.replace(/\/$/, "")) {
+    let session = await ensureSession({
+      serverUrl: normalizedControlHttpUrl,
+      sessionPath
+    }).catch(async () => {
+      try {
+        return await readUserSession(sessionPath);
+      } catch {
+        return null;
+      }
+    });
+    if (session && session.controlHttpUrl.replace(/\/$/, "") === normalizedControlHttpUrl) {
+      sessionForPersistence = session;
       e2eRuntime = createE2ERuntime(session.e2e);
       if (session.e2e && e2eRuntime) {
         sessionForPersistence = session;
@@ -385,6 +426,147 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       ws.send(JSON.stringify(payload));
     }
   };
+  let peerSyncInFlight: Promise<boolean> | null = null;
+  let lastPeerSyncAt = 0;
+  const fetchE2EPeerDevices = async (session: UserSessionConfig): Promise<E2EPeerDevice[]> => {
+    const response = await fetch(`${session.controlHttpUrl.replace(/\/$/, "")}/me/e2e/devices`, {
+      headers: {
+        authorization: `Bearer ${session.accessToken}`
+      }
+    });
+    if (!response.ok) {
+      throw new Error(`e2e_peer_sync_http_${response.status}`);
+    }
+    const payload = (await response.json()) as unknown;
+    return parseE2EPeerDeviceList(payload);
+  };
+  const mergePeerDevices = async (peerDevices: E2EPeerDevice[]): Promise<{ changed: boolean }> => {
+    const currentSession = sessionForPersistence;
+    if (!currentSession?.e2e) {
+      return { changed: false };
+    }
+    const currentE2E = currentSession.e2e;
+    const selfDeviceId = currentE2E.device.deviceId;
+    const nextPeers = { ...(currentE2E.peers ?? {}) };
+    let changed = false;
+    for (const peer of peerDevices) {
+      if (!peer.deviceId || !peer.signPublicKey || peer.deviceId === selfDeviceId) {
+        continue;
+      }
+      const existing = nextPeers[peer.deviceId];
+      const nextEncPublicKey = peer.encPublicKey || existing?.encPublicKey || "";
+      const nextSignPublicKey = peer.signPublicKey;
+      if (
+        existing &&
+        existing.signPublicKey === nextSignPublicKey &&
+        existing.encPublicKey === nextEncPublicKey
+      ) {
+        if (e2eRuntime) {
+          e2eRuntime.upsertPeer({
+            deviceId: peer.deviceId,
+            signPublicKey: peer.signPublicKey
+          });
+        }
+        continue;
+      }
+      nextPeers[peer.deviceId] = {
+        deviceId: peer.deviceId,
+        encPublicKey: nextEncPublicKey,
+        signPublicKey: nextSignPublicKey,
+        addedAt: existing?.addedAt ?? new Date().toISOString()
+      };
+      if (e2eRuntime) {
+        e2eRuntime.upsertPeer({
+          deviceId: peer.deviceId,
+          signPublicKey: peer.signPublicKey
+        });
+      }
+      changed = true;
+    }
+    if (!changed) {
+      if (e2eDebug && e2eRuntime) {
+        e2eDebug.peers = e2eRuntime.peerCount();
+      }
+      return { changed: false };
+    }
+    const nextSession: UserSessionConfig = {
+      ...currentSession,
+      e2e: {
+        ...currentE2E,
+        peers: nextPeers
+      }
+    };
+    sessionForPersistence = nextSession;
+    await writeUserSession(sessionPath, nextSession);
+    if (e2eDebug) {
+      e2eDebug.peers = Object.keys(nextPeers).length;
+    }
+    return { changed: true };
+  };
+  const syncE2EPeers = async (params?: { requiredDeviceId?: string; force?: boolean }): Promise<boolean> => {
+    if (!sessionForPersistence?.e2e || !e2eRuntime) {
+      return false;
+    }
+    const requiredDeviceId = params?.requiredDeviceId?.trim() ?? "";
+    if (requiredDeviceId && e2eRuntime.hasPeer(requiredDeviceId)) {
+      return true;
+    }
+    const now = Date.now();
+    if (!params?.force && !requiredDeviceId && now - lastPeerSyncAt < 5_000) {
+      return false;
+    }
+    if (peerSyncInFlight) {
+      const resolved = await peerSyncInFlight;
+      return requiredDeviceId ? e2eRuntime.hasPeer(requiredDeviceId) : resolved;
+    }
+    peerSyncInFlight = (async () => {
+      const attemptSync = async (session: UserSessionConfig): Promise<boolean> => {
+        const peerDevices = await fetchE2EPeerDevices(session);
+        const result = await mergePeerDevices(peerDevices);
+        lastPeerSyncAt = Date.now();
+        if (result.changed) {
+          console.log(`[agent] e2e peers synchronized (${peerDevices.length} devices from control)`);
+        }
+        return result.changed;
+      };
+
+      try {
+        if (!sessionForPersistence) {
+          return false;
+        }
+        return await attemptSync(sessionForPersistence);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error ?? "");
+        if (!/e2e_peer_sync_http_(401|403)/.test(message)) {
+          console.warn("[agent] e2e peer sync failed", message);
+          return false;
+        }
+        try {
+          const refreshed = await ensureSession({
+            serverUrl: normalizedControlHttpUrl,
+            sessionPath
+          });
+          if (refreshed.controlHttpUrl.replace(/\/$/, "") !== normalizedControlHttpUrl) {
+            return false;
+          }
+          sessionForPersistence = refreshed;
+          return await attemptSync(refreshed);
+        } catch (refreshError) {
+          console.warn("[agent] e2e peer sync refresh failed", refreshError);
+          return false;
+        }
+      }
+    })();
+    try {
+      const changed = await peerSyncInFlight;
+      return requiredDeviceId ? e2eRuntime.hasPeer(requiredDeviceId) : changed;
+    } finally {
+      peerSyncInFlight = null;
+    }
+  };
+  if (sessionForPersistence?.e2e && e2eRuntime) {
+    await syncE2EPeers({ force: true });
+  }
   const sameSeqByScope = (
     left: Record<string, number> | undefined,
     right: Record<string, number>
@@ -560,6 +742,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         let command = String(msg.command ?? "");
         const e2eCommandEnvelope = parseEnvelope(msg.e2eCommandEnvelope);
         if (e2eCommandEnvelope && e2eRuntime) {
+          await syncE2EPeers({ requiredDeviceId: e2eCommandEnvelope.senderDeviceId });
           try {
             command = e2eRuntime.decrypt(`session:${sessionId}`, e2eCommandEnvelope);
           } catch (error) {
@@ -585,6 +768,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         let data = String(msg.data ?? "");
         const e2eEnvelope = parseEnvelope(msg.e2eEnvelope);
         if (e2eEnvelope && e2eRuntime) {
+          await syncE2EPeers({ requiredDeviceId: e2eEnvelope.senderDeviceId });
           try {
             data = e2eRuntime.decrypt(`session:${sessionId}`, e2eEnvelope);
           } catch (error) {
@@ -627,6 +811,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         const e2ePromptEnvelope = parseEnvelope(msg.e2ePromptEnvelope);
         if (e2ePromptEnvelope && e2eRuntime && conversationId) {
           let decrypted = "";
+          await syncE2EPeers({ requiredDeviceId: e2ePromptEnvelope.senderDeviceId });
           try {
             decrypted = e2eRuntime.decrypt(`conversation:${conversationId}`, e2ePromptEnvelope);
           } catch (error) {
@@ -687,6 +872,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         const e2eEnvelope = parseEnvelope(msg.e2eEnvelope);
         if (e2eEnvelope && e2eRuntime && conversationId) {
           let decrypted = "";
+          await syncE2EPeers({ requiredDeviceId: e2eEnvelope.senderDeviceId });
           try {
             decrypted = e2eRuntime.decrypt(`conversation:${conversationId}`, e2eEnvelope);
           } catch (decryptError) {
