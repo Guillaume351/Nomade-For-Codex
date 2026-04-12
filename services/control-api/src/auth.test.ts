@@ -27,7 +27,9 @@ describe("auth primitives", () => {
         smtpPort: 587,
         smtpSecure: false,
         smtpFrom: "Nomade <test@example.com>",
-        stripeEnabled: false
+        stripeEnabled: false,
+        revenueCatProductPlanMap: {},
+        pushEnabled: false
       },
       {
         createDeviceCode: async () => ({

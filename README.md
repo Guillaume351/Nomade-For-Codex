@@ -32,6 +32,8 @@ Troubleshooting: [`docs/troubleshooting.md`](./docs/troubleshooting.md)
 Deployed usage (SaaS/staging/self-host): [`docs/deployed-usage.md`](./docs/deployed-usage.md)
 Auth rollout checklist (Better Auth + SMTP + DB migration): [`docs/auth-better-auth-checklist.md`](./docs/auth-better-auth-checklist.md)
 Nuxt SaaS cutover checklist: [`docs/saas-nuxt-big-bang-checklist.md`](./docs/saas-nuxt-big-bang-checklist.md)
+Phase 2 setup checklist (RevenueCat/Firebase/mobile bridge): [`docs/setup-checklist-phase2.md`](./docs/setup-checklist-phase2.md)
+Phase 1+2 test runbook: [`docs/testing-runbook-phase1-phase2.md`](./docs/testing-runbook-phase1-phase2.md)
 
 ## Self-host
 Use [`deploy/selfhost/docker-compose.yml`](./deploy/selfhost/docker-compose.yml).

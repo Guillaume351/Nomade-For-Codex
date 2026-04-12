@@ -271,6 +271,75 @@ class NomadeApi {
     return _decodeObject(response);
   }
 
+  Future<List<Map<String, dynamic>>> listPushRegistrations({
+    required String accessToken,
+  }) async {
+    final response = await _send(
+      () => http.get(
+        _uri('/me/push/registrations'),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    final payload = _decodeObject(response);
+    return ((payload['items'] as List?) ?? [])
+        .cast<Map>()
+        .map((item) => item.cast<String, dynamic>())
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> registerPushDevice({
+    required String accessToken,
+    required String deviceId,
+    required String platform,
+    required String token,
+    String provider = 'fcm',
+  }) async {
+    final response = await _send(
+      () => http.post(
+        _uri('/me/push/register'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'deviceId': deviceId,
+          'provider': provider,
+          'platform': platform,
+          'token': token,
+        }),
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> unregisterPushDevice({
+    required String accessToken,
+    String provider = 'fcm',
+    String? deviceId,
+    String? token,
+  }) async {
+    final body = <String, dynamic>{
+      'provider': provider,
+    };
+    if (deviceId != null && deviceId.trim().isNotEmpty) {
+      body['deviceId'] = deviceId.trim();
+    }
+    if (token != null && token.trim().isNotEmpty) {
+      body['token'] = token.trim();
+    }
+    final response = await _send(
+      () => http.post(
+        _uri('/me/push/unregister'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode(body),
+      ),
+    );
+    return _decodeObject(response);
+  }
+
   Future<List<Map<String, dynamic>>> listWorkspaces(
     String accessToken, {
     String? agentId,
@@ -401,6 +470,7 @@ class NomadeApi {
     String? approvalPolicy,
     String? sandboxMode,
     String? effort,
+    String? deliveryPolicy,
   }) async {
     final body = <String, dynamic>{};
     final trimmedPrompt = prompt?.trim() ?? '';
@@ -431,6 +501,9 @@ class NomadeApi {
     if (effort != null && effort.trim().isNotEmpty) {
       body['effort'] = effort.trim();
     }
+    if (deliveryPolicy != null && deliveryPolicy.trim().isNotEmpty) {
+      body['deliveryPolicy'] = deliveryPolicy.trim();
+    }
     if (!body.containsKey('prompt') &&
         !body.containsKey('inputItems') &&
         !body.containsKey('e2ePromptEnvelope')) {
@@ -458,6 +531,20 @@ class NomadeApi {
     final response = await _send(
       () => http.post(
         _uri('/conversations/$conversationId/turns/$turnId/interrupt'),
+        headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> retryTurn({
+    required String accessToken,
+    required String conversationId,
+    required String turnId,
+  }) async {
+    final response = await _send(
+      () => http.post(
+        _uri('/conversations/$conversationId/turns/$turnId/retry'),
         headers: {'authorization': 'Bearer $accessToken'},
       ),
     );

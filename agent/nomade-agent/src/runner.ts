@@ -7,16 +7,22 @@ import {
   readConfig,
   readUserSession,
   writeUserSession,
+  type KeepAwakeMode,
+  type OfflineTurnDefault,
   type UserSessionConfig
 } from "./config.js";
 import { SessionManager } from "./session-manager.js";
 import { TunnelManager } from "./tunnel-manager.js";
 import { ConversationManager } from "./conversation-manager.js";
 import { createE2ERuntime } from "./e2e-runtime.js";
+import { KeepAwakeManager } from "./keep-awake.js";
 import { ensureSession } from "./user-auth.js";
 
 interface RunArgs {
   configPath?: string;
+  keepAwakeMode?: KeepAwakeMode;
+  offlineTurnDefault?: OfflineTurnDefault;
+  reconnectMaxSeconds?: number;
 }
 
 const loopbackHosts = ["127.0.0.1", "localhost", "[::1]"] as const;
@@ -437,6 +443,28 @@ const openLocalWsWithFallback = async (params: {
   throw new Error(normalizeTunnelWsOpenError(errors));
 };
 
+const sleep = async (ms: number): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+};
+
+const randomJitter = (maxMs: number): number => {
+  return Math.max(0, Math.floor(Math.random() * Math.max(1, maxMs)));
+};
+
+const normalizeReconnectCapSeconds = (value: number | undefined): number => {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 30;
+  }
+  const rounded = Math.round(value);
+  if (rounded < 5) {
+    return 5;
+  }
+  if (rounded > 300) {
+    return 300;
+  }
+  return rounded;
+};
+
 export const runAgent = async (args: RunArgs): Promise<void> => {
   const config = await readConfig(args.configPath ?? defaultConfigPath());
   const normalizedControlHttpUrl = config.controlHttpUrl.replace(/\/$/, "");
@@ -482,13 +510,65 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
     // no-op
   }
 
-  const wsUrl = `${config.controlWsUrl}?agent_token=${encodeURIComponent(config.agentToken)}`;
-  const ws = new WebSocket(wsUrl);
-  const sendToControl = (payload: Record<string, unknown>): void => {
-    if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify(payload));
-    }
+  const keepAwakeMode = args.keepAwakeMode ?? config.keepAwakeMode ?? "never";
+  const offlineTurnDefault = args.offlineTurnDefault ?? config.offlineTurnDefault ?? "prompt";
+  const reconnectMaxSeconds = normalizeReconnectCapSeconds(
+    args.reconnectMaxSeconds ?? config.reconnectMaxSeconds
+  );
+
+  const keepAwakeManager = new KeepAwakeManager(keepAwakeMode);
+  const activeSessionIds = new Set<string>();
+  const activeTurnIds = new Set<string>();
+
+  const recomputeKeepAwakeState = (): void => {
+    keepAwakeManager.setActive(activeSessionIds.size > 0 || activeTurnIds.size > 0);
   };
+
+  const markSessionActive = (sessionId: string, active: boolean): void => {
+    if (!sessionId) {
+      return;
+    }
+    if (active) {
+      activeSessionIds.add(sessionId);
+    } else {
+      activeSessionIds.delete(sessionId);
+    }
+    recomputeKeepAwakeState();
+  };
+
+  const markTurnActive = (turnId: string, active: boolean): void => {
+    if (!turnId) {
+      return;
+    }
+    if (active) {
+      activeTurnIds.add(turnId);
+    } else {
+      activeTurnIds.delete(turnId);
+    }
+    recomputeKeepAwakeState();
+  };
+
+  let activeWs: WebSocket | null = null;
+  const sendToControl = (payload: Record<string, unknown>): boolean => {
+    const ws = activeWs;
+    if (!ws || ws.readyState !== ws.OPEN) {
+      return false;
+    }
+    ws.send(JSON.stringify(payload));
+    return true;
+  };
+  const sendToSpecificWs = (ws: WebSocket, payload: Record<string, unknown>): boolean => {
+    if (ws.readyState !== ws.OPEN) {
+      return false;
+    }
+    ws.send(JSON.stringify(payload));
+    return true;
+  };
+
+  console.log(
+    `[agent] run mode keep-awake=${keepAwakeMode} (${keepAwakeManager.describe()}) offline-turn-default=${offlineTurnDefault} reconnect-cap=${reconnectMaxSeconds}s`
+  );
+
   let peerSyncInFlight: Promise<boolean> | null = null;
   let lastPeerSyncAt = 0;
   const fetchE2EPeerDevices = async (session: UserSessionConfig): Promise<E2EPeerDevice[]> => {
@@ -733,6 +813,12 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
     }
   };
   const conversationManager = new ConversationManager((payload) => {
+    if (payload.type === "conversation.turn.started") {
+      markTurnActive(String(payload.turnId ?? ""), true);
+    }
+    if (payload.type === "conversation.turn.completed") {
+      markTurnActive(String(payload.turnId ?? ""), false);
+    }
     const enriched = enrichConversationEventWithE2E(payload, e2eRuntime);
     sendToControl(enriched);
     if (enriched !== payload) {
@@ -747,51 +833,34 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       if (e2eEnvelope) {
         schedulePersistSeqByScope();
       }
-      ws.send(
-        JSON.stringify({
-          type: "session.output",
-          sessionId,
-          stream,
-          data,
-          cursor,
-          e2eEnvelope
-        })
-      );
+      sendToControl({
+        type: "session.output",
+        sessionId,
+        stream,
+        data,
+        cursor,
+        e2eEnvelope
+      });
     },
     onStatus: (sessionId, status, exitCode) => {
-      ws.send(
-        JSON.stringify({
-          type: "session.status",
-          sessionId,
-          status,
-          exitCode
-        })
-      );
+      markSessionActive(sessionId, status === "running");
+      sendToControl({
+        type: "session.status",
+        sessionId,
+        status,
+        exitCode
+      });
     }
   });
-
-  ws.on("open", () => {
-    console.log("[agent] connected");
-    if (e2eRuntime) {
-      console.log("[agent] e2e runtime enabled");
-      if (e2eDebug) {
-        console.log(
-          `[agent] e2e session epoch=${e2eDebug.epoch} self=${e2eDebug.selfDeviceId} peers=${e2eDebug.peers} rootKeyFp=${e2eDebug.rootKeyFp}`
-        );
-      }
-    }
-    ws.send(JSON.stringify({ type: "agent.hello", agentId: config.agentId, name: config.name }));
-
-    setInterval(() => {
-      if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify({ type: "agent.heartbeat", agentId: config.agentId }));
-      }
-    }, 10_000);
-  });
-
-  ws.on("message", async (raw) => {
+  const handleControlMessage = async (ws: WebSocket, raw: unknown): Promise<void> => {
     try {
-      const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
+      const rawText =
+        typeof raw === "string"
+          ? raw
+          : Buffer.isBuffer(raw)
+            ? raw.toString("utf8")
+            : String(raw);
+      const msg = JSON.parse(rawText) as Record<string, unknown>;
       const type = String(msg.type ?? "");
       if (type === "session.create") {
         const envRaw = msg.env;
@@ -817,6 +886,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
             return;
           }
         }
+        markSessionActive(sessionId, true);
         sessionManager.createSession({
           sessionId,
           command,
@@ -848,19 +918,19 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       }
 
       if (type === "session.terminate") {
-        sessionManager.terminate(String(msg.sessionId));
+        const sessionId = String(msg.sessionId);
+        sessionManager.terminate(sessionId);
+        markSessionActive(sessionId, false);
         return;
       }
 
       if (type === "tunnel.open") {
         tunnelManager.openTunnel(String(msg.tunnelId), Number(msg.targetPort));
-        ws.send(
-          JSON.stringify({
-            type: "tunnel.status",
-            tunnelId: String(msg.tunnelId),
-            status: "open"
-          })
-        );
+        sendToSpecificWs(ws, {
+          type: "tunnel.status",
+          tunnelId: String(msg.tunnelId),
+          status: "open"
+        });
         return;
       }
 
@@ -894,8 +964,9 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
               prompt = parsed.prompt;
             }
             if (Array.isArray(parsed.inputItems)) {
-              inputItems = parsed.inputItems
-                .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"));
+              inputItems = parsed.inputItems.filter(
+                (item): item is Record<string, unknown> => Boolean(item && typeof item === "object")
+              );
             }
           } catch {
             if (decrypted.trim().length > 0) {
@@ -903,6 +974,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
             }
           }
         }
+        markTurnActive(turnId, true);
         await conversationManager.startTurn({
           conversationId,
           turnId,
@@ -915,11 +987,15 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
               : undefined,
           model: msg.model ? String(msg.model) : undefined,
           cwd: msg.cwd ? String(msg.cwd) : undefined,
-          approvalPolicy: msg.approvalPolicy ? String(msg.approvalPolicy) as "untrusted" | "on-failure" | "on-request" | "never" : undefined,
-          sandboxMode:
-            msg.sandboxMode ? (String(msg.sandboxMode) as "read-only" | "workspace-write" | "danger-full-access") : undefined,
-          effort:
-            msg.effort ? (String(msg.effort) as "none" | "minimal" | "low" | "medium" | "high" | "xhigh") : undefined
+          approvalPolicy: msg.approvalPolicy
+            ? (String(msg.approvalPolicy) as "untrusted" | "on-failure" | "on-request" | "never")
+            : undefined,
+          sandboxMode: msg.sandboxMode
+            ? (String(msg.sandboxMode) as "read-only" | "workspace-write" | "danger-full-access")
+            : undefined,
+          effort: msg.effort
+            ? (String(msg.effort) as "none" | "minimal" | "low" | "medium" | "high" | "xhigh")
+            : undefined
         });
         return;
       }
@@ -984,23 +1060,19 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           const threads = await conversationManager.listThreads({
             limit: Number(msg.limit ?? 100)
           });
-          ws.send(
-            JSON.stringify({
-              type: "codex.thread.list.result",
-              requestId,
-              status: "ok",
-              items: threads
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "codex.thread.list.result",
+            requestId,
+            status: "ok",
+            items: threads
+          });
         } catch (error) {
-          ws.send(
-            JSON.stringify({
-              type: "codex.thread.list.result",
-              requestId,
-              status: "error",
-              error: error instanceof Error ? error.message : "thread_list_failed"
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "codex.thread.list.result",
+            requestId,
+            status: "error",
+            error: error instanceof Error ? error.message : "thread_list_failed"
+          });
         }
         return;
       }
@@ -1010,14 +1082,12 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         const threadId = String(msg.threadId ?? "");
         const conversationId = String(msg.conversationId ?? "").trim();
         if (!threadId) {
-          ws.send(
-            JSON.stringify({
-              type: "codex.thread.read.result",
-              requestId,
-              status: "error",
-              error: "thread_id_required"
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "codex.thread.read.result",
+            requestId,
+            status: "error",
+            error: "thread_id_required"
+          });
           return;
         }
 
@@ -1039,23 +1109,19 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
               schedulePersistSeqByScope();
             }
           }
-          ws.send(
-            JSON.stringify({
-              type: "codex.thread.read.result",
-              requestId,
-              status: "ok",
-              thread
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "codex.thread.read.result",
+            requestId,
+            status: "ok",
+            thread
+          });
         } catch (error) {
-          ws.send(
-            JSON.stringify({
-              type: "codex.thread.read.result",
-              requestId,
-              status: "error",
-              error: error instanceof Error ? error.message : "thread_read_failed"
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "codex.thread.read.result",
+            requestId,
+            status: "error",
+            error: error instanceof Error ? error.message : "thread_read_failed"
+          });
         }
         return;
       }
@@ -1066,23 +1132,19 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           const options = await conversationManager.getRuntimeOptions({
             cwd: msg.cwd ? String(msg.cwd) : undefined
           });
-          ws.send(
-            JSON.stringify({
-              type: "codex.options.result",
-              requestId,
-              status: "ok",
-              options
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "codex.options.result",
+            requestId,
+            status: "ok",
+            options
+          });
         } catch (error) {
-          ws.send(
-            JSON.stringify({
-              type: "codex.options.result",
-              requestId,
-              status: "error",
-              error: error instanceof Error ? error.message : "codex_options_failed"
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "codex.options.result",
+            requestId,
+            status: "error",
+            error: error instanceof Error ? error.message : "codex_options_failed"
+          });
         }
         return;
       }
@@ -1092,15 +1154,13 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         const requestId = String(msg.requestId ?? randomToken("tr"));
         const targetPort = tunnelManager.getPort(tunnelId);
         if (!targetPort) {
-          ws.send(
-            JSON.stringify({
-              type: "tunnel.http.response",
-              requestId,
-              status: 404,
-              headers: { "content-type": "application/json" },
-              bodyBase64: Buffer.from(JSON.stringify({ error: "unknown_tunnel" })).toString("base64")
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "tunnel.http.response",
+            requestId,
+            status: 404,
+            headers: { "content-type": "application/json" },
+            bodyBase64: Buffer.from(JSON.stringify({ error: "unknown_tunnel" })).toString("base64")
+          });
           return;
         }
 
@@ -1110,7 +1170,6 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         delete requestHeaders["content-length"];
         const path = String(msg.path ?? "/");
         const query = msg.query ? String(msg.query) : undefined;
-
         const body = msg.bodyBase64 ? Buffer.from(String(msg.bodyBase64), "base64") : undefined;
 
         try {
@@ -1128,29 +1187,25 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           });
           const respBuffer = Buffer.from(await response.arrayBuffer());
 
-          ws.send(
-            JSON.stringify({
-              type: "tunnel.http.response",
-              requestId,
-              status: response.status,
-              headers: responseHeaders,
-              bodyBase64: respBuffer.toString("base64")
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "tunnel.http.response",
+            requestId,
+            status: response.status,
+            headers: responseHeaders,
+            bodyBase64: respBuffer.toString("base64")
+          });
         } catch (error) {
-          ws.send(
-            JSON.stringify({
-              type: "tunnel.http.response",
-              requestId,
-              status: 502,
-              headers: { "content-type": "application/json" },
-              bodyBase64: Buffer.from(
-                JSON.stringify({
-                  error: error instanceof Error ? error.message : "local_fetch_failed"
-                })
-              ).toString("base64")
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "tunnel.http.response",
+            requestId,
+            status: 502,
+            headers: { "content-type": "application/json" },
+            bodyBase64: Buffer.from(
+              JSON.stringify({
+                error: error instanceof Error ? error.message : "local_fetch_failed"
+              })
+            ).toString("base64")
+          });
         }
         return;
       }
@@ -1161,14 +1216,12 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         const tunnelId = String(msg.tunnelId ?? "");
         const targetPort = tunnelManager.getPort(tunnelId);
         if (!targetPort) {
-          ws.send(
-            JSON.stringify({
-              type: "tunnel.ws.error",
-              requestId,
-              connectionId,
-              error: "unknown_tunnel"
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "tunnel.ws.error",
+            requestId,
+            connectionId,
+            error: "unknown_tunnel"
+          });
           return;
         }
 
@@ -1203,26 +1256,21 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
             headers: requestHeaders
           });
         } catch (error) {
-          ws.send(
-            JSON.stringify({
-              type: "tunnel.ws.error",
-              requestId,
-              connectionId,
-              error: error instanceof Error ? error.message : "tunnel_ws_open_failed"
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "tunnel.ws.error",
+            requestId,
+            connectionId,
+            error: error instanceof Error ? error.message : "tunnel_ws_open_failed"
+          });
           return;
         }
 
         tunnelManager.bindSocket(connectionId, socket);
-
-        ws.send(
-          JSON.stringify({
-            type: "tunnel.ws.opened",
-            requestId,
-            connectionId
-          })
-        );
+        sendToSpecificWs(ws, {
+          type: "tunnel.ws.opened",
+          requestId,
+          connectionId
+        });
 
         socket.on("message", (data, isBinary) => {
           const payload = Buffer.isBuffer(data)
@@ -1230,37 +1278,31 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
             : Array.isArray(data)
               ? Buffer.concat(data.map((chunk) => Buffer.from(chunk)))
               : Buffer.from(data instanceof ArrayBuffer ? new Uint8Array(data) : data);
-          ws.send(
-            JSON.stringify({
-              type: "tunnel.ws.frame",
-              connectionId,
-              dataBase64: payload.toString("base64"),
-              isBinary
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "tunnel.ws.frame",
+            connectionId,
+            dataBase64: payload.toString("base64"),
+            isBinary
+          });
         });
 
         socket.on("close", (code, reason) => {
           tunnelManager.unbindSocket(connectionId);
-          ws.send(
-            JSON.stringify({
-              type: "tunnel.ws.closed",
-              connectionId,
-              code,
-              reason: reason.toString()
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "tunnel.ws.closed",
+            connectionId,
+            code,
+            reason: reason.toString()
+          });
         });
 
         socket.on("error", (error) => {
-          ws.send(
-            JSON.stringify({
-              type: "tunnel.ws.error",
-              requestId,
-              connectionId,
-              error: error instanceof Error ? error.message : "tunnel_ws_open_failed"
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "tunnel.ws.error",
+            requestId,
+            connectionId,
+            error: error instanceof Error ? error.message : "tunnel_ws_open_failed"
+          });
         });
 
         return;
@@ -1270,13 +1312,11 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         const connectionId = String(msg.connectionId ?? "");
         const socket = tunnelManager.getSocket(connectionId);
         if (!socket) {
-          ws.send(
-            JSON.stringify({
-              type: "tunnel.ws.error",
-              connectionId,
-              error: "unknown_connection"
-            })
-          );
+          sendToSpecificWs(ws, {
+            type: "tunnel.ws.error",
+            connectionId,
+            error: "unknown_connection"
+          });
           return;
         }
         const encoded = String(msg.dataBase64 ?? "");
@@ -1295,29 +1335,129 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
     } catch (error) {
       console.error("[agent] failed to process message", error);
     }
-  });
+  };
 
-  const shutdown = (message: string, error?: unknown): void => {
-    conversationManager.close();
-    if (persistSeqTimer) {
-      clearTimeout(persistSeqTimer);
-      persistSeqTimer = null;
-    }
-    void flushPersistedSeqByScope().finally(() => {
-      if (error) {
-        console.error(message, error);
-      } else {
-        console.error(message);
+  let stopRequested = false;
+  const requestStop = (): void => {
+    stopRequested = true;
+    const ws = activeWs;
+    if (ws && (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING)) {
+      try {
+        ws.close(1000, "agent_shutdown");
+      } catch {
+        // no-op
       }
-      process.exit(1);
+    }
+  };
+
+  process.once("SIGINT", requestStop);
+  process.once("SIGTERM", requestStop);
+
+  const wsUrl = `${config.controlWsUrl}?agent_token=${encodeURIComponent(config.agentToken)}`;
+  const runConnection = async (): Promise<{ opened: boolean }> => {
+    return new Promise<{ opened: boolean }>((resolve) => {
+      const ws = new WebSocket(wsUrl);
+      let opened = false;
+      let heartbeatTimer: NodeJS.Timeout | null = null;
+      let settled = false;
+
+      const settle = (params: { reason: string; error?: unknown }): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        if (activeWs === ws) {
+          activeWs = null;
+        }
+        if (params.error) {
+          console.error(params.reason, params.error);
+        } else {
+          console.warn(params.reason);
+        }
+        resolve({ opened });
+      };
+
+      ws.on("open", () => {
+        opened = true;
+        activeWs = ws;
+        console.log("[agent] connected");
+        if (e2eRuntime) {
+          console.log("[agent] e2e runtime enabled");
+          if (e2eDebug) {
+            console.log(
+              `[agent] e2e session epoch=${e2eDebug.epoch} self=${e2eDebug.selfDeviceId} peers=${e2eDebug.peers} rootKeyFp=${e2eDebug.rootKeyFp}`
+            );
+          }
+        }
+        sendToSpecificWs(ws, {
+          type: "agent.hello",
+          agentId: config.agentId,
+          name: config.name,
+          offlineTurnDefault,
+          capabilities: {
+            keepAwake: keepAwakeManager.describe()
+          }
+        });
+
+        heartbeatTimer = setInterval(() => {
+          if (ws.readyState === ws.OPEN) {
+            sendToSpecificWs(ws, { type: "agent.heartbeat", agentId: config.agentId });
+          }
+        }, 10_000);
+      });
+
+      ws.on("message", (raw) => {
+        void handleControlMessage(ws, raw);
+      });
+
+      ws.on("close", (code, reasonBuffer) => {
+        const reason = reasonBuffer.toString();
+        settle({
+          reason: `[agent] connection closed code=${code} reason=${reason || "-"}`
+        });
+      });
+
+      ws.on("error", (error) => {
+        settle({ reason: "[agent] websocket error", error });
+      });
     });
   };
 
-  ws.on("close", () => {
-    shutdown("[agent] connection closed");
-  });
+  let reconnectAttempt = 0;
+  while (!stopRequested) {
+    if (reconnectAttempt > 0) {
+      const backoffMs = Math.min(
+        reconnectMaxSeconds * 1_000,
+        Math.pow(2, reconnectAttempt - 1) * 1_000
+      );
+      const waitMs = backoffMs + randomJitter(350);
+      console.log(`[agent] reconnecting in ${Math.round(waitMs / 1_000)}s`);
+      await sleep(waitMs);
+      if (stopRequested) {
+        break;
+      }
+    }
 
-  ws.on("error", (error) => {
-    shutdown("[agent] websocket error", error);
-  });
+    const outcome = await runConnection();
+    if (stopRequested) {
+      break;
+    }
+    if (outcome.opened) {
+      reconnectAttempt = 1;
+    } else {
+      reconnectAttempt += 1;
+    }
+  }
+
+  conversationManager.close();
+  keepAwakeManager.close();
+  if (persistSeqTimer) {
+    clearTimeout(persistSeqTimer);
+    persistSeqTimer = null;
+  }
+  await flushPersistedSeqByScope();
 };

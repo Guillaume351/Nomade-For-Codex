@@ -51,10 +51,58 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    _promptController.clear();
     final provider = context.read<NomadeProvider>();
-    await provider.sendPrompt(text);
+    String? deliveryPolicyOverride;
+    final selectedAgent = provider.selectedAgent;
+    final shouldPromptForOfflineChoice = provider.offlineTurnDefault == 'prompt' &&
+        selectedAgent != null &&
+        !selectedAgent.isOnline;
+    if (shouldPromptForOfflineChoice) {
+      deliveryPolicyOverride = await _askOfflineDeliveryPolicy(provider);
+      if (deliveryPolicyOverride == null) {
+        return;
+      }
+    }
+
+    _promptController.clear();
+    await provider.sendPrompt(
+      text,
+      deliveryPolicyOverride: deliveryPolicyOverride,
+    );
     _scrollToBottom(force: true);
+  }
+
+  Future<String?> _askOfflineDeliveryPolicy(NomadeProvider provider) async {
+    final allowQueue = provider.canUseDeferredTurns;
+    return showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Agent offline'),
+          content: Text(
+            allowQueue
+                ? 'Send now and fail if still offline, or queue this turn until reconnect.'
+                : 'Your agent is offline. Queued turns are not available on your current plan.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(null),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop('immediate'),
+              child: const Text('Send now'),
+            ),
+            if (allowQueue)
+              FilledButton(
+                onPressed: () =>
+                    Navigator.of(context).pop('defer_if_offline'),
+                child: const Text('Queue for reconnect'),
+              ),
+          ],
+        );
+      },
+    );
   }
 
   bool _isNearBottom() {
@@ -1898,6 +1946,27 @@ class _OptionsSheet extends StatelessWidget {
               items: provider.codexReasoningEfforts,
               onChanged: (val) => provider.selectedEffort = val,
             ),
+            const SizedBox(height: 14),
+            _buildDropdown(
+              label: 'Offline agent behavior',
+              value: provider.offlineTurnDefault,
+              items: const ['prompt', 'defer', 'fail'],
+              onChanged: (val) {
+                if (val == null) {
+                  return;
+                }
+                provider.offlineTurnDefault = val;
+              },
+            ),
+            if (!provider.canUseDeferredTurns) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Queued execution is unavailable on your current plan.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
             if (provider.codexCollaborationModes.isNotEmpty) ...[
               const SizedBox(height: 14),
               _buildDropdown(

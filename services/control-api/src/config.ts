@@ -33,6 +33,12 @@ export interface Config {
   stripeSecretKey?: string;
   stripeWebhookSecret?: string;
   stripeProPriceId?: string;
+  revenueCatWebhookAuth?: string;
+  revenueCatProductPlanMap: Record<string, string>;
+  pushEnabled: boolean;
+  firebaseProjectId?: string;
+  firebaseClientEmail?: string;
+  firebasePrivateKey?: string;
   paidMaxAgents: number;
   freeMaxAgents: number;
 }
@@ -95,6 +101,38 @@ const parseAuthEmailMode = (raw: string): AuthEmailMode => {
   throw new Error(`Invalid AUTH_EMAIL_MODE: ${raw}. Expected \"log\" or \"smtp\".`);
 };
 
+const parseJsonObjectRecord = (
+  name: string,
+  raw: string | undefined
+): Record<string, string> => {
+  if (!raw || raw.trim().length === 0) {
+    return {};
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw);
+  } catch {
+    throw new Error(`Invalid JSON for ${name}.`);
+  }
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+    throw new Error(`Invalid JSON object for ${name}.`);
+  }
+
+  const map: Record<string, string> = {};
+  for (const [key, value] of Object.entries(decoded as Record<string, unknown>)) {
+    const normalizedKey = key.trim();
+    if (normalizedKey.length === 0) {
+      continue;
+    }
+    const normalizedValue = typeof value === "string" ? value.trim() : "";
+    if (normalizedValue.length === 0) {
+      continue;
+    }
+    map[normalizedKey] = normalizedValue;
+  }
+  return map;
+};
+
 export const loadConfig = (): Config => {
   const nodeEnv = process.env.NODE_ENV?.trim().toLowerCase() ?? "";
   const isProduction = nodeEnv === "production";
@@ -125,6 +163,19 @@ export const loadConfig = (): Config => {
   const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
   const stripeProPriceId = process.env.STRIPE_PRO_PRICE_ID;
   const stripeEnabled = Boolean(stripeSecretKey);
+  const revenueCatWebhookAuth = readOptional("REVENUECAT_WEBHOOK_AUTH");
+  const revenueCatProductPlanMap = parseJsonObjectRecord(
+    "REVENUECAT_PRODUCT_PLAN_MAP",
+    process.env.REVENUECAT_PRODUCT_PLAN_MAP
+  );
+  const firebaseProjectId = readOptional("FIREBASE_PROJECT_ID");
+  const firebaseClientEmail = readOptional("FIREBASE_CLIENT_EMAIL");
+  const firebasePrivateKeyRaw = readOptional("FIREBASE_PRIVATE_KEY");
+  const firebasePrivateKey = firebasePrivateKeyRaw ? firebasePrivateKeyRaw.replace(/\\n/g, "\n") : undefined;
+  const pushEnabled = Boolean(firebaseProjectId && firebaseClientEmail && firebasePrivateKey);
+  if (!pushEnabled && (firebaseProjectId || firebaseClientEmail || firebasePrivateKey)) {
+    console.warn("[control-api] push notifications disabled: incomplete Firebase config.");
+  }
   const magicLinkAllowedAttempts = readInt("AUTH_MAGIC_LINK_ALLOWED_ATTEMPTS", 5);
   const magicLinkExpiresInSec = readInt("AUTH_MAGIC_LINK_EXPIRES_SEC", 60 * 15);
   if (magicLinkAllowedAttempts < 1) {
@@ -167,6 +218,12 @@ export const loadConfig = (): Config => {
     stripeSecretKey,
     stripeWebhookSecret,
     stripeProPriceId,
+    revenueCatWebhookAuth,
+    revenueCatProductPlanMap,
+    pushEnabled,
+    firebaseProjectId,
+    firebaseClientEmail,
+    firebasePrivateKey,
     paidMaxAgents: readInt("PAID_MAX_AGENTS", 10),
     freeMaxAgents: readInt("FREE_MAX_AGENTS", 1)
   };

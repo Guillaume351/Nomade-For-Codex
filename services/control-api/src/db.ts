@@ -128,6 +128,28 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS billing_webhook_events (
+      provider TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (provider, event_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS push_registrations (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      device_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      token TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (provider, token)
+    );
+
     CREATE TABLE IF NOT EXISTS device_entitlements (
       user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       max_agents INT NOT NULL DEFAULT 1,
@@ -194,6 +216,12 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
       status TEXT NOT NULL DEFAULT 'queued',
       diff TEXT NOT NULL DEFAULT '',
       error TEXT,
+      delivery_policy TEXT NOT NULL DEFAULT 'immediate',
+      delivery_state TEXT NOT NULL DEFAULT 'pending',
+      delivery_attempts INT NOT NULL DEFAULT 0,
+      delivery_error TEXT,
+      next_delivery_at TIMESTAMPTZ,
+      request_options JSONB NOT NULL DEFAULT '{}'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       completed_at TIMESTAMPTZ
@@ -293,6 +321,12 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_status TEXT;
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_error TEXT;
     ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS last_probe_code INT;
+    ALTER TABLE conversation_turns ADD COLUMN IF NOT EXISTS delivery_policy TEXT NOT NULL DEFAULT 'immediate';
+    ALTER TABLE conversation_turns ADD COLUMN IF NOT EXISTS delivery_state TEXT NOT NULL DEFAULT 'pending';
+    ALTER TABLE conversation_turns ADD COLUMN IF NOT EXISTS delivery_attempts INT NOT NULL DEFAULT 0;
+    ALTER TABLE conversation_turns ADD COLUMN IF NOT EXISTS delivery_error TEXT;
+    ALTER TABLE conversation_turns ADD COLUMN IF NOT EXISTS next_delivery_at TIMESTAMPTZ;
+    ALTER TABLE conversation_turns ADD COLUMN IF NOT EXISTS request_options JSONB NOT NULL DEFAULT '{}'::jsonb;
     ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT;
     ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMPTZ;
 
@@ -318,8 +352,15 @@ export const ensureSchema = async (pool: Pool): Promise<void> => {
     CREATE INDEX IF NOT EXISTS idx_dev_services_workspace_id ON dev_services (workspace_id);
     CREATE INDEX IF NOT EXISTS idx_tunnels_service_id ON tunnels (service_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_items_turn_item ON conversation_items (turn_id, item_id);
+    CREATE INDEX IF NOT EXISTS idx_conversation_turns_deferred_queue
+      ON conversation_turns (delivery_state, next_delivery_at, created_at);
+    CREATE INDEX IF NOT EXISTS idx_conversation_turns_conversation_state
+      ON conversation_turns (conversation_id, delivery_state, status);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_stripe_sub_id ON subscriptions (stripe_subscription_id)
       WHERE stripe_subscription_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_billing_webhook_events_created_at ON billing_webhook_events (created_at);
+    CREATE INDEX IF NOT EXISTS idx_push_registrations_user_status ON push_registrations (user_id, status, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_push_registrations_device ON push_registrations (user_id, device_id, provider);
     CREATE INDEX IF NOT EXISTS idx_rate_limits_updated_at ON rate_limits (updated_at);
     CREATE INDEX IF NOT EXISTS idx_user_devices_user_id ON user_devices (user_id);
     CREATE INDEX IF NOT EXISTS idx_device_scan_flows_status ON device_scan_flows (status);

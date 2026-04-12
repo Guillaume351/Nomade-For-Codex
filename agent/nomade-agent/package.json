@@ -1,10 +1,19 @@
 {
   "name": "@nomade/agent",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "nomade-agent": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -b tsconfig.json",
     "dev": "tsx watch src/index.ts",
@@ -15,6 +24,7 @@
     "pair": "tsx src/index.ts pair",
     "run": "tsx src/index.ts run",
     "start": "node dist/index.js run",
+    "prepublishOnly": "npm run build",
     "test": "vitest run"
   },
   "dependencies": {

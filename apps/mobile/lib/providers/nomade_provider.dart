@@ -18,6 +18,7 @@ import '../models/turn_item.dart';
 import '../models/turn_timeline.dart';
 import '../models/workspace.dart';
 import '../services/mobile_e2e_runtime.dart';
+import '../services/native_notifications_bridge.dart';
 import '../services/secure_scan_parser.dart';
 
 class ConversationDebugEvent {
@@ -66,6 +67,8 @@ class NomadeProvider with ChangeNotifier {
   static const _selectedApprovalPolicyKey = 'nomade.selected_approval_policy';
   static const _selectedSandboxModeKey = 'nomade.selected_sandbox_mode';
   static const _selectedEffortKey = 'nomade.selected_effort';
+  static const _offlineTurnDefaultKey = 'nomade.offline_turn_default';
+  static const _pushDeviceIdKey = 'nomade.push.device_id';
   static const _selectedCollaborationModeKey =
       'nomade.selected_collaboration_mode';
   static const _selectedSkillsKey = 'nomade.selected_skills_json';
@@ -94,6 +97,14 @@ class NomadeProvider with ChangeNotifier {
   int? currentAgents;
   int? maxAgents;
   bool? deviceLimitReached;
+  bool canUseTunnels = false;
+  bool canUsePushNotifications = false;
+  bool canUseDeferredTurns = false;
+  final bool nativeNotificationsBridgeEnabled =
+      NativeNotificationsBridge.enabled;
+  bool pushProviderReady = false;
+  String? pushRegistrationError;
+  String? _registeredPushToken;
 
   List<Agent> agents = [];
   List<Workspace> workspaces = [];
@@ -282,6 +293,26 @@ class NomadeProvider with ChangeNotifier {
       lines,
       'selectedSkills',
       _selectedSkillPaths.isEmpty ? '-' : _selectedSkillPaths.join(','),
+    );
+    _appendSupportKeyValue(
+      lines,
+      'nativeNotificationsBridgeEnabled',
+      nativeNotificationsBridgeEnabled ? 'true' : 'false',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'pushFeatureEnabled',
+      canUsePushNotifications ? 'true' : 'false',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'pushProviderReady',
+      pushProviderReady ? 'true' : 'false',
+    );
+    _appendSupportKeyValue(
+      lines,
+      'pushRegistrationError',
+      pushRegistrationError ?? '-',
     );
     _appendSupportKeyValue(
       lines,
@@ -507,7 +538,7 @@ class NomadeProvider with ChangeNotifier {
       }
     }
     for (final turn in conversationTurns) {
-      if (turn.status == 'running' || turn.status == 'queued') {
+      if (_turnCountsAsRunning(turn)) {
         return turn;
       }
     }
@@ -691,6 +722,23 @@ class NomadeProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  String _offlineTurnDefault = 'prompt';
+  String get offlineTurnDefault => _offlineTurnDefault;
+  set offlineTurnDefault(String value) {
+    final normalized = value.trim().toLowerCase();
+    if (normalized != 'prompt' &&
+        normalized != 'defer' &&
+        normalized != 'fail') {
+      return;
+    }
+    if (_offlineTurnDefault == normalized) {
+      return;
+    }
+    _offlineTurnDefault = normalized;
+    persistSession();
+    notifyListeners();
+  }
+
   bool loadingCodexOptions = false;
   bool importingHistory = false;
   bool loadingData = false;
@@ -861,6 +909,106 @@ class NomadeProvider with ChangeNotifier {
       iOptions: strictDeviceOnly ? _keychainOptions : null,
       aOptions: strictDeviceOnly ? _androidOptions : null,
     );
+  }
+
+  Future<String> _ensurePushDeviceId() async {
+    final existing =
+        await _readStorage(_pushDeviceIdKey, strictDeviceOnly: true);
+    if (existing != null && existing.trim().isNotEmpty) {
+      return existing.trim();
+    }
+    final scanDeviceId =
+        await _readStorage(_scanDeviceIdKey, strictDeviceOnly: true);
+    if (scanDeviceId != null && scanDeviceId.trim().isNotEmpty) {
+      await _writeStorage(
+        _pushDeviceIdKey,
+        value: scanDeviceId.trim(),
+        strictDeviceOnly: true,
+      );
+      return scanDeviceId.trim();
+    }
+    final generated =
+        'mobile-${defaultTargetPlatform.name}-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
+    await _writeStorage(
+      _pushDeviceIdKey,
+      value: generated,
+      strictDeviceOnly: true,
+    );
+    return generated;
+  }
+
+  Future<void> syncNativePushRegistration({bool force = false}) async {
+    final token = accessToken;
+    if (token == null) {
+      return;
+    }
+    if (!nativeNotificationsBridgeEnabled) {
+      pushRegistrationError = null;
+      pushProviderReady = false;
+      return;
+    }
+    if (!canUsePushNotifications) {
+      pushProviderReady = false;
+      if (_registeredPushToken != null) {
+        try {
+          await api.unregisterPushDevice(
+            accessToken: token,
+            token: _registeredPushToken,
+          );
+        } catch (_) {}
+      }
+      _registeredPushToken = null;
+      pushRegistrationError = null;
+      return;
+    }
+
+    final registration = await NativeNotificationsBridge.getPushRegistration();
+    if (registration == null) {
+      pushRegistrationError = 'native_push_token_unavailable';
+      return;
+    }
+
+    final platform = registration.platform.toLowerCase();
+    final normalizedPlatform = platform.contains('ios')
+        ? 'ios'
+        : platform.contains('android')
+            ? 'android'
+            : defaultTargetPlatform == TargetPlatform.iOS
+                ? 'ios'
+                : 'android';
+    final tokenChanged = _registeredPushToken != registration.token;
+    if (!force && !tokenChanged) {
+      return;
+    }
+
+    final deviceId = registration.deviceId.trim().isNotEmpty
+        ? registration.deviceId.trim()
+        : await _ensurePushDeviceId();
+    try {
+      final payload = await api.registerPushDevice(
+        accessToken: token,
+        deviceId: deviceId,
+        platform: normalizedPlatform,
+        provider: registration.provider,
+        token: registration.token,
+      );
+      _registeredPushToken = registration.token;
+      pushRegistrationError = null;
+      pushProviderReady = payload['providerReady'] == true;
+      notifyListeners();
+    } on ApiException catch (error) {
+      if (error.errorCode == 'feature_not_enabled') {
+        pushRegistrationError = null;
+      } else {
+        pushRegistrationError = error.errorCode ?? error.message;
+      }
+      pushProviderReady = false;
+      notifyListeners();
+    } catch (error) {
+      pushRegistrationError = error.toString();
+      pushProviderReady = false;
+      notifyListeners();
+    }
   }
 
   Future<void> _restoreE2ERuntime() async {
@@ -1048,6 +1196,13 @@ class NomadeProvider with ChangeNotifier {
           await _readStorage(_selectedSandboxModeKey) ?? _selectedSandboxMode;
       _selectedEffort =
           await _readStorage(_selectedEffortKey) ?? _selectedEffort;
+      final storedOfflineDefault = await _readStorage(_offlineTurnDefaultKey);
+      if (storedOfflineDefault != null &&
+          (storedOfflineDefault == 'prompt' ||
+              storedOfflineDefault == 'defer' ||
+              storedOfflineDefault == 'fail')) {
+        _offlineTurnDefault = storedOfflineDefault;
+      }
       _selectedCollaborationModeSlug =
           await _readStorage(_selectedCollaborationModeKey);
       final selectedSkillsRaw = await _readStorage(_selectedSkillsKey);
@@ -1131,6 +1286,7 @@ class NomadeProvider with ChangeNotifier {
             value: _selectedApprovalPolicy),
         _writeStorage(_selectedSandboxModeKey, value: _selectedSandboxMode),
         _writeStorage(_selectedEffortKey, value: _selectedEffort),
+        _writeStorage(_offlineTurnDefaultKey, value: _offlineTurnDefault),
         _writeStorage(_selectedCollaborationModeKey,
             value: _selectedCollaborationModeSlug),
         _writeStorage(_selectedSkillsKey,
@@ -1145,6 +1301,17 @@ class NomadeProvider with ChangeNotifier {
   }
 
   Future<void> logout() async {
+    final tokenBeforeLogout = accessToken;
+    final pushTokenBeforeLogout = _registeredPushToken;
+    if (tokenBeforeLogout != null && pushTokenBeforeLogout != null) {
+      try {
+        await api.unregisterPushDevice(
+          accessToken: tokenBeforeLogout,
+          token: pushTokenBeforeLogout,
+        );
+      } catch (_) {}
+    }
+
     if (accessToken != null && refreshToken != null) {
       try {
         await api.logout(
@@ -1159,6 +1326,12 @@ class NomadeProvider with ChangeNotifier {
     currentAgents = null;
     maxAgents = null;
     deviceLimitReached = null;
+    canUseTunnels = false;
+    canUsePushNotifications = false;
+    canUseDeferredTurns = false;
+    pushProviderReady = false;
+    pushRegistrationError = null;
+    _registeredPushToken = null;
     agents = [];
     workspaces = [];
     conversations = [];
@@ -1182,6 +1355,7 @@ class NomadeProvider with ChangeNotifier {
     _pendingScanShortCode = null;
     _securityError = null;
     _secureScanApprovalInProgress = false;
+    _offlineTurnDefault = 'prompt';
     activeTurnId = null;
     status = 'Logged out';
 
@@ -1287,6 +1461,20 @@ class NomadeProvider with ChangeNotifier {
       } else if (currentAgents != null && maxAgents != null) {
         deviceLimitReached = currentAgents! >= maxAgents!;
       }
+      final rawFeatures = payload['features'];
+      if (rawFeatures is Map) {
+        final features = rawFeatures.cast<dynamic, dynamic>();
+        canUseTunnels = features['tunnels'] == true;
+        canUsePushNotifications = features['pushNotifications'] == true ||
+            features['push_notifications'] == true;
+        canUseDeferredTurns = features['deferredTurns'] == true ||
+            features['deferred_turns'] == true;
+      } else {
+        canUseTunnels = false;
+        canUsePushNotifications = false;
+        canUseDeferredTurns = false;
+      }
+      unawaited(syncNativePushRegistration());
       if (notifyListenersNow) {
         notifyListeners();
       }
@@ -1456,7 +1644,7 @@ class NomadeProvider with ChangeNotifier {
       }
       String? runningTurnId;
       for (final turn in turns) {
-        if (turn.status == 'running' || turn.status == 'queued') {
+        if (_turnCountsAsRunning(turn)) {
           runningTurnId = turn.id;
         }
       }
@@ -2253,6 +2441,11 @@ class NomadeProvider with ChangeNotifier {
       status: turn.status,
       diff: diff,
       error: turn.error,
+      deliveryPolicy: turn.deliveryPolicy,
+      deliveryState: turn.deliveryState,
+      deliveryAttempts: turn.deliveryAttempts,
+      deliveryError: turn.deliveryError,
+      nextDeliveryAt: turn.nextDeliveryAt,
       createdAt: turn.createdAt,
       updatedAt: turn.updatedAt,
       completedAt: turn.completedAt,
@@ -2820,6 +3013,28 @@ class NomadeProvider with ChangeNotifier {
       }
       notifyListeners();
       return;
+    } else if (type == 'notification.event') {
+      final eventType = event['eventType']?.toString() ?? 'unknown';
+      final conversationId = event['conversationId']?.toString() ?? '';
+      final turnId = event['turnId']?.toString() ?? '';
+      if (conversationId.isNotEmpty) {
+        _appendConversationDebugEvent(
+          conversationId: conversationId,
+          type: 'notification.$eventType',
+          message: 'turn=${turnId.isEmpty ? "-" : turnId}',
+        );
+      }
+      if (eventType == 'quota_available') {
+        status = 'Quota available: you can resume queued work.';
+      } else if (eventType == 'deferred_turn_started') {
+        status = 'Queued turn started.';
+      } else if (eventType == 'deferred_turn_completed') {
+        status = 'Queued turn completed.';
+      } else if (eventType == 'action_required') {
+        status = 'Action required on a running turn.';
+      }
+      notifyListeners();
+      return;
     } else if (type == 'conversation.thread.token_usage.updated') {
       final conversationId = event['conversationId']?.toString() ?? '';
       if (conversationId.isNotEmpty) {
@@ -2984,6 +3199,14 @@ class NomadeProvider with ChangeNotifier {
         } else if (selectedConversation != null) {
           loadTurns(selectedConversation!.id);
         }
+        unawaited(
+          NativeNotificationsBridge.clearRunningStatus(
+            conversationId: conversationId.isNotEmpty
+                ? conversationId
+                : (selectedConversation?.id ?? ''),
+            turnId: turnId,
+          ),
+        );
       }
       notifyListeners();
       return;
@@ -3032,6 +3255,15 @@ class NomadeProvider with ChangeNotifier {
         final timeline = timelineForTurn(turnId);
         timeline.executionCollapsed = false;
         timeline.finalAnswerReceived = false;
+        final conversationTitle = _findConversationById(conversationId)?.title;
+        unawaited(
+          NativeNotificationsBridge.setRunningStatus(
+            conversationId: conversationId,
+            turnId: turnId,
+            title: conversationTitle,
+            subtitle: selectedWorkspace?.name,
+          ),
+        );
       }
       notifyListeners();
       return;
@@ -3074,11 +3306,21 @@ class NomadeProvider with ChangeNotifier {
       if (turn.conversationId != conversationId) {
         continue;
       }
-      if (turn.status == 'running' || turn.status == 'queued') {
+      if (_turnCountsAsRunning(turn)) {
         return true;
       }
     }
     return false;
+  }
+
+  bool _turnCountsAsRunning(Turn turn) {
+    if (turn.status == 'running') {
+      return true;
+    }
+    if (turn.status != 'queued') {
+      return false;
+    }
+    return turn.deliveryState != 'deferred';
   }
 
   void _scheduleSocketReconnect() {
@@ -3093,7 +3335,10 @@ class NomadeProvider with ChangeNotifier {
     });
   }
 
-  Future<void> sendPrompt(String prompt) async {
+  Future<void> sendPrompt(
+    String prompt, {
+    String? deliveryPolicyOverride,
+  }) async {
     if (accessToken == null) return;
 
     try {
@@ -3124,6 +3369,18 @@ class NomadeProvider with ChangeNotifier {
       final requestedApproval = selectedApprovalPolicy;
       final requestedSandbox = selectedSandboxMode;
       final requestedEffort = selectedEffort;
+      final normalizedPolicyOverride = deliveryPolicyOverride?.trim();
+      final effectiveDeliveryPolicy = normalizedPolicyOverride ==
+                  'defer_if_offline' ||
+              normalizedPolicyOverride == 'immediate'
+          ? normalizedPolicyOverride
+          : (_offlineTurnDefault == 'defer' ? 'defer_if_offline' : 'immediate');
+      if (effectiveDeliveryPolicy == 'defer_if_offline' &&
+          !canUseDeferredTurns) {
+        status = 'Queued execution is not available on your current plan.';
+        notifyListeners();
+        return;
+      }
       final e2eRuntime = _e2eRuntime;
       if (e2eRuntime == null || !e2eRuntime.isReady) {
         status =
@@ -3139,7 +3396,7 @@ class NomadeProvider with ChangeNotifier {
         conversationId: conversationId,
         type: 'turn.create.request',
         message:
-            'cwd=${requestedCwd ?? "-"} sandbox=${requestedSandbox ?? "-"} approval=${requestedApproval ?? "-"} model=${requestedModel ?? "-"} effort=${requestedEffort ?? "-"} collaboration=${_selectedCollaborationModeSlug ?? "-"} skills=${_selectedSkillPaths.length}',
+            'cwd=${requestedCwd ?? "-"} sandbox=${requestedSandbox ?? "-"} approval=${requestedApproval ?? "-"} model=${requestedModel ?? "-"} effort=${requestedEffort ?? "-"} delivery=$effectiveDeliveryPolicy collaboration=${_selectedCollaborationModeSlug ?? "-"} skills=${_selectedSkillPaths.length}',
       );
 
       final inputItems = <Map<String, dynamic>>[
@@ -3210,9 +3467,12 @@ class NomadeProvider with ChangeNotifier {
         approvalPolicy: requestedApproval,
         sandboxMode: requestedSandbox,
         effort: requestedEffort,
+        deliveryPolicy: effectiveDeliveryPolicy,
       );
 
-      activeTurnId = turn['id'] as String;
+      final createdTurnId = turn['id'] as String?;
+      final createdDeliveryState = turn['delivery_state']?.toString() ?? '';
+      activeTurnId = createdDeliveryState == 'deferred' ? null : createdTurnId;
       final runtime = _runtimeByConversation.putIfAbsent(
           conversationId, () => ConversationRuntimeTrace());
       runtime.requestedAt = requestedAt;
@@ -3221,17 +3481,24 @@ class NomadeProvider with ChangeNotifier {
       runtime.requestedApprovalPolicy = requestedApproval;
       runtime.requestedSandboxMode = requestedSandbox;
       runtime.requestedEffort = requestedEffort;
-      runtime.turnId = activeTurnId;
+      runtime.turnId = createdTurnId;
       runtime.turnStatus = 'queued';
-      runtime.turnError = null;
+      runtime.turnError =
+          createdDeliveryState == 'deferred' ? 'deferred_agent_offline' : null;
       runtime.startedAt = null;
       runtime.completedAt = null;
 
       _appendConversationDebugEvent(
         conversationId: conversationId,
         type: 'turn.create.accepted',
-        message: 'turn=${activeTurnId ?? "-"}',
+        message:
+            'turn=${createdTurnId ?? "-"} deliveryState=${createdDeliveryState.isEmpty ? "-" : createdDeliveryState}',
       );
+
+      if (createdDeliveryState == 'deferred') {
+        _patchConversationLocal(conversationId, status: 'queued');
+        status = 'Turn queued and will run when your agent reconnects.';
+      }
 
       await loadTurns(conversationId);
     } on ApiException catch (e) {

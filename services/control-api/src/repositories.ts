@@ -22,6 +22,11 @@ export interface UserEntitlements {
   currentAgents: number;
   limitReached: boolean;
   source: string;
+  features: {
+    tunnels: boolean;
+    pushNotifications: boolean;
+    deferredTurns: boolean;
+  };
 }
 
 export interface BillingSubscriptionUpdate {
@@ -32,6 +37,20 @@ export interface BillingSubscriptionUpdate {
   source: string;
   stripeSubscriptionId?: string | null;
   currentPeriodEnd?: Date | null;
+}
+
+export interface PushRegistrationRecord {
+  id: string;
+  user_id: string;
+  device_id: string;
+  provider: string;
+  platform: string;
+  token: string;
+  status: "active" | "inactive";
+  last_error: string | null;
+  created_at: Date;
+  updated_at: Date;
+  last_seen_at: Date;
 }
 
 export class DeviceLimitReachedError extends Error {
@@ -176,9 +195,30 @@ export interface ConversationTurnRecord {
   status: string;
   diff: string;
   error: string | null;
+  delivery_policy: TurnDeliveryPolicy;
+  delivery_state: TurnDeliveryState;
+  delivery_attempts: number;
+  delivery_error: string | null;
+  next_delivery_at: Date | null;
+  request_options: Record<string, unknown>;
   created_at: Date;
   updated_at: Date;
   completed_at: Date | null;
+}
+
+export type TurnDeliveryPolicy = "immediate" | "defer_if_offline";
+export type TurnDeliveryState = "pending" | "deferred" | "dispatched" | "completed" | "failed";
+
+export interface DeferredConversationTurnDispatch {
+  userId: string;
+  turnId: string;
+  conversationId: string;
+  workspaceId: string;
+  agentId: string;
+  codexThreadId: string | null;
+  userPrompt: string;
+  requestOptions: Record<string, unknown>;
+  workspacePath: string | null;
 }
 
 export interface ConversationItemRecord {
@@ -783,6 +823,8 @@ export class Repositories {
 
   async applyBillingSubscriptionUpdate(params: BillingSubscriptionUpdate): Promise<void> {
     await this.ensureUserBillingDefaults(params.userId);
+    const hasStripeSubscriptionId = params.stripeSubscriptionId !== undefined;
+    const hasCurrentPeriodEnd = params.currentPeriodEnd !== undefined;
     await this.pool.query(
       `INSERT INTO subscriptions (
          user_id, plan_code, status, stripe_subscription_id, current_period_end, updated_at
@@ -790,15 +832,23 @@ export class Repositories {
        ON CONFLICT (user_id) DO UPDATE
        SET plan_code = EXCLUDED.plan_code,
            status = EXCLUDED.status,
-           stripe_subscription_id = EXCLUDED.stripe_subscription_id,
-           current_period_end = EXCLUDED.current_period_end,
+           stripe_subscription_id = CASE
+             WHEN $6::boolean THEN EXCLUDED.stripe_subscription_id
+             ELSE subscriptions.stripe_subscription_id
+           END,
+           current_period_end = CASE
+             WHEN $7::boolean THEN EXCLUDED.current_period_end
+             ELSE subscriptions.current_period_end
+           END,
            updated_at = NOW()`,
       [
         params.userId,
         params.planCode,
         params.status,
         params.stripeSubscriptionId ?? null,
-        params.currentPeriodEnd ?? null
+        params.currentPeriodEnd ?? null,
+        hasStripeSubscriptionId,
+        hasCurrentPeriodEnd
       ]
     );
 
@@ -810,6 +860,166 @@ export class Repositories {
            source = EXCLUDED.source,
            updated_at = NOW()`,
       [params.userId, Math.max(1, params.maxAgents), params.source]
+    );
+  }
+
+  async tryRecordBillingWebhookEvent(params: { provider: string; eventId: string }): Promise<boolean> {
+    const result = await this.pool.query<{ event_id: string }>(
+      `INSERT INTO billing_webhook_events (provider, event_id)
+       VALUES ($1, $2)
+       ON CONFLICT (provider, event_id) DO NOTHING
+       RETURNING event_id`,
+      [params.provider, params.eventId]
+    );
+    return Boolean(result.rows[0]);
+  }
+
+  async upsertPushRegistration(params: {
+    userId: string;
+    deviceId: string;
+    provider: string;
+    platform: string;
+    token: string;
+  }): Promise<PushRegistrationRecord> {
+    const id = newId();
+    const result = await this.pool.query<PushRegistrationRecord>(
+      `INSERT INTO push_registrations (
+         id,
+         user_id,
+         device_id,
+         provider,
+         platform,
+         token,
+         status,
+         last_seen_at,
+         updated_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, 'active', NOW(), NOW())
+       ON CONFLICT (provider, token) DO UPDATE
+       SET user_id = EXCLUDED.user_id,
+           device_id = EXCLUDED.device_id,
+           platform = EXCLUDED.platform,
+           status = 'active',
+           last_error = NULL,
+           last_seen_at = NOW(),
+           updated_at = NOW()
+       RETURNING
+         id,
+         user_id,
+         device_id,
+         provider,
+         platform,
+         token,
+         status,
+         last_error,
+         created_at,
+         updated_at,
+         last_seen_at`,
+      [id, params.userId, params.deviceId, params.provider, params.platform, params.token]
+    );
+
+    await this.pool.query(
+      `UPDATE push_registrations
+       SET status = 'inactive',
+           last_error = 'superseded_by_new_token',
+           updated_at = NOW()
+       WHERE user_id = $1
+         AND device_id = $2
+         AND provider = $3
+         AND token <> $4
+         AND status = 'active'`,
+      [params.userId, params.deviceId, params.provider, params.token]
+    );
+    return result.rows[0];
+  }
+
+  async listPushRegistrations(userId: string): Promise<PushRegistrationRecord[]> {
+    const result = await this.pool.query<PushRegistrationRecord>(
+      `SELECT
+         id,
+         user_id,
+         device_id,
+         provider,
+         platform,
+         token,
+         status,
+         last_error,
+         created_at,
+         updated_at,
+         last_seen_at
+       FROM push_registrations
+       WHERE user_id = $1
+       ORDER BY updated_at DESC`,
+      [userId]
+    );
+    return result.rows;
+  }
+
+  async listActivePushRegistrations(userId: string): Promise<PushRegistrationRecord[]> {
+    const result = await this.pool.query<PushRegistrationRecord>(
+      `SELECT
+         id,
+         user_id,
+         device_id,
+         provider,
+         platform,
+         token,
+         status,
+         last_error,
+         created_at,
+         updated_at,
+         last_seen_at
+       FROM push_registrations
+       WHERE user_id = $1
+         AND status = 'active'
+       ORDER BY updated_at DESC`,
+      [userId]
+    );
+    return result.rows;
+  }
+
+  async deactivatePushRegistrations(params: {
+    userId: string;
+    provider?: string;
+    token?: string;
+    deviceId?: string;
+    reason?: string;
+  }): Promise<number> {
+    const clauses = ["user_id = $1", "status = 'active'"];
+    const values: string[] = [params.userId];
+    if (params.provider) {
+      values.push(params.provider);
+      clauses.push(`provider = $${values.length}`);
+    }
+    if (params.token) {
+      values.push(params.token);
+      clauses.push(`token = $${values.length}`);
+    }
+    if (params.deviceId) {
+      values.push(params.deviceId);
+      clauses.push(`device_id = $${values.length}`);
+    }
+    values.push(params.reason ?? "deactivated");
+
+    const query = `
+      UPDATE push_registrations
+      SET status = 'inactive',
+          last_error = $${values.length},
+          updated_at = NOW()
+      WHERE ${clauses.join(" AND ")}
+    `;
+    const result = await this.pool.query(query, values);
+    return result.rowCount ?? 0;
+  }
+
+  async markPushRegistrationInvalid(params: { registrationId: string; error?: string }): Promise<void> {
+    await this.pool.query(
+      `UPDATE push_registrations
+       SET status = 'inactive',
+           last_error = $2,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [params.registrationId, params.error ?? "invalid_token"]
     );
   }
 
@@ -857,12 +1067,18 @@ export class Repositories {
         maxAgents: 1,
         currentAgents: 0,
         limitReached: false,
-        source: "free"
+        source: "free",
+        features: {
+          tunnels: false,
+          pushNotifications: false,
+          deferredTurns: false
+        }
       };
     }
 
     const maxAgents = Math.max(1, Number(row.max_agents));
     const currentAgents = Math.max(0, Number(row.current_agents));
+    const paidFeaturesEnabled = row.plan_code !== "free" && row.subscription_status === "active";
     return {
       userId,
       planCode: row.plan_code,
@@ -870,7 +1086,12 @@ export class Repositories {
       maxAgents,
       currentAgents,
       limitReached: currentAgents >= maxAgents,
-      source: row.source
+      source: row.source,
+      features: {
+        tunnels: paidFeaturesEnabled,
+        pushNotifications: paidFeaturesEnabled,
+        deferredTurns: paidFeaturesEnabled
+      }
     };
   }
 
@@ -1132,13 +1353,38 @@ export class Repositories {
   async createConversationTurn(params: {
     conversationId: string;
     prompt: string;
+    deliveryPolicy: TurnDeliveryPolicy;
+    requestOptions?: Record<string, unknown>;
   }): Promise<ConversationTurnRecord> {
     const id = newId();
     const result = await this.pool.query<ConversationTurnRecord>(
-      `INSERT INTO conversation_turns (id, conversation_id, user_prompt, status)
-       VALUES ($1, $2, $3, 'queued')
-       RETURNING id, conversation_id, user_prompt, codex_turn_id, status, diff, error, created_at, updated_at, completed_at`,
-      [id, params.conversationId, params.prompt]
+      `INSERT INTO conversation_turns (
+         id,
+         conversation_id,
+         user_prompt,
+         status,
+         delivery_policy,
+         request_options
+       )
+       VALUES ($1, $2, $3, 'queued', $4, $5::jsonb)
+       RETURNING
+         id,
+         conversation_id,
+         user_prompt,
+         codex_turn_id,
+         status,
+         diff,
+         error,
+         delivery_policy,
+         delivery_state,
+         delivery_attempts,
+         delivery_error,
+         next_delivery_at,
+         request_options,
+         created_at,
+         updated_at,
+         completed_at`,
+      [id, params.conversationId, params.prompt, params.deliveryPolicy, JSON.stringify(params.requestOptions ?? {})]
     );
     return result.rows[0];
   }
@@ -1157,6 +1403,12 @@ export class Repositories {
          t.status,
          t.diff,
          t.error,
+         t.delivery_policy,
+         t.delivery_state,
+         t.delivery_attempts,
+         t.delivery_error,
+         t.next_delivery_at,
+         t.request_options,
          t.created_at,
          t.updated_at,
          t.completed_at,
@@ -1193,7 +1445,23 @@ export class Repositories {
 
   async findConversationTurn(turnId: string): Promise<ConversationTurnRecord | null> {
     const result = await this.pool.query<ConversationTurnRecord>(
-      `SELECT id, conversation_id, user_prompt, codex_turn_id, status, diff, error, created_at, updated_at, completed_at
+      `SELECT
+         id,
+         conversation_id,
+         user_prompt,
+         codex_turn_id,
+         status,
+         diff,
+         error,
+         delivery_policy,
+         delivery_state,
+         delivery_attempts,
+         delivery_error,
+         next_delivery_at,
+         request_options,
+         created_at,
+         updated_at,
+         completed_at
        FROM conversation_turns
        WHERE id = $1`,
       [turnId]
@@ -1210,7 +1478,12 @@ export class Repositories {
   }): Promise<void> {
     await this.pool.query(
       `UPDATE conversation_turns
-       SET status = 'running', codex_turn_id = $1, updated_at = NOW()
+       SET status = 'running',
+           codex_turn_id = $1,
+           delivery_state = 'dispatched',
+           delivery_error = NULL,
+           next_delivery_at = NULL,
+           updated_at = NOW()
        WHERE id = $2`,
       [params.codexTurnId, params.turnId]
     );
@@ -1232,10 +1505,143 @@ export class Repositories {
   }): Promise<void> {
     await this.pool.query(
       `UPDATE conversation_turns
-       SET status = $1, error = $2, completed_at = NOW(), updated_at = NOW()
+       SET status = $1,
+           error = $2,
+           delivery_state = CASE WHEN $1 = 'completed' THEN 'completed' ELSE 'failed' END,
+           delivery_error = CASE WHEN $1 = 'completed' THEN NULL ELSE $2 END,
+           completed_at = NOW(),
+           updated_at = NOW()
        WHERE id = $3`,
       [params.status, params.error ?? null, params.turnId]
     );
+  }
+
+  async markConversationTurnDispatched(params: { turnId: string; incrementAttempt?: boolean }): Promise<void> {
+    await this.pool.query(
+      `UPDATE conversation_turns
+       SET delivery_state = 'dispatched',
+           delivery_attempts = delivery_attempts + CASE WHEN $1::boolean THEN 1 ELSE 0 END,
+           delivery_error = NULL,
+           next_delivery_at = NULL,
+           updated_at = NOW()
+       WHERE id = $2`,
+      [params.incrementAttempt === true, params.turnId]
+    );
+  }
+
+  async markConversationTurnDeferred(params: {
+    turnId: string;
+    error?: string;
+    nextDeliveryAt?: Date | null;
+  }): Promise<void> {
+    await this.pool.query(
+      `UPDATE conversation_turns
+       SET delivery_state = 'deferred',
+           delivery_error = $1,
+           next_delivery_at = $2,
+           updated_at = NOW()
+       WHERE id = $3`,
+      [params.error ?? null, params.nextDeliveryAt ?? null, params.turnId]
+    );
+  }
+
+  async rescheduleDeferredConversationTurn(turnId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE conversation_turns
+       SET delivery_state = 'deferred',
+           delivery_error = NULL,
+           next_delivery_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1`,
+      [turnId]
+    );
+  }
+
+  async claimDeferredConversationTurns(params: {
+    agentId: string;
+    limit: number;
+  }): Promise<DeferredConversationTurnDispatch[]> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const selected = await client.query<{ id: string }>(
+        `SELECT t.id
+         FROM conversation_turns t
+         JOIN conversations c ON c.id = t.conversation_id
+         WHERE c.agent_id = $1
+           AND t.status = 'queued'
+           AND t.delivery_state = 'deferred'
+           AND (t.next_delivery_at IS NULL OR t.next_delivery_at <= NOW())
+         ORDER BY t.created_at ASC
+         FOR UPDATE OF t SKIP LOCKED
+         LIMIT $2`,
+        [params.agentId, Math.max(1, Math.min(params.limit, 100))]
+      );
+      const claimedIds = selected.rows.map((row) => row.id);
+      if (claimedIds.length === 0) {
+        await client.query("COMMIT");
+        return [];
+      }
+
+      await client.query(
+        `UPDATE conversation_turns
+         SET delivery_state = 'pending',
+             delivery_attempts = delivery_attempts + 1,
+             delivery_error = NULL,
+             next_delivery_at = NULL,
+             updated_at = NOW()
+         WHERE id = ANY($1::text[])`,
+        [claimedIds]
+      );
+
+      const result = await client.query<{
+        user_id: string;
+        turn_id: string;
+        conversation_id: string;
+        workspace_id: string;
+        agent_id: string;
+        codex_thread_id: string | null;
+        user_prompt: string;
+        request_options: Record<string, unknown> | null;
+        workspace_path: string | null;
+      }>(
+        `SELECT
+           c.user_id,
+           t.id AS turn_id,
+           t.conversation_id,
+           c.workspace_id,
+           c.agent_id,
+           c.codex_thread_id,
+           t.user_prompt,
+           t.request_options,
+           w.path AS workspace_path
+         FROM conversation_turns t
+         JOIN conversations c ON c.id = t.conversation_id
+         LEFT JOIN workspaces w ON w.id = c.workspace_id
+         WHERE t.id = ANY($1::text[])
+         ORDER BY t.created_at ASC`,
+        [claimedIds]
+      );
+      await client.query("COMMIT");
+
+      return result.rows.map((row) => ({
+        userId: row.user_id,
+        turnId: row.turn_id,
+        conversationId: row.conversation_id,
+        workspaceId: row.workspace_id,
+        agentId: row.agent_id,
+        codexThreadId: row.codex_thread_id,
+        userPrompt: row.user_prompt,
+        requestOptions:
+          row.request_options && typeof row.request_options === "object" ? row.request_options : {},
+        workspacePath: row.workspace_path
+      }));
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async upsertConversationItem(params: {

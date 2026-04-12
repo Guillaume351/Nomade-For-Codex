@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { pairAgent } from "./pair.js";
 import { runAgent } from "./runner.js";
 import {
@@ -6,7 +8,13 @@ import {
   logoutSession,
   printWhoAmI
 } from "./user-auth.js";
-import { defaultConfigPath, defaultSessionPath } from "./config.js";
+import {
+  defaultConfigPath,
+  defaultControlHttpUrl,
+  defaultSessionPath,
+  type KeepAwakeMode,
+  type OfflineTurnDefault
+} from "./config.js";
 
 const readArg = (name: string): string | undefined => {
   const index = process.argv.findIndex((item) => item === `--${name}`);
@@ -17,15 +25,48 @@ const readArg = (name: string): string | undefined => {
 };
 
 const hasFlag = (name: string): boolean => process.argv.includes(`--${name}`);
+const readKeepAwake = (): KeepAwakeMode | undefined => {
+  const value = readArg("keep-awake");
+  if (!value) {
+    return undefined;
+  }
+  if (value === "never" || value === "active") {
+    return value;
+  }
+  throw new Error(`invalid --keep-awake value: ${value} (expected never|active)`);
+};
+
+const readOfflineTurnDefault = (): OfflineTurnDefault | undefined => {
+  const value = readArg("offline-turn-default");
+  if (!value) {
+    return undefined;
+  }
+  if (value === "prompt" || value === "defer" || value === "fail") {
+    return value;
+  }
+  throw new Error(`invalid --offline-turn-default value: ${value} (expected prompt|defer|fail)`);
+};
+
+const readReconnectMaxSeconds = (): number | undefined => {
+  const raw = readArg("reconnect-max-seconds");
+  if (!raw) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || Number.isNaN(parsed)) {
+    throw new Error(`invalid --reconnect-max-seconds value: ${raw}`);
+  }
+  if (parsed < 5 || parsed > 300) {
+    throw new Error("--reconnect-max-seconds must be between 5 and 300");
+  }
+  return parsed;
+};
 
 const command = process.argv[2] ?? "run";
 
 const main = async (): Promise<void> => {
   if (command === "login") {
-    const serverUrl = readArg("server-url") ?? process.env.CONTROL_HTTP_URL;
-    if (!serverUrl) {
-      throw new Error("login requires --server-url (or CONTROL_HTTP_URL)");
-    }
+    const serverUrl = readArg("server-url") ?? defaultControlHttpUrl();
     await loginWithDeviceCode({
       serverUrl,
       sessionPath: readArg("session") ?? defaultSessionPath(),
@@ -45,12 +86,7 @@ const main = async (): Promise<void> => {
 
   if (command === "whoami") {
     const configPath = readArg("config") ?? defaultConfigPath();
-    const serverUrl = readArg("server-url") ?? process.env.CONTROL_HTTP_URL;
-    if (!serverUrl) {
-      throw new Error(
-        `whoami requires --server-url (or CONTROL_HTTP_URL). Agent config path hint: ${configPath}`
-      );
-    }
+    const serverUrl = readArg("server-url") ?? defaultControlHttpUrl();
     await printWhoAmI({
       serverUrl,
       sessionPath: readArg("session") ?? defaultSessionPath()
@@ -59,11 +95,8 @@ const main = async (): Promise<void> => {
   }
 
   if (command === "pair") {
-    const serverUrl = readArg("server-url") ?? process.env.CONTROL_HTTP_URL;
+    const serverUrl = readArg("server-url") ?? defaultControlHttpUrl();
     let pairingCode = readArg("pairing-code") ?? process.env.PAIRING_CODE;
-    if (!serverUrl) {
-      throw new Error("pair requires --server-url (or CONTROL_HTTP_URL)");
-    }
     if (!pairingCode) {
       const sessionPath = readArg("session") ?? defaultSessionPath();
       const generated = await createPairingCodeFromSession({
@@ -88,7 +121,12 @@ const main = async (): Promise<void> => {
   }
 
   if (command === "run") {
-    await runAgent({ configPath: readArg("config") });
+    await runAgent({
+      configPath: readArg("config"),
+      keepAwakeMode: readKeepAwake(),
+      offlineTurnDefault: readOfflineTurnDefault(),
+      reconnectMaxSeconds: readReconnectMaxSeconds()
+    });
     return;
   }
 

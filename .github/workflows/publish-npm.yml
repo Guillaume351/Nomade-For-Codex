@@ -1,0 +1,42 @@
+name: Publish npm Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm --workspace packages/shared run build
+
+      - name: Build agent package
+        run: npm --workspace agent/nomade-agent run build
+
+      - name: Publish @nomade/shared
+        run: npm --workspace packages/shared publish --provenance --access public
+
+      - name: Publish @nomade/agent
+        run: npm --workspace agent/nomade-agent publish --provenance --access public

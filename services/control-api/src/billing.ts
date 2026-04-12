@@ -124,3 +124,15 @@ export const verifyStripeWebhookSignature = (params: {
   const expected = createHmac("sha256", params.webhookSecret).update(signedPayload).digest("hex");
   return safeEqual(expected, parsed.signature);
 };
+
+export const verifyRevenueCatWebhookAuthorization = (params: {
+  authorizationHeader: string | undefined;
+  webhookAuth: string;
+}): boolean => {
+  const received = params.authorizationHeader?.trim() ?? "";
+  const expected = params.webhookAuth.trim();
+  if (!received || !expected) {
+    return false;
+  }
+  return safeEqual(received, expected);
+};

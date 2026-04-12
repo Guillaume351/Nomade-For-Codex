@@ -1,12 +1,19 @@
 {
   "name": "@nomade/shared",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {

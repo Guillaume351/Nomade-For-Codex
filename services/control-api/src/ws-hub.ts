@@ -117,6 +117,40 @@ interface PendingCodexOptions {
   timeout: NodeJS.Timeout;
 }
 
+interface WsHubHooks {
+  onAgentHello?: (params: { agentId: string; userId: string }) => void | Promise<void>;
+  onAgentHeartbeat?: (params: { agentId: string; userId: string }) => void | Promise<void>;
+  onRateLimitsUpdated?: (params: {
+    agentId: string;
+    userId: string;
+    rateLimits: Record<string, unknown>;
+  }) => void | Promise<void>;
+  onConversationServerRequest?: (params: {
+    agentId: string;
+    userId: string;
+    conversationId: string;
+    turnId: string;
+    requestId: string;
+    method: string;
+  }) => void | Promise<void>;
+  onConversationTurnStarted?: (params: {
+    agentId: string;
+    userId: string;
+    conversationId: string;
+    turnId: string;
+    threadId?: string;
+    codexTurnId?: string;
+  }) => void | Promise<void>;
+  onConversationTurnCompleted?: (params: {
+    agentId: string;
+    userId: string;
+    conversationId: string;
+    turnId: string;
+    status: "completed" | "interrupted" | "failed";
+    error?: string;
+  }) => void | Promise<void>;
+}
+
 const normalizeCodexThreadReadItem = (rawItem: Record<string, unknown>, itemIndex: number): CodexThreadReadItem => {
   const wrappedPayload = rawItem.payload;
   if (wrappedPayload && typeof wrappedPayload === "object") {
@@ -201,7 +235,8 @@ export class WsHub {
   constructor(
     private readonly auth: AuthService,
     private readonly repositories: Repositories,
-    private readonly server: import("http").Server
+    private readonly server: import("http").Server,
+    private readonly hooks: WsHubHooks = {}
   ) {
     this.wss = new WebSocketServer({ noServer: true });
     this.server.on("upgrade", (req, socket, head) => this.handleUpgrade(req, socket, head));
@@ -245,6 +280,10 @@ export class WsHub {
       message.diagnostic = payload.diagnostic ?? null;
     }
     this.broadcastToUser(userId, message);
+  }
+
+  publishToUser(userId: string, payload: unknown): void {
+    this.broadcastToUser(userId, payload);
   }
 
   rememberConversationOwner(conversationId: string, userId: string, agentId?: string): void {
@@ -926,16 +965,27 @@ export class WsHub {
 
     if (type === "agent.hello") {
       void this.repositories.touchAgentLastSeen(agentId);
+      void this.hooks.onAgentHello?.({ agentId, userId: defaultUserId });
       return;
     }
 
     if (type === "agent.heartbeat") {
       void this.repositories.touchAgentLastSeen(agentId);
+      void this.hooks.onAgentHeartbeat?.({ agentId, userId: defaultUserId });
       return;
     }
 
     if (type === "account.rate_limits.updated") {
       this.broadcastToUser(defaultUserId, msg);
+      const rateLimits =
+        msg.rateLimits && typeof msg.rateLimits === "object"
+          ? (msg.rateLimits as Record<string, unknown>)
+          : {};
+      void this.hooks.onRateLimitsUpdated?.({
+        agentId,
+        userId: defaultUserId,
+        rateLimits
+      });
       return;
     }
 
@@ -968,6 +1018,14 @@ export class WsHub {
         void this.repositories.markConversationTurnStarted({ turnId, codexTurnId });
       }
       this.broadcastToUser(userId, msg);
+      void this.hooks.onConversationTurnStarted?.({
+        agentId,
+        userId,
+        conversationId,
+        turnId,
+        threadId: typeof msg.threadId === "string" ? msg.threadId : undefined,
+        codexTurnId: codexTurnId.length > 0 ? codexTurnId : undefined
+      });
       return;
     }
 
@@ -1066,6 +1124,16 @@ export class WsHub {
       const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
       this.broadcastToUser(userId, msg);
+      if (type === "conversation.server.request") {
+        void this.hooks.onConversationServerRequest?.({
+          agentId,
+          userId,
+          conversationId,
+          turnId: String(msg.turnId ?? ""),
+          requestId: String(msg.requestId ?? ""),
+          method: String(msg.method ?? "")
+        });
+      }
       return;
     }
 
@@ -1092,6 +1160,15 @@ export class WsHub {
         );
       }
       this.broadcastToUser(userId, msg);
+      void this.hooks.onConversationTurnCompleted?.({
+        agentId,
+        userId,
+        conversationId,
+        turnId,
+        status,
+        error
+      });
+      return;
     }
   }
 

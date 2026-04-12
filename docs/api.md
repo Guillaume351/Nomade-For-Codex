@@ -15,7 +15,10 @@
 
 ## User endpoints (Bearer access token)
 - `GET /me`
-- `GET /me/entitlements` -> `{ planCode, maxAgents, currentAgents, limitReached, ... }`
+- `GET /me/entitlements` -> `{ planCode, maxAgents, currentAgents, limitReached, features: { tunnels, pushNotifications, deferredTurns }, ... }`
+- `GET /me/push/registrations`
+- `POST /me/push/register` body `{ deviceId, provider: "fcm", platform: "ios"|"android", token }`
+- `POST /me/push/unregister` body `{ provider?, token? | deviceId? }`
 - `POST /billing/checkout-session` -> `{ id, url }` (Stripe Checkout)
 - `POST /billing/portal-session` -> `{ id, url }` (Stripe Customer Portal)
 - `POST /agents/pair`
@@ -38,8 +41,11 @@
 - `GET /conversations?workspaceId=...`
 - `GET /conversations/:conversationId/turns?forceHydrate=1`
   - includes `hydration` metadata: `{ attempted, repaired, deferred, reason }`
-- `POST /conversations/:conversationId/turns` body `{ prompt, model?, cwd?, approvalPolicy?, sandboxMode?, effort? }`
+- `POST /conversations/:conversationId/turns` body `{ prompt?, e2ePromptEnvelope, inputItems?, model?, cwd?, approvalPolicy?, sandboxMode?, effort?, deliveryPolicy? }`
+  - `deliveryPolicy`: `immediate` (default) | `defer_if_offline`
+  - when offline + `defer_if_offline`, returns `202` with `delivery_state=deferred`
 - `POST /conversations/:conversationId/turns/:turnId/interrupt`
+- `POST /conversations/:conversationId/turns/:turnId/retry` (manual deferred retry)
 - `POST /sessions` body `{ workspaceId, agentId, name, command, cwd? }`
 - `GET /sessions?workspaceId=...`
 - `POST /tunnels` body `{ workspaceId, agentId, targetPort, ttlSec? }`
@@ -52,8 +58,10 @@
 - Body: `{ method, path, query?, headers, bodyBase64?, token }`.
 
 ## Billing webhook
-- `POST /billing/webhook`
-- Expects Stripe signature header `Stripe-Signature`.
+- `POST /billing/webhook` (Stripe)
+  - Expects Stripe signature header `Stripe-Signature`.
+- `POST /billing/revenuecat/webhook` (RevenueCat)
+  - Expects configured `Authorization` header value.
 
 ## WebSocket protocol (`/ws`)
 ### Auth
@@ -72,3 +80,7 @@
 - `conversation.item.completed`
 - `conversation.turn.diff.updated`
 - `conversation.turn.completed`
+
+### Messages from control-api to user socket
+- `notification.event`
+  - `eventType`: `action_required` | `quota_available` | `deferred_turn_started` | `deferred_turn_completed`

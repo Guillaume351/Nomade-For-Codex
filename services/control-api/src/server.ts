@@ -15,6 +15,7 @@ import { createPool, ensureSchema } from "./db.js";
 import {
   DeviceLimitReachedError,
   Repositories,
+  type TurnDeliveryPolicy,
   type BillingSubscriptionUpdate,
   type TunnelRecord
 } from "./repositories.js";
@@ -27,8 +28,10 @@ import {
   createStripeCheckoutSession,
   createStripeCustomer,
   createStripePortalSession,
+  verifyRevenueCatWebhookAuthorization,
   verifyStripeWebhookSignature
 } from "./billing.js";
+import { createPushGateway } from "./push.js";
 import {
   encodeHtml,
   htmlPage
@@ -346,8 +349,93 @@ const derivePromptFromInputItems = (inputItems: Array<Record<string, unknown>>):
   return "[non-text input]";
 };
 
+type RevenueCatSubscriptionState = "active" | "inactive" | "ignore";
+
+const revenueCatActiveEventTypes = new Set([
+  "INITIAL_PURCHASE",
+  "RENEWAL",
+  "PRODUCT_CHANGE",
+  "TRANSFER",
+  "UNCANCELLATION",
+  "NON_RENEWING_PURCHASE",
+  "SUBSCRIPTION_EXTENDED"
+]);
+
+const revenueCatInactiveEventTypes = new Set(["EXPIRATION"]);
+
+const resolveRevenueCatSubscriptionState = (params: {
+  eventType: string;
+  expirationAt: Date | null;
+}): RevenueCatSubscriptionState => {
+  if (revenueCatInactiveEventTypes.has(params.eventType)) {
+    return "inactive";
+  }
+  if (!revenueCatActiveEventTypes.has(params.eventType)) {
+    return "ignore";
+  }
+  if (!params.expirationAt) {
+    return "active";
+  }
+  return params.expirationAt.getTime() > Date.now() ? "active" : "inactive";
+};
+
+const parseOptionalTimestampMs = (value: unknown): Date | null => {
+  const numeric =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim().length > 0
+        ? Number.parseInt(value, 10)
+        : Number.NaN;
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+  return new Date(numeric);
+};
+
+const collectRevenueCatCandidateUserIds = (event: Record<string, unknown>): string[] => {
+  const candidates = new Set<string>();
+  const direct = event.app_user_id;
+  if (typeof direct === "string" && direct.trim().length > 0) {
+    candidates.add(direct.trim());
+  }
+  const original = event.original_app_user_id;
+  if (typeof original === "string" && original.trim().length > 0) {
+    candidates.add(original.trim());
+  }
+  const aliases = event.aliases;
+  if (Array.isArray(aliases)) {
+    for (const alias of aliases) {
+      if (typeof alias === "string" && alias.trim().length > 0) {
+        candidates.add(alias.trim());
+      }
+    }
+  }
+  return Array.from(candidates).filter((candidate) => !candidate.startsWith("$RCAnonymousID:"));
+};
+
+type MobileNotificationEventType =
+  | "action_required"
+  | "quota_available"
+  | "deferred_turn_started"
+  | "deferred_turn_completed";
+
+type MobileNotificationPayload = {
+  type: "notification.event";
+  eventType: MobileNotificationEventType;
+  createdAt: string;
+  conversationId?: string;
+  turnId?: string;
+  requestId?: string;
+  message?: string;
+};
+
 export const createServer = async (): Promise<http.Server> => {
   const config = loadConfig();
+  const pushGateway = createPushGateway({
+    projectId: config.firebaseProjectId,
+    clientEmail: config.firebaseClientEmail,
+    privateKey: config.firebasePrivateKey
+  });
   const pool = createPool(config.databaseUrl);
   await ensureSchema(pool);
 
@@ -664,6 +752,25 @@ export const createServer = async (): Promise<http.Server> => {
     upgradeUrl: `${config.appBaseUrl.replace(/\/$/, "")}/web/account`
   });
 
+  type EntitlementFeature = "tunnels" | "pushNotifications" | "deferredTurns";
+  const ensureEntitlementFeature = async (params: {
+    userId: string;
+    feature: EntitlementFeature;
+    res: express.Response;
+  }): Promise<boolean> => {
+    const entitlements = await repositories.getUserEntitlements(params.userId);
+    const enabled = entitlements.features?.[params.feature] === true;
+    if (enabled) {
+      return true;
+    }
+    params.res.status(403).json({
+      error: "feature_not_enabled",
+      feature: params.feature,
+      planCode: entitlements.planCode
+    });
+    return false;
+  };
+
   const mapStripePriceToPlan = (priceId: string | null | undefined): { planCode: string; maxAgents: number } => {
     if (priceId && config.stripeProPriceId && priceId === config.stripeProPriceId) {
       return { planCode: "pro", maxAgents: config.paidMaxAgents };
@@ -672,6 +779,23 @@ export const createServer = async (): Promise<http.Server> => {
       return { planCode: "paid", maxAgents: config.paidMaxAgents };
     }
     return { planCode: "free", maxAgents: config.freeMaxAgents };
+  };
+
+  const mapRevenueCatProductToPlan = (
+    productId: string | null | undefined
+  ): { planCode: string; maxAgents: number } => {
+    const normalized = productId?.trim();
+    if (!normalized) {
+      return { planCode: "free", maxAgents: config.freeMaxAgents };
+    }
+    const configured = config.revenueCatProductPlanMap[normalized];
+    if (configured) {
+      if (configured === "free") {
+        return { planCode: "free", maxAgents: config.freeMaxAgents };
+      }
+      return { planCode: configured, maxAgents: config.paidMaxAgents };
+    }
+    return { planCode: "paid", maxAgents: config.paidMaxAgents };
   };
 
   const ensureStripeCustomerForUser = async (params: { userId: string; email: string }): Promise<string> => {
@@ -718,6 +842,21 @@ export const createServer = async (): Promise<http.Server> => {
     const event = JSON.parse(req.body.toString("utf8")) as Record<string, unknown>;
     const eventId = typeof event.id === "string" ? event.id : "unknown";
     const eventType = String(event.type ?? "");
+    if (eventId !== "unknown") {
+      const accepted = await repositories.tryRecordBillingWebhookEvent({
+        provider: "stripe",
+        eventId
+      });
+      if (!accepted) {
+        console.log("[billing-webhook]", {
+          status: "duplicate",
+          eventId,
+          eventType
+        });
+        res.json({ received: true, duplicate: true });
+        return;
+      }
+    }
     console.log("[billing-webhook]", {
       status: "received",
       eventId,
@@ -847,6 +986,118 @@ export const createServer = async (): Promise<http.Server> => {
     res.json({ received: true });
   });
 
+  app.post("/billing/revenuecat/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+    if (!config.revenueCatWebhookAuth) {
+      console.log("[revenuecat-webhook]", { status: "ignored", reason: "revenuecat_not_configured" });
+      res.status(404).json({ error: "revenuecat_not_configured" });
+      return;
+    }
+    if (!Buffer.isBuffer(req.body)) {
+      res.status(400).json({ error: "invalid_payload" });
+      return;
+    }
+    const authorized = verifyRevenueCatWebhookAuthorization({
+      authorizationHeader: req.header("authorization"),
+      webhookAuth: config.revenueCatWebhookAuth
+    });
+    if (!authorized) {
+      console.warn("[revenuecat-webhook]", { status: "invalid_authorization" });
+      res.status(400).json({ error: "invalid_authorization" });
+      return;
+    }
+
+    let decoded: Record<string, unknown>;
+    try {
+      decoded = JSON.parse(req.body.toString("utf8")) as Record<string, unknown>;
+    } catch {
+      res.status(400).json({ error: "invalid_json" });
+      return;
+    }
+    const event = decoded.event && typeof decoded.event === "object"
+      ? (decoded.event as Record<string, unknown>)
+      : null;
+    if (!event) {
+      res.status(400).json({ error: "invalid_event_payload" });
+      return;
+    }
+
+    const eventType = String(event.type ?? "").toUpperCase();
+    const eventId = String(event.id ?? event.event_id ?? "unknown");
+    if (eventId !== "unknown") {
+      const accepted = await repositories.tryRecordBillingWebhookEvent({
+        provider: "revenuecat",
+        eventId
+      });
+      if (!accepted) {
+        console.log("[revenuecat-webhook]", {
+          status: "duplicate",
+          eventId,
+          eventType
+        });
+        res.json({ received: true, duplicate: true });
+        return;
+      }
+    }
+
+    const productId = typeof event.product_id === "string" ? event.product_id : null;
+    const expirationAt = parseOptionalTimestampMs(event.expiration_at_ms);
+    const resolvedState = resolveRevenueCatSubscriptionState({
+      eventType,
+      expirationAt
+    });
+    if (resolvedState === "ignore") {
+      console.log("[revenuecat-webhook]", {
+        status: "ignored",
+        reason: "unsupported_event",
+        eventId,
+        eventType
+      });
+      res.json({ received: true, ignored: true });
+      return;
+    }
+
+    const candidates = collectRevenueCatCandidateUserIds(event);
+    let user = null as Awaited<ReturnType<typeof repositories.getUserById>>;
+    for (const candidate of candidates) {
+      user = await repositories.getUserById(candidate);
+      if (user) {
+        break;
+      }
+    }
+    if (!user) {
+      console.log("[revenuecat-webhook]", {
+        status: "ignored",
+        reason: "user_not_mapped",
+        eventId,
+        eventType,
+        candidates
+      });
+      res.json({ received: true });
+      return;
+    }
+
+    const mapped = mapRevenueCatProductToPlan(productId);
+    const isActive = resolvedState === "active";
+    const update: BillingSubscriptionUpdate = {
+      userId: user.id,
+      planCode: isActive ? mapped.planCode : "free",
+      status: isActive ? "active" : "inactive",
+      maxAgents: isActive ? mapped.maxAgents : config.freeMaxAgents,
+      source: isActive ? "revenuecat" : "free",
+      currentPeriodEnd: expirationAt
+    };
+    await repositories.applyBillingSubscriptionUpdate(update);
+    console.log("[revenuecat-webhook]", {
+      status: "applied",
+      eventId,
+      eventType,
+      userId: user.id,
+      planCode: update.planCode,
+      productId
+    });
+    res.json({ received: true });
+  });
+
   app.use(express.json({ limit: jsonLimit }));
 
   app.get("/health", (_req, res) => {
@@ -854,7 +1105,314 @@ export const createServer = async (): Promise<http.Server> => {
   });
 
   const server = http.createServer(app);
-  const wsHub = new WsHub(auth, repositories, server);
+  let wsHub: WsHub;
+  const deferredDispatchLocks = new Set<string>();
+  const deferredInFlightTurnIds = new Set<string>();
+  const deferredRetryDelayMs = 15_000;
+  const quotaAvailabilityCooldownMs = 5 * 60 * 1000;
+  const lastQuotaAvailabilityNotificationAt = new Map<string, number>();
+
+  const parseRateLimitRemaining = (rateLimits: Record<string, unknown>): number | null => {
+    const keys = ["remaining", "remainingRequests", "remainingTokens"] as const;
+    for (const key of keys) {
+      const value = rateLimits[key];
+      const numeric = typeof value === "number" ? value : Number.NaN;
+      if (Number.isFinite(numeric)) {
+        return numeric;
+      }
+      if (typeof value === "string" && value.trim().length > 0) {
+        const parsed = Number.parseFloat(value);
+        if (Number.isFinite(parsed)) {
+          return parsed;
+        }
+      }
+    }
+
+    const windows = [rateLimits.primaryWindow, rateLimits.secondaryWindow];
+    for (const window of windows) {
+      if (!window || typeof window !== "object") {
+        continue;
+      }
+      const asMap = window as Record<string, unknown>;
+      const value = asMap.remaining;
+      const numeric = typeof value === "number" ? value : Number.NaN;
+      if (Number.isFinite(numeric)) {
+        return numeric;
+      }
+    }
+    return null;
+  };
+
+  const eventNotificationContent = (eventType: MobileNotificationEventType): { title: string; body: string } => {
+    if (eventType === "action_required") {
+      return {
+        title: "Action required",
+        body: "A running turn needs your approval to continue."
+      };
+    }
+    if (eventType === "quota_available") {
+      return {
+        title: "Quota available",
+        body: "Your Codex quota is available again."
+      };
+    }
+    if (eventType === "deferred_turn_started") {
+      return {
+        title: "Queued turn started",
+        body: "A previously queued turn is now running."
+      };
+    }
+    return {
+      title: "Queued turn completed",
+      body: "A previously queued turn has completed."
+    };
+  };
+
+  const emitMobileNotificationEvent = async (params: {
+    userId: string;
+    eventType: MobileNotificationEventType;
+    conversationId?: string;
+    turnId?: string;
+    requestId?: string;
+    message?: string;
+  }): Promise<void> => {
+    const eventPayload: MobileNotificationPayload = {
+      type: "notification.event",
+      eventType: params.eventType,
+      createdAt: new Date().toISOString(),
+      conversationId: params.conversationId,
+      turnId: params.turnId,
+      requestId: params.requestId,
+      message: params.message
+    };
+    wsHub.publishToUser(params.userId, eventPayload);
+
+    const entitlements = await repositories.getUserEntitlements(params.userId);
+    if (!entitlements.features.pushNotifications) {
+      return;
+    }
+
+    const registrations = await repositories.listActivePushRegistrations(params.userId);
+    if (registrations.length === 0) {
+      return;
+    }
+    const copy = eventNotificationContent(params.eventType);
+    const sendResult = await pushGateway.send(
+      registrations.map((registration) => ({
+        id: registration.id,
+        userId: registration.user_id,
+        deviceId: registration.device_id,
+        provider: registration.provider,
+        platform: registration.platform,
+        token: registration.token
+      })),
+      {
+        title: copy.title,
+        body: copy.body,
+        data: {
+          eventType: params.eventType,
+          conversationId: params.conversationId ?? "",
+          turnId: params.turnId ?? "",
+          requestId: params.requestId ?? ""
+        }
+      }
+    );
+
+    if (sendResult.invalidRegistrationIds.length > 0) {
+      await Promise.all(
+        sendResult.invalidRegistrationIds.map((registrationId) =>
+          repositories.markPushRegistrationInvalid({
+            registrationId,
+            error: "provider_rejected_token"
+          })
+        )
+      );
+    }
+  };
+
+  const dispatchDeferredTurnsForAgent = async (agentId: string): Promise<void> => {
+    const claimed = await repositories.claimDeferredConversationTurns({
+      agentId,
+      limit: 20
+    });
+    if (claimed.length === 0) {
+      return;
+    }
+
+    for (const queued of claimed) {
+      wsHub.rememberConversationOwner(queued.conversationId, queued.userId, queued.agentId);
+      wsHub.rememberConversationTurn(queued.turnId, queued.conversationId);
+
+      const parsedPrompt = parseJsonObject(queued.userPrompt);
+      if (!parsedPrompt || !isStrictEnvelopeObject(parsedPrompt)) {
+        deferredInFlightTurnIds.delete(queued.turnId);
+        await repositories.completeConversationTurn({
+          turnId: queued.turnId,
+          status: "failed",
+          error: "invalid_deferred_prompt_envelope"
+        });
+        await repositories.updateConversationStatus(queued.conversationId, "failed");
+        continue;
+      }
+
+      const requestOptions =
+        queued.requestOptions && typeof queued.requestOptions === "object" ? queued.requestOptions : {};
+      const collaborationModeRaw = requestOptions.collaborationMode;
+      const collaborationMode =
+        collaborationModeRaw && typeof collaborationModeRaw === "object" && !Array.isArray(collaborationModeRaw)
+          ? (collaborationModeRaw as Record<string, unknown>)
+          : undefined;
+      const model = typeof requestOptions.model === "string" && requestOptions.model.trim().length > 0
+        ? requestOptions.model.trim()
+        : undefined;
+      const cwd = typeof requestOptions.cwd === "string" && requestOptions.cwd.trim().length > 0
+        ? requestOptions.cwd.trim()
+        : queued.workspacePath ?? undefined;
+      const approvalPolicy = typeof requestOptions.approvalPolicy === "string"
+        ? requestOptions.approvalPolicy
+        : undefined;
+      const sandboxMode = typeof requestOptions.sandboxMode === "string"
+        ? requestOptions.sandboxMode
+        : undefined;
+      const effort = typeof requestOptions.effort === "string" ? requestOptions.effort : undefined;
+
+      const delivered = wsHub.sendToAgent(agentId, {
+        type: "conversation.turn.start",
+        conversationId: queued.conversationId,
+        turnId: queued.turnId,
+        threadId: queued.codexThreadId ?? undefined,
+        e2ePromptEnvelope: parsedPrompt,
+        collaborationMode,
+        model,
+        cwd,
+        approvalPolicy,
+        sandboxMode,
+        effort
+      });
+
+      if (!delivered) {
+        deferredInFlightTurnIds.delete(queued.turnId);
+        await repositories.markConversationTurnDeferred({
+          turnId: queued.turnId,
+          error: "agent_offline",
+          nextDeliveryAt: new Date(Date.now() + deferredRetryDelayMs)
+        });
+        await repositories.updateConversationStatus(queued.conversationId, "queued");
+        continue;
+      }
+
+      await repositories.markConversationTurnDispatched({
+        turnId: queued.turnId,
+        incrementAttempt: false
+      });
+      deferredInFlightTurnIds.add(queued.turnId);
+      await repositories.updateConversationStatus(queued.conversationId, "running");
+    }
+  };
+
+  const scheduleDeferredDispatch = (agentId: string): void => {
+    if (!agentId || deferredDispatchLocks.has(agentId)) {
+      return;
+    }
+    deferredDispatchLocks.add(agentId);
+    void (async () => {
+      try {
+        await dispatchDeferredTurnsForAgent(agentId);
+      } catch (error) {
+        console.error("[control-api] deferred dispatch failed", {
+          agentId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      } finally {
+        deferredDispatchLocks.delete(agentId);
+      }
+    })();
+  };
+
+  wsHub = new WsHub(auth, repositories, server, {
+    onAgentHello: ({ agentId }) => {
+      scheduleDeferredDispatch(agentId);
+    },
+    onAgentHeartbeat: ({ agentId }) => {
+      scheduleDeferredDispatch(agentId);
+    },
+    onConversationServerRequest: ({ userId, conversationId, turnId, requestId, method }) => {
+      void emitMobileNotificationEvent({
+        userId,
+        eventType: "action_required",
+        conversationId,
+        turnId,
+        requestId,
+        message: method
+      }).catch((error) => {
+        console.warn("[control-api] action_required notification failed", {
+          userId,
+          turnId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+    },
+    onConversationTurnStarted: ({ userId, conversationId, turnId }) => {
+      if (!turnId || !deferredInFlightTurnIds.has(turnId)) {
+        return;
+      }
+      void emitMobileNotificationEvent({
+        userId,
+        eventType: "deferred_turn_started",
+        conversationId,
+        turnId
+      }).catch((error) => {
+        console.warn("[control-api] deferred_started notification failed", {
+          userId,
+          turnId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+    },
+    onConversationTurnCompleted: ({ userId, conversationId, turnId, status, error }) => {
+      if (!turnId) {
+        return;
+      }
+      const wasDeferred = deferredInFlightTurnIds.has(turnId);
+      deferredInFlightTurnIds.delete(turnId);
+      if (!wasDeferred) {
+        return;
+      }
+      void emitMobileNotificationEvent({
+        userId,
+        eventType: "deferred_turn_completed",
+        conversationId,
+        turnId,
+        message: status === "failed" && error ? error : undefined
+      }).catch((hookError) => {
+        console.warn("[control-api] deferred_completed notification failed", {
+          userId,
+          turnId,
+          error: hookError instanceof Error ? hookError.message : String(hookError)
+        });
+      });
+    },
+    onRateLimitsUpdated: ({ userId, rateLimits }) => {
+      const remaining = parseRateLimitRemaining(rateLimits);
+      if (remaining === null || remaining <= 0) {
+        return;
+      }
+      const lastAt = lastQuotaAvailabilityNotificationAt.get(userId) ?? 0;
+      if (Date.now() - lastAt < quotaAvailabilityCooldownMs) {
+        return;
+      }
+      lastQuotaAvailabilityNotificationAt.set(userId, Date.now());
+      void emitMobileNotificationEvent({
+        userId,
+        eventType: "quota_available"
+      }).catch((error) => {
+        console.warn("[control-api] quota_available notification failed", {
+          userId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+    }
+  });
   const devServiceManager = new DevServiceManager(
     repositories,
     wsHub,
@@ -2109,6 +2667,89 @@ export const createServer = async (): Promise<http.Server> => {
     res.json(entitlements);
   });
 
+  app.get("/me/push/registrations", requireHybridUserAuth, async (req, res) => {
+    const enabled = await ensureEntitlementFeature({
+      userId: req.userId!,
+      feature: "pushNotifications",
+      res
+    });
+    if (!enabled) {
+      return;
+    }
+    const registrations = await repositories.listPushRegistrations(req.userId!);
+    res.json({
+      providerReady: pushGateway.enabled,
+      items: registrations.map((registration) => ({
+        id: registration.id,
+        deviceId: registration.device_id,
+        provider: registration.provider,
+        platform: registration.platform,
+        status: registration.status,
+        lastError: registration.last_error,
+        updatedAt: registration.updated_at.toISOString(),
+        lastSeenAt: registration.last_seen_at.toISOString()
+      }))
+    });
+  });
+
+  app.post("/me/push/register", requireHybridUserAuth, async (req, res) => {
+    const enabled = await ensureEntitlementFeature({
+      userId: req.userId!,
+      feature: "pushNotifications",
+      res
+    });
+    if (!enabled) {
+      return;
+    }
+    const schema = z.object({
+      deviceId: z.string().min(3).max(160),
+      provider: z.enum(["fcm"]).default("fcm"),
+      platform: z.enum(["ios", "android"]),
+      token: z.string().min(20).max(4096)
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+    const registration = await repositories.upsertPushRegistration({
+      userId: req.userId!,
+      deviceId: parsed.data.deviceId.trim(),
+      provider: parsed.data.provider,
+      platform: parsed.data.platform,
+      token: parsed.data.token.trim()
+    });
+    res.status(201).json({
+      id: registration.id,
+      status: registration.status,
+      providerReady: pushGateway.enabled
+    });
+  });
+
+  app.post("/me/push/unregister", requireHybridUserAuth, async (req, res) => {
+    const schema = z.object({
+      provider: z.enum(["fcm"]).default("fcm"),
+      token: z.string().min(20).max(4096).optional(),
+      deviceId: z.string().min(3).max(160).optional()
+    }).refine((value) => Boolean(value.token || value.deviceId), {
+      message: "token or deviceId is required",
+      path: ["token"]
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+    const removed = await repositories.deactivatePushRegistrations({
+      userId: req.userId!,
+      provider: parsed.data.provider,
+      token: parsed.data.token?.trim(),
+      deviceId: parsed.data.deviceId?.trim(),
+      reason: "user_unregistered"
+    });
+    res.json({ ok: true, removed });
+  });
+
   app.post("/billing/checkout-session", requireHybridUserAuth, async (req, res) => {
     const requestStartedAt = Date.now();
     if (!config.stripeEnabled || !config.stripeSecretKey || !config.stripeProPriceId) {
@@ -2551,7 +3192,8 @@ export const createServer = async (): Promise<http.Server> => {
           for (const importedTurn of threadDetail.turns) {
             const createdTurn = await repositories.createConversationTurn({
               conversationId,
-              prompt: importedTurn.userPrompt ?? ""
+              prompt: importedTurn.userPrompt ?? "",
+              deliveryPolicy: "immediate"
             });
             const codexTurnId = importedTurn.turnId?.trim() ?? "";
             if (codexTurnId.length > 0) {
@@ -2960,6 +3602,7 @@ export const createServer = async (): Promise<http.Server> => {
     const approvalPolicySchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
     const sandboxModeSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
     const reasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+    const deliveryPolicySchema = z.enum(["immediate", "defer_if_offline"]);
     const e2eEnvelopeSchema = z.object({
       v: z.literal(1),
       alg: z.literal("xchacha20poly1305"),
@@ -3006,7 +3649,8 @@ export const createServer = async (): Promise<http.Server> => {
       cwd: z.string().min(1).optional(),
       approvalPolicy: approvalPolicySchema.optional(),
       sandboxMode: sandboxModeSchema.optional(),
-      effort: reasoningEffortSchema.optional()
+      effort: reasoningEffortSchema.optional(),
+      deliveryPolicy: deliveryPolicySchema.optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -3022,10 +3666,30 @@ export const createServer = async (): Promise<http.Server> => {
 
     const workspace = await repositories.findWorkspaceById(req.userId!, conversation.workspace_id);
     const normalizedPrompt = parsed.data.prompt?.trim() ?? "";
+    const deliveryPolicy: TurnDeliveryPolicy = parsed.data.deliveryPolicy ?? "immediate";
+    if (deliveryPolicy === "defer_if_offline") {
+      const enabled = await ensureEntitlementFeature({
+        userId: req.userId!,
+        feature: "deferredTurns",
+        res
+      });
+      if (!enabled) {
+        return;
+      }
+    }
     const userPrompt = JSON.stringify(parsed.data.e2ePromptEnvelope);
     const turn = await repositories.createConversationTurn({
       conversationId: conversation.id,
-      prompt: userPrompt
+      prompt: userPrompt,
+      deliveryPolicy,
+      requestOptions: {
+        collaborationMode: parsed.data.collaborationMode,
+        model: parsed.data.model,
+        cwd: parsed.data.cwd ?? workspace?.path ?? null,
+        approvalPolicy: parsed.data.approvalPolicy,
+        sandboxMode: parsed.data.sandboxMode,
+        effort: parsed.data.effort
+      }
     });
 
     wsHub.rememberConversationOwner(conversation.id, req.userId!, conversation.agent_id);
@@ -3048,6 +3712,17 @@ export const createServer = async (): Promise<http.Server> => {
     });
 
     if (!delivered) {
+      if (deliveryPolicy === "defer_if_offline") {
+        await repositories.markConversationTurnDeferred({
+          turnId: turn.id,
+          error: "agent_offline",
+          nextDeliveryAt: new Date(Date.now() + deferredRetryDelayMs)
+        });
+        await repositories.updateConversationStatus(conversation.id, "queued");
+        const deferredTurn = await repositories.findConversationTurn(turn.id);
+        res.status(202).json(deferredTurn ?? turn);
+        return;
+      }
       await repositories.completeConversationTurn({
         turnId: turn.id,
         status: "failed",
@@ -3058,8 +3733,13 @@ export const createServer = async (): Promise<http.Server> => {
       return;
     }
 
+    await repositories.markConversationTurnDispatched({
+      turnId: turn.id,
+      incrementAttempt: true
+    });
     await repositories.updateConversationStatus(conversation.id, "running");
-    res.status(201).json(turn);
+    const dispatchedTurn = await repositories.findConversationTurn(turn.id);
+    res.status(201).json(dispatchedTurn ?? turn);
   });
 
   app.post("/conversations/:conversationId/turns/:turnId/interrupt", requireHybridUserAuth, async (req, res) => {
@@ -3090,6 +3770,36 @@ export const createServer = async (): Promise<http.Server> => {
     }
 
     res.json({ accepted: true });
+  });
+
+  app.post("/conversations/:conversationId/turns/:turnId/retry", requireHybridUserAuth, async (req, res) => {
+    const enabled = await ensureEntitlementFeature({
+      userId: req.userId!,
+      feature: "deferredTurns",
+      res
+    });
+    if (!enabled) {
+      return;
+    }
+
+    const conversation = await repositories.findConversation(req.userId!, req.params.conversationId);
+    if (!conversation) {
+      res.status(404).json({ error: "conversation_not_found" });
+      return;
+    }
+    const turn = await repositories.findConversationTurn(req.params.turnId);
+    if (!turn || turn.conversation_id !== conversation.id) {
+      res.status(404).json({ error: "turn_not_found" });
+      return;
+    }
+    if (turn.delivery_state !== "deferred" && turn.delivery_state !== "failed") {
+      res.status(409).json({ error: "turn_not_retryable", deliveryState: turn.delivery_state });
+      return;
+    }
+
+    await repositories.rescheduleDeferredConversationTurn(turn.id);
+    scheduleDeferredDispatch(conversation.agent_id);
+    res.status(202).json({ accepted: true, turnId: turn.id });
   });
 
   app.post("/sessions", requireHybridUserAuth, async (req, res) => {
@@ -3164,6 +3874,15 @@ export const createServer = async (): Promise<http.Server> => {
   });
 
   app.post("/tunnels", requireHybridUserAuth, async (req, res) => {
+    const enabled = await ensureEntitlementFeature({
+      userId: req.userId!,
+      feature: "tunnels",
+      res
+    });
+    if (!enabled) {
+      return;
+    }
+
     const schema = z.object({
       workspaceId: z.string().min(6),
       agentId: z.string().min(6),
@@ -3232,6 +3951,15 @@ export const createServer = async (): Promise<http.Server> => {
   });
 
   app.get("/tunnels", requireHybridUserAuth, async (req, res) => {
+    const enabled = await ensureEntitlementFeature({
+      userId: req.userId!,
+      feature: "tunnels",
+      res
+    });
+    if (!enabled) {
+      return;
+    }
+
     const workspaceId = String(req.query.workspaceId ?? "");
     if (!workspaceId) {
       res.status(400).json({ error: "workspace_id_required" });
@@ -3259,6 +3987,15 @@ export const createServer = async (): Promise<http.Server> => {
   });
 
   app.post("/tunnels/:tunnelId/issue-token", requireHybridUserAuth, async (req, res) => {
+    const enabled = await ensureEntitlementFeature({
+      userId: req.userId!,
+      feature: "tunnels",
+      res
+    });
+    if (!enabled) {
+      return;
+    }
+
     const issued = await devServiceManager.issueTunnelToken(req.userId!, req.params.tunnelId);
     if (!issued) {
       res.status(404).json({ error: "tunnel_not_found" });
@@ -3271,6 +4008,15 @@ export const createServer = async (): Promise<http.Server> => {
   });
 
   app.post("/tunnels/:tunnelId/rotate-token", requireHybridUserAuth, async (req, res) => {
+    const enabled = await ensureEntitlementFeature({
+      userId: req.userId!,
+      feature: "tunnels",
+      res
+    });
+    if (!enabled) {
+      return;
+    }
+
     const issued = await devServiceManager.rotateTunnelToken(req.userId!, req.params.tunnelId);
     if (!issued) {
       res.status(404).json({ error: "tunnel_not_found" });
@@ -3283,6 +4029,15 @@ export const createServer = async (): Promise<http.Server> => {
   });
 
   app.delete("/tunnels/:tunnelId", requireHybridUserAuth, async (req, res) => {
+    const enabled = await ensureEntitlementFeature({
+      userId: req.userId!,
+      feature: "tunnels",
+      res
+    });
+    if (!enabled) {
+      return;
+    }
+
     const deleted = await devServiceManager.closeTunnel(req.userId!, req.params.tunnelId);
     if (!deleted) {
       res.status(404).json({ error: "tunnel_not_found" });
