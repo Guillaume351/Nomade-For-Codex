@@ -436,6 +436,7 @@ export class WsHub {
   async readCodexThreadThroughAgent(params: {
     agentId: string;
     threadId: string;
+    conversationId?: string;
   }): Promise<CodexThreadReadSummary> {
     const requestId = randomToken("cr");
     const conn = this.agentSockets.get(params.agentId);
@@ -446,7 +447,8 @@ export class WsHub {
     const payload = {
       type: "codex.thread.read",
       requestId,
-      threadId: params.threadId
+      threadId: params.threadId,
+      conversationId: params.conversationId
     };
 
     return new Promise<CodexThreadReadSummary>((resolve, reject) => {

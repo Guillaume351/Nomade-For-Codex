@@ -2419,6 +2419,7 @@ export const createServer = async (): Promise<http.Server> => {
     let importedConversations = 0;
     let skippedConversations = 0;
     let hydratedOrRepaired = 0;
+    let failedHydrations = 0;
 
     for (const thread of threads) {
       const normalizedPath = thread.cwd.trim() || ".";
@@ -2436,45 +2437,135 @@ export const createServer = async (): Promise<http.Server> => {
         importedWorkspaces += 1;
       }
 
-      if (conversationByThreadId.has(thread.threadId)) {
+      let conversationId = conversationByThreadId.get(thread.threadId);
+      if (conversationId) {
         skippedConversations += 1;
-        const existingConversationId = conversationByThreadId.get(thread.threadId);
-        if (existingConversationId) {
-          const existingTurns = await repositories.listConversationTurns(existingConversationId);
-          const needsRepair = turnsNeedRepair(existingTurns);
-          if (needsRepair) {
-            try {
-              await repositories.deleteConversationTurns(existingConversationId);
-              await repositories.updateConversationStatus(existingConversationId, "idle");
-              hydratedOrRepaired += 1;
-            } catch (error) {
-              const message = error instanceof Error ? error.message : "legacy_turn_purge_failed";
-              console.warn("[control-api] legacy turn purge skipped", existingConversationId, message);
-            }
-          }
-        }
+      } else {
+        const fallback = thread.preview
+          .split("\n")
+          .find((line) => line.trim().length > 0)
+          ?.trim() ?? "Imported Codex thread";
+        const rawTitle = thread.title.trim().length > 0 ? thread.title.trim() : fallback;
+        const title = rawTitle.length > 240 ? `${rawTitle.substring(0, 240)}...` : rawTitle;
+
+        const conversation = await repositories.createConversation({
+          userId,
+          workspaceId: workspace.id,
+          agentId,
+          title
+        });
+        await repositories.updateConversationThreadId(conversation.id, thread.threadId);
+        await repositories.updateConversationStatus(conversation.id, "idle");
+        wsHub.rememberConversationOwner(conversation.id, userId, agentId);
+
+        conversationByThreadId.set(thread.threadId, conversation.id);
+        conversationId = conversation.id;
+        importedConversations += 1;
+      }
+
+      if (!conversationId) {
+        failedHydrations += 1;
         continue;
       }
 
-      const fallback = thread.preview
-        .split("\n")
-        .find((line) => line.trim().length > 0)
-        ?.trim() ?? "Imported Codex thread";
-      const rawTitle = thread.title.trim().length > 0 ? thread.title.trim() : fallback;
-      const title = rawTitle.length > 240 ? `${rawTitle.substring(0, 240)}...` : rawTitle;
+      wsHub.rememberConversationOwner(conversationId, userId, agentId);
 
-      const conversation = await repositories.createConversation({
-        userId,
-        workspaceId: workspace.id,
-        agentId,
-        title
-      });
-      await repositories.updateConversationThreadId(conversation.id, thread.threadId);
-      await repositories.updateConversationStatus(conversation.id, "idle");
-      wsHub.rememberConversationOwner(conversation.id, userId, agentId);
+      let threadDetail:
+        | {
+            turns: Array<{
+              turnId: string;
+              status: "running" | "completed" | "interrupted" | "failed";
+              error?: string;
+              userPrompt: string;
+              items: Array<{
+                itemId: string;
+                itemType: string;
+                payload: Record<string, unknown>;
+              }>;
+            }>;
+          }
+        | null = null;
+      try {
+        threadDetail = await wsHub.readCodexThreadThroughAgent({
+          agentId,
+          threadId: thread.threadId,
+          conversationId
+        });
+      } catch (error) {
+        failedHydrations += 1;
+        const message = error instanceof Error ? error.message : "thread_read_failed";
+        console.warn("[control-api] codex thread read failed", {
+          conversationId,
+          threadId: thread.threadId,
+          error: message
+        });
+        continue;
+      }
 
-      conversationByThreadId.set(thread.threadId, conversation.id);
-      importedConversations += 1;
+      try {
+        await repositories.deleteConversationTurns(conversationId);
+        let lastTurnStatus: "running" | "completed" | "interrupted" | "failed" | undefined;
+        for (const importedTurn of threadDetail.turns) {
+          const createdTurn = await repositories.createConversationTurn({
+            conversationId,
+            prompt: importedTurn.userPrompt ?? ""
+          });
+          const codexTurnId = importedTurn.turnId?.trim() ?? "";
+          if (codexTurnId.length > 0) {
+            await repositories.markConversationTurnStarted({
+              turnId: createdTurn.id,
+              codexTurnId
+            });
+          }
+          const importedItems = Array.isArray(importedTurn.items) ? importedTurn.items : [];
+          for (let itemIndex = 0; itemIndex < importedItems.length; itemIndex += 1) {
+            const item = importedItems[itemIndex]!;
+            const itemId = item.itemId?.trim() || `item-${itemIndex + 1}`;
+            const itemType = item.itemType?.trim() || "unknown";
+            const payload =
+              item.payload && typeof item.payload === "object"
+                ? item.payload
+                : { value: item.payload };
+            await repositories.upsertConversationItem({
+              turnId: createdTurn.id,
+              itemId,
+              itemType,
+              payload
+            });
+          }
+          if (
+            importedTurn.status === "completed" ||
+            importedTurn.status === "interrupted" ||
+            importedTurn.status === "failed"
+          ) {
+            await repositories.completeConversationTurn({
+              turnId: createdTurn.id,
+              status: importedTurn.status,
+              error: importedTurn.error
+            });
+          }
+          lastTurnStatus = importedTurn.status;
+        }
+
+        const conversationStatus =
+          lastTurnStatus === "running"
+            ? "running"
+            : lastTurnStatus === "interrupted"
+              ? "interrupted"
+              : lastTurnStatus === "failed"
+                ? "failed"
+                : "idle";
+        await repositories.updateConversationStatus(conversationId, conversationStatus);
+        hydratedOrRepaired += 1;
+      } catch (error) {
+        failedHydrations += 1;
+        const message = error instanceof Error ? error.message : "thread_hydration_failed";
+        console.warn("[control-api] codex thread hydration failed", {
+          conversationId,
+          threadId: thread.threadId,
+          error: message
+        });
+      }
     }
 
     res.json({
@@ -2483,10 +2574,12 @@ export const createServer = async (): Promise<http.Server> => {
       importedConversations,
       skippedConversations,
       hydratedOrRepaired,
+      failedHydrations,
       threads_scanned: threads.length,
       imported: importedConversations,
       skipped: skippedConversations,
-      hydrated_or_repaired: hydratedOrRepaired
+      hydrated_or_repaired: hydratedOrRepaired,
+      failed_hydrations: failedHydrations
     });
   });
 

@@ -199,6 +199,69 @@ export const normalizeE2EDecryptErrorCode = (error: unknown): string => {
   return "e2e_decrypt_failed";
 };
 
+type ImportableThreadTurn = {
+  turnId: string;
+  status: "running" | "completed" | "interrupted" | "failed";
+  error?: string;
+  userPrompt: string;
+  items: Array<{
+    itemId: string;
+    itemType: string;
+    payload: Record<string, unknown>;
+  }>;
+};
+
+type ImportableThreadSummary = {
+  threadId: string;
+  title: string;
+  preview: string;
+  cwd: string;
+  updatedAt: number;
+  turns: ImportableThreadTurn[];
+};
+
+const buildE2EImportThread = (params: {
+  conversationId: string;
+  thread: ImportableThreadSummary;
+  e2eRuntime: NonNullable<ReturnType<typeof createE2ERuntime>>;
+}): { thread: ImportableThreadSummary; encrypted: boolean } => {
+  const scope = `conversation:${params.conversationId}`;
+  let encrypted = false;
+  const turns = params.thread.turns.map((turn) => {
+    const userPromptPlain = turn.userPrompt ?? "";
+    const promptEnvelope = params.e2eRuntime.encrypt(
+      scope,
+      JSON.stringify({ prompt: userPromptPlain })
+    );
+    encrypted = true;
+    const wrappedItems = turn.items.map((item) => {
+      const itemEnvelope = params.e2eRuntime.encrypt(
+        scope,
+        JSON.stringify({ item: item.payload })
+      );
+      encrypted = true;
+      return {
+        ...item,
+        payload: {
+          e2eEnvelope: itemEnvelope
+        }
+      };
+    });
+    return {
+      ...turn,
+      userPrompt: JSON.stringify(promptEnvelope),
+      items: wrappedItems
+    };
+  });
+  return {
+    thread: {
+      ...params.thread,
+      turns
+    },
+    encrypted
+  };
+};
+
 const enrichConversationEventWithE2E = (
   payload: Record<string, unknown>,
   e2eRuntime: ReturnType<typeof createE2ERuntime>
@@ -945,6 +1008,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       if (type === "codex.thread.read") {
         const requestId = String(msg.requestId ?? randomToken("cth"));
         const threadId = String(msg.threadId ?? "");
+        const conversationId = String(msg.conversationId ?? "").trim();
         if (!threadId) {
           ws.send(
             JSON.stringify({
@@ -958,7 +1022,23 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         }
 
         try {
-          const thread = await conversationManager.readThread({ threadId });
+          let thread = (await conversationManager.readThread({
+            threadId
+          })) as ImportableThreadSummary;
+          if (conversationId.length > 0) {
+            if (!e2eRuntime) {
+              throw new Error("e2e_runtime_unavailable_for_import");
+            }
+            const wrapped = buildE2EImportThread({
+              conversationId,
+              thread,
+              e2eRuntime
+            });
+            thread = wrapped.thread;
+            if (wrapped.encrypted) {
+              schedulePersistSeqByScope();
+            }
+          }
           ws.send(
             JSON.stringify({
               type: "codex.thread.read.result",
