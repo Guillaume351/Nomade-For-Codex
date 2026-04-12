@@ -53,22 +53,26 @@ Without this config, push delivery is skipped but app flows keep working.
 
 ## 4) Mobile Native Bridge Completion
 
-Current native bridge is intentionally safe no-op by default.
+Current bridge status:
+
+- iOS `nomade/runtime_status` is implemented (ActivityKit start/update/end).
+- iOS `nomade/native_notifications` now captures native token state, but backend registration requires FCM token format.
+- Android native channels are still no-op.
 
 To fully enable native push + live status:
 
-1. Implement `getPushRegistration` on:
-   - Android channel: `nomade/native_notifications`
-   - iOS channel: `nomade/native_notifications`
-   - Return `{ token, provider: "fcm", platform: "ios"|"android", deviceId }`
-2. Implement runtime status handlers on:
-   - `nomade/runtime_status`
-   - Methods: `setRunningStatus`, `clearRunningStatus`
-   - Hook these to Android foreground status + iOS Live Activities if desired.
+1. Finish push token provider alignment:
+   - iOS must return an FCM registration token for backend `provider: "fcm"` (APNs-only token is insufficient).
+   - Android `nomade/native_notifications` still needs real token implementation.
+2. Complete Xcode Live Activity wiring:
+   - Widget extension target with Live Activity UI.
+   - Runner capabilities/signing for Push Notifications + Background remote notifications.
 3. Build mobile app with:
    - `--dart-define=NOMADE_ENABLE_NATIVE_NOTIFICATIONS=true`
 
 If you do not enable this flag or native bridge logic, app behavior remains unchanged (no regressions).
+
+Detailed Xcode steps for iOS Live Activities are in `docs/ios-live-activities-xcode-todo.md`.
 
 ## 5) CI/CD + Distribution
 
