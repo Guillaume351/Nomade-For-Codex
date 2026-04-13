@@ -542,6 +542,44 @@ export class ConversationManager {
       return;
     }
 
+    const fallbackConversationId = threadId ? this.findConversationIdByThread(threadId) : "";
+    const eventConversationId = context?.conversationId ?? fallbackConversationId;
+    const eventTurnId = context?.turnId ?? "";
+
+    if (method === "thread/status/changed") {
+      if (!threadId || !eventConversationId) {
+        return;
+      }
+      const thread = (params.thread as Record<string, unknown>) ?? {};
+      const status = String(params.status ?? thread.status ?? "unknown");
+      this.emit({
+        type: "conversation.thread.status.changed",
+        conversationId: eventConversationId,
+        turnId: eventTurnId,
+        threadId,
+        codexTurnId: effectiveCodexTurnId,
+        status,
+        thread
+      });
+      return;
+    }
+
+    if (method === "thread/tokenUsage/updated") {
+      if (!threadId || !eventConversationId) {
+        return;
+      }
+      const tokenUsage = (params.tokenUsage as Record<string, unknown>) ?? {};
+      this.emit({
+        type: "conversation.thread.token_usage.updated",
+        conversationId: eventConversationId,
+        turnId: eventTurnId,
+        threadId,
+        codexTurnId: effectiveCodexTurnId,
+        tokenUsage
+      });
+      return;
+    }
+
     if (!context || !threadId || !effectiveCodexTurnId) {
       return;
     }
@@ -559,14 +597,22 @@ export class ConversationManager {
     }
 
     if (method === "turn/plan/updated") {
-      const plan = (params.plan as Record<string, unknown>) ?? {};
+      const explanation =
+        typeof params.explanation === "string" ? params.explanation : null;
+      const rawPlan = Array.isArray(params.plan) ? params.plan : [];
+      const normalizedPlan: Record<string, unknown> = {
+        plan: rawPlan
+      };
+      if (explanation !== null) {
+        normalizedPlan.explanation = explanation;
+      }
       this.emit({
         type: "conversation.turn.plan.updated",
         conversationId: context.conversationId,
         turnId: context.turnId,
         threadId,
         codexTurnId: effectiveCodexTurnId,
-        plan
+        plan: normalizedPlan
       });
       return;
     }
@@ -651,34 +697,6 @@ export class ConversationManager {
       return;
     }
 
-    if (method === "thread/status/changed") {
-      const thread = (params.thread as Record<string, unknown>) ?? {};
-      const status = String(params.status ?? thread.status ?? "unknown");
-      this.emit({
-        type: "conversation.thread.status.changed",
-        conversationId: context.conversationId,
-        turnId: context.turnId,
-        threadId,
-        codexTurnId: effectiveCodexTurnId,
-        status,
-        thread
-      });
-      return;
-    }
-
-    if (method === "thread/tokenUsage/updated") {
-      const tokenUsage = (params.tokenUsage as Record<string, unknown>) ?? {};
-      this.emit({
-        type: "conversation.thread.token_usage.updated",
-        conversationId: context.conversationId,
-        turnId: context.turnId,
-        threadId,
-        codexTurnId: effectiveCodexTurnId,
-        tokenUsage
-      });
-      return;
-    }
-
     if (method === "serverRequest/resolved") {
       const request = (params.request as Record<string, unknown>) ?? {};
       const requestId = String(params.requestId ?? request.id ?? "");
@@ -729,6 +747,15 @@ export class ConversationManager {
     this.pendingTurnByThread.delete(threadId);
     this.turnByCodex.set(buildTurnKey(threadId, codexTurnId), context);
     this.codexByTurn.set(context.turnId, { threadId, codexTurnId });
+  }
+
+  private findConversationIdByThread(threadId: string): string {
+    for (const [conversationId, mappedThreadId] of this.threadByConversation.entries()) {
+      if (mappedThreadId === threadId) {
+        return conversationId;
+      }
+    }
+    return "";
   }
 
   private extractTurnId(method: string, params: Record<string, unknown>): string {

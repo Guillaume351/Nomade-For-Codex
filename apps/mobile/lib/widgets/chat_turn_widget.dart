@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -37,6 +39,44 @@ class _TimelineSegment {
   final String? text;
   final TurnTimelineItem? item;
   final List<TurnTimelineItem> commandItems;
+}
+
+class _PlanStepData {
+  _PlanStepData({
+    required this.step,
+    required this.status,
+  });
+
+  final String step;
+  final String status;
+}
+
+class _RequestUserInputOptionData {
+  _RequestUserInputOptionData({
+    required this.label,
+    required this.description,
+  });
+
+  final String label;
+  final String description;
+}
+
+class _RequestUserInputQuestionData {
+  _RequestUserInputQuestionData({
+    required this.id,
+    required this.header,
+    required this.question,
+    required this.isOther,
+    required this.isSecret,
+    required this.options,
+  });
+
+  final String id;
+  final String header;
+  final String question;
+  final bool isOther;
+  final bool isSecret;
+  final List<_RequestUserInputOptionData> options;
 }
 
 class ChatTurnWidget extends StatelessWidget {
@@ -440,6 +480,10 @@ class ChatTurnWidget extends StatelessWidget {
   }
 
   Widget _buildLiveEventCard(BuildContext context, TurnTimelineItem item) {
+    if (item.isPlan) {
+      return _buildPlanEventCard(context, item);
+    }
+
     final provider = context.read<NomadeProvider>();
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
@@ -450,12 +494,18 @@ class ChatTurnWidget extends StatelessWidget {
       'serverRequest' => 'Approval / User input',
       _ => item.itemType,
     };
+    final requestParams =
+        (item.payload['params'] as Map?)?.cast<String, dynamic>() ??
+            const <String, dynamic>{};
     String content = item.textDelta.trim();
     if (content.isEmpty && item.isFileChange) {
       content = item.aggregatedOutput.trim();
     }
     if (content.isEmpty && item.itemType == 'serverRequest') {
-      content = item.payload['method']?.toString() ?? 'Pending request';
+      content = _buildServerRequestSummary(
+        method: item.payload['method']?.toString() ?? '',
+        params: requestParams,
+      );
     }
     if (content.isEmpty) {
       return const SizedBox.shrink();
@@ -513,11 +563,185 @@ class ChatTurnWidget extends StatelessWidget {
               turnId: turnId,
               requestId: requestId,
               method: requestMethod,
+              params: requestParams,
             ),
           ],
         ],
       ),
     );
+  }
+
+  Widget _buildPlanEventCard(BuildContext context, TurnTimelineItem item) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final explanation = _extractPlanExplanation(item.payload);
+    final steps = _extractPlanSteps(item.payload);
+    final delta = item.textDelta.trim();
+
+    if (explanation.isEmpty && steps.isEmpty && delta.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(11),
+        border:
+            Border.all(color: scheme.outlineVariant.withValues(alpha: 0.65)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Plan',
+            style: theme.textTheme.labelMedium?.copyWith(
+              fontWeight: FontWeight.w700,
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+          if (explanation.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              explanation,
+              style: theme.textTheme.bodySmall?.copyWith(height: 1.35),
+            ),
+          ],
+          if (steps.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            ...steps.map((step) {
+              final status = _normalizePlanStepStatus(step.status);
+              final (icon, color, label) = _planStepVisual(status, scheme);
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Icon(icon, size: 15, color: color),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        step.step,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          height: 1.35,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      label,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: color,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ],
+          if (delta.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              delta,
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontFamily: 'monospace',
+                color: scheme.onSurfaceVariant,
+                height: 1.35,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  String _extractPlanExplanation(Map<String, dynamic> payload) {
+    final explanation = payload['explanation'];
+    if (explanation is String && explanation.trim().isNotEmpty) {
+      return explanation.trim();
+    }
+    return '';
+  }
+
+  List<_PlanStepData> _extractPlanSteps(Map<String, dynamic> payload) {
+    final payloadPlan = payload['plan'];
+    final rawSteps = payloadPlan is List ? payloadPlan : const <dynamic>[];
+
+    return rawSteps
+        .whereType<Map>()
+        .map((entry) {
+          final map = entry.cast<String, dynamic>();
+          final step = map['step']?.toString().trim() ?? '';
+          if (step.isEmpty) {
+            return null;
+          }
+          final status = map['status']?.toString().trim() ?? 'pending';
+          return _PlanStepData(step: step, status: status);
+        })
+        .whereType<_PlanStepData>()
+        .toList(growable: false);
+  }
+
+  String _normalizePlanStepStatus(String raw) {
+    final value = raw.trim();
+    if (value == 'in_progress') {
+      return 'inProgress';
+    }
+    if (value == 'completed' || value == 'pending' || value == 'inProgress') {
+      return value;
+    }
+    return 'pending';
+  }
+
+  (IconData, Color, String) _planStepVisual(String status, ColorScheme scheme) {
+    switch (status) {
+      case 'completed':
+        return (Icons.check_circle_rounded, Colors.green, 'completed');
+      case 'inProgress':
+        return (Icons.autorenew_rounded, Colors.blue, 'in progress');
+      default:
+        return (
+          Icons.radio_button_unchecked_rounded,
+          scheme.onSurfaceVariant,
+          'pending'
+        );
+    }
+  }
+
+  String _buildServerRequestSummary({
+    required String method,
+    required Map<String, dynamic> params,
+  }) {
+    if (method.isEmpty) {
+      return 'Pending request';
+    }
+    if (method == 'item/tool/requestUserInput') {
+      final questions = _extractRequestUserInputQuestions(params);
+      if (questions.isEmpty) {
+        return '$method • invalid payload';
+      }
+      return '$method • ${questions.length} question${questions.length > 1 ? "s" : ""}';
+    }
+    if (method == 'item/tool/call') {
+      final tool = params['tool']?.toString().trim();
+      final arguments = params['arguments'];
+      if (tool == null || tool.isEmpty) {
+        return method;
+      }
+      final argsSummary = arguments == null ? '' : _compactJson(arguments);
+      if (argsSummary.isEmpty) {
+        return '$method • tool=$tool';
+      }
+      return '$method • tool=$tool\n$argsSummary';
+    }
+    return method;
   }
 
   Widget _buildServerRequestActions(
@@ -527,6 +751,7 @@ class ChatTurnWidget extends StatelessWidget {
     required String turnId,
     required String requestId,
     required String method,
+    required Map<String, dynamic> params,
   }) {
     if (method == 'item/commandExecution/requestApproval' ||
         method == 'item/fileChange/requestApproval') {
@@ -575,25 +800,47 @@ class ChatTurnWidget extends StatelessWidget {
     }
 
     if (method == 'item/tool/requestUserInput') {
+      final questions = _extractRequestUserInputQuestions(params);
+      if (questions.isEmpty) {
+        return Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            Text(
+              'Invalid request payload: missing questions.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            _decisionButton(
+              label: 'Decline',
+              onPressed: () => provider.respondToServerRequest(
+                conversationId: conversationId,
+                turnId: turnId,
+                requestId: requestId,
+                result: 'decline',
+              ),
+            ),
+          ],
+        );
+      }
       return Wrap(
         spacing: 8,
         runSpacing: 8,
         children: [
           _decisionButton(
-            label: 'Reply',
+            label: 'Answer questions',
             onPressed: () async {
-              final input = await _promptForInput(
+              final answers = await _promptForRequestUserInput(
                 context,
-                title: 'Tool user input',
+                questions: questions,
               );
-              if (input == null) {
+              if (answers == null) {
                 return;
               }
               provider.respondToServerRequest(
                 conversationId: conversationId,
                 turnId: turnId,
                 requestId: requestId,
-                result: input,
+                result: answers,
               );
             },
           ),
@@ -623,6 +870,7 @@ class ChatTurnWidget extends StatelessWidget {
               requestId: requestId,
               result: {
                 'contentItems': <Map<String, dynamic>>[],
+                'content_items': <Map<String, dynamic>>[],
               },
             ),
           ),
@@ -660,40 +908,196 @@ class ChatTurnWidget extends StatelessWidget {
     );
   }
 
-  Future<String?> _promptForInput(
+  List<_RequestUserInputQuestionData> _extractRequestUserInputQuestions(
+    Map<String, dynamic> params,
+  ) {
+    final raw = params['questions'];
+    if (raw is! List) {
+      return const [];
+    }
+    return raw
+        .whereType<Map>()
+        .map((entry) {
+          final map = entry.cast<String, dynamic>();
+          final id = map['id']?.toString().trim() ?? '';
+          final header = map['header']?.toString().trim() ?? '';
+          final question = map['question']?.toString().trim() ?? '';
+          final optionsRaw = map['options'];
+          final options = optionsRaw is List
+              ? optionsRaw
+                  .whereType<Map>()
+                  .map((optionEntry) {
+                    final option = optionEntry.cast<String, dynamic>();
+                    return _RequestUserInputOptionData(
+                      label: option['label']?.toString().trim() ?? '',
+                      description:
+                          option['description']?.toString().trim() ?? '',
+                    );
+                  })
+                  .where((option) => option.label.isNotEmpty)
+                  .toList()
+              : const <_RequestUserInputOptionData>[];
+          return _RequestUserInputQuestionData(
+            id: id,
+            header: header,
+            question: question,
+            isOther: map['isOther'] == true,
+            isSecret: map['isSecret'] == true,
+            options: options,
+          );
+        })
+        .where((question) => question.id.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  Future<Map<String, dynamic>?> _promptForRequestUserInput(
     BuildContext context, {
-    required String title,
+    required List<_RequestUserInputQuestionData> questions,
   }) async {
-    final controller = TextEditingController();
-    final value = await showDialog<String>(
+    final selectionByQuestion = <String, String>{};
+    final freeTextControllers = <String, TextEditingController>{};
+    String? validationError;
+
+    for (final question in questions) {
+      freeTextControllers[question.id] = TextEditingController();
+      if (question.options.isNotEmpty) {
+        selectionByQuestion[question.id] = question.options.first.label;
+      }
+    }
+
+    final result = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(title),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(
-            hintText: 'Enter response',
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setState) => AlertDialog(
+          title: const Text('Tool user input'),
+          content: SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final question in questions) ...[
+                    if (question.header.isNotEmpty)
+                      Text(
+                        question.header,
+                        style: Theme.of(dialogContext)
+                            .textTheme
+                            .labelMedium
+                            ?.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                    const SizedBox(height: 4),
+                    Text(question.question),
+                    const SizedBox(height: 8),
+                    if (question.options.isNotEmpty)
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          ...question.options.map((option) => ChoiceChip(
+                                label: Text(option.label),
+                                selected: selectionByQuestion[question.id] ==
+                                    option.label,
+                                onSelected: (_) => setState(() {
+                                  selectionByQuestion[question.id] =
+                                      option.label;
+                                  validationError = null;
+                                }),
+                              )),
+                          if (question.isOther)
+                            ChoiceChip(
+                              label: const Text('Other'),
+                              selected: selectionByQuestion[question.id] ==
+                                  '__other__',
+                              onSelected: (_) => setState(() {
+                                selectionByQuestion[question.id] = '__other__';
+                                validationError = null;
+                              }),
+                            ),
+                        ],
+                      ),
+                    if (question.options.isEmpty ||
+                        selectionByQuestion[question.id] == '__other__') ...[
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: freeTextControllers[question.id],
+                        decoration: const InputDecoration(
+                          hintText: 'Enter response',
+                        ),
+                        obscureText: question.isSecret,
+                        onChanged: (_) {
+                          if (validationError != null) {
+                            setState(() {
+                              validationError = null;
+                            });
+                          }
+                        },
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                  ],
+                  if (validationError != null)
+                    Text(
+                      validationError!,
+                      style: TextStyle(
+                        color: Theme.of(dialogContext).colorScheme.error,
+                        fontSize: 12,
+                      ),
+                    ),
+                ],
+              ),
+            ),
           ),
-          autofocus: true,
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final answers = <String, Map<String, dynamic>>{};
+                for (final question in questions) {
+                  var answer = selectionByQuestion[question.id] ?? '';
+                  if (question.options.isEmpty || answer == '__other__') {
+                    answer =
+                        freeTextControllers[question.id]?.text.trim() ?? '';
+                  }
+                  if (answer.isEmpty) {
+                    setState(() {
+                      validationError = 'Please answer every question.';
+                    });
+                    return;
+                  }
+                  answers[question.id] = {
+                    'answers': [answer],
+                  };
+                }
+                Navigator.of(dialogContext).pop({
+                  'answers': answers,
+                });
+              },
+              child: const Text('Send'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () =>
-                Navigator.of(dialogContext).pop(controller.text.trim()),
-            child: const Text('Send'),
-          ),
-        ],
       ),
     );
-    controller.dispose();
-    if (value == null || value.trim().isEmpty) {
-      return null;
+
+    for (final controller in freeTextControllers.values) {
+      controller.dispose();
     }
-    return value.trim();
+    return result;
+  }
+
+  String _compactJson(dynamic value) {
+    try {
+      final encoded = jsonEncode(value);
+      if (encoded.length <= 360) {
+        return encoded;
+      }
+      return '${encoded.substring(0, 357)}...';
+    } catch (_) {
+      return value?.toString() ?? '';
+    }
   }
 
   Widget _buildExecutionPanel(

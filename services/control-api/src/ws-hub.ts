@@ -100,7 +100,7 @@ export interface CodexRuntimeOptions {
   sandboxModes: string[];
   reasoningEfforts: string[];
   collaborationModes: Array<Record<string, unknown>>;
-  skills: Array<{ name: string; path: string }>;
+  skills: Array<Record<string, unknown>>;
   rateLimits?: Record<string, unknown>;
   rateLimitsByLimitId?: Record<string, Record<string, unknown>> | null;
   defaults: {
@@ -212,6 +212,229 @@ export const parseCodexThreadReadSummary = (rawThread: Record<string, unknown>):
     cwd: String(rawThread.cwd ?? "."),
     updatedAt: Number(rawThread.updatedAt ?? 0),
     turns
+  };
+};
+
+const normalizeString = (value: unknown): string | undefined => {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+};
+
+const normalizeModeKind = (value: unknown): "default" | "plan" | undefined => {
+  if (value === "default" || value === "plan") {
+    return value;
+  }
+  return undefined;
+};
+
+const buildTurnStartCollaborationMode = (mode?: "default" | "plan"): Record<string, unknown> | undefined => {
+  if (!mode) {
+    return undefined;
+  }
+  return {
+    mode,
+    settings: {
+      developer_instructions: null
+    }
+  };
+};
+
+const parseCodexCollaborationModes = (value: unknown): Array<Record<string, unknown>> => {
+  const rawModes = Array.isArray(value) ? value : [];
+  const bySlug = new Map<string, Record<string, unknown>>();
+
+  for (const entry of rawModes) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const mode = entry as Record<string, unknown>;
+    const modeKind = normalizeModeKind(mode.mode);
+    const nameValue = normalizeString(mode.name);
+    if (!modeKind || !nameValue) {
+      continue;
+    }
+    const slug = modeKind;
+    const model = normalizeString(mode.model);
+    const reasoningEffort =
+      normalizeString(mode.reasoningEffort) ?? normalizeString(mode.reasoning_effort);
+    const turnStartCollaborationMode = buildTurnStartCollaborationMode(modeKind);
+    if (!turnStartCollaborationMode) {
+      continue;
+    }
+    const modeMask: Record<string, unknown> = {
+      name: nameValue,
+      mode: modeKind,
+      model: model ?? null,
+      reasoning_effort: reasoningEffort ?? null
+    };
+
+    const normalizedEntry: Record<string, unknown> = {
+      ...(mode as Record<string, unknown>),
+      slug,
+      name: nameValue,
+      mode: modeKind,
+      model: model ?? null,
+      reasoningEffort: reasoningEffort ?? null,
+      modeMask,
+      turnStartCollaborationMode
+    };
+
+    bySlug.set(slug, normalizedEntry);
+  }
+
+  return [...bySlug.values()];
+};
+
+const parseCodexSkills = (value: unknown): Array<Record<string, unknown>> => {
+  const rawRows = Array.isArray(value) ? value : [];
+  const byPath = new Map<string, Record<string, unknown>>();
+
+  const addSkill = (
+    raw: Record<string, unknown>,
+    cwd: string | undefined
+  ): void => {
+    const path = normalizeString(raw.path);
+    if (!path) {
+      return;
+    }
+    const interfaceRaw =
+      raw.interface && typeof raw.interface === "object" && !Array.isArray(raw.interface)
+        ? (raw.interface as Record<string, unknown>)
+        : undefined;
+    const shortDescription =
+      normalizeString(raw.shortDescription) ??
+      normalizeString(interfaceRaw?.shortDescription);
+    const name =
+      normalizeString(raw.name) ??
+      path.split("/").filter((segment) => segment.length > 0).pop() ??
+      path;
+    const normalizedSkill: Record<string, unknown> = {
+      ...(raw as Record<string, unknown>),
+      name,
+      path
+    };
+    const description = normalizeString(raw.description);
+    const scope = normalizeString(raw.scope);
+    if (description != null) {
+      normalizedSkill.description = description;
+    }
+    if (shortDescription != null) {
+      normalizedSkill.shortDescription = shortDescription;
+    }
+    if (scope != null) {
+      normalizedSkill.scope = scope;
+    }
+    if (typeof raw.enabled === "boolean") {
+      normalizedSkill.enabled = raw.enabled;
+    }
+    if (cwd != null) {
+      normalizedSkill.cwd = cwd;
+    }
+
+    byPath.set(path, normalizedSkill);
+  };
+
+  for (const row of rawRows) {
+    if (!row || typeof row !== "object") {
+      continue;
+    }
+    const record = row as Record<string, unknown>;
+    const cwd = normalizeString(record.cwd);
+    const nestedSkills = Array.isArray(record.skills) ? record.skills : [];
+    for (const nested of nestedSkills) {
+      if (!nested || typeof nested !== "object") {
+        continue;
+      }
+      addSkill(nested as Record<string, unknown>, cwd);
+    }
+  }
+
+  return [...byPath.values()];
+};
+
+export const parseCodexRuntimeOptions = (
+  rawOptions: Record<string, unknown>
+): CodexRuntimeOptions => {
+  const modelsRaw = Array.isArray(rawOptions.models) ? rawOptions.models : [];
+  const models: CodexModelOption[] = modelsRaw
+    .filter((entry) => typeof entry === "object" && entry !== null)
+    .map((entry) => {
+      const model = entry as Record<string, unknown>;
+      const effortsRaw = Array.isArray(model.supportedReasoningEfforts)
+        ? model.supportedReasoningEfforts
+        : [];
+      const supportedReasoningEfforts = effortsRaw
+        .filter((effort) => typeof effort === "object" && effort !== null)
+        .map((effort) => {
+          const value = effort as Record<string, unknown>;
+          return {
+            reasoningEffort: String(value.reasoningEffort ?? ""),
+            description: String(value.description ?? "")
+          };
+        })
+        .filter((effort) => effort.reasoningEffort.length > 0);
+
+      return {
+        id: String(model.id ?? ""),
+        model: String(model.model ?? ""),
+        displayName: String(model.displayName ?? model.model ?? ""),
+        description: String(model.description ?? ""),
+        isDefault: model.isDefault === true,
+        hidden: model.hidden === true,
+        defaultReasoningEffort: String(model.defaultReasoningEffort ?? "medium"),
+        supportedReasoningEfforts
+      };
+    })
+    .filter((model) => model.model.length > 0);
+
+  const toStringList = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+
+  const defaultsRaw = (rawOptions.defaults as Record<string, unknown> | undefined) ?? {};
+  const rateLimitsRaw =
+    rawOptions.rateLimits && typeof rawOptions.rateLimits === "object"
+      ? (rawOptions.rateLimits as Record<string, unknown>)
+      : undefined;
+  const rateLimitsByLimitIdRaw = rawOptions.rateLimitsByLimitId;
+  let rateLimitsByLimitId: Record<string, Record<string, unknown>> | null = null;
+  if (rateLimitsByLimitIdRaw && typeof rateLimitsByLimitIdRaw === "object") {
+    const normalized: Record<string, Record<string, unknown>> = {};
+    for (const [limitId, value] of Object.entries(
+      rateLimitsByLimitIdRaw as Record<string, unknown>
+    )) {
+      if (!value || typeof value !== "object") {
+        continue;
+      }
+      normalized[limitId] = value as Record<string, unknown>;
+    }
+    rateLimitsByLimitId =
+      Object.keys(normalized).length > 0 ? normalized : null;
+  }
+
+  return {
+    models,
+    approvalPolicies: toStringList(rawOptions.approvalPolicies),
+    sandboxModes: toStringList(rawOptions.sandboxModes),
+    reasoningEfforts: toStringList(rawOptions.reasoningEfforts),
+    collaborationModes: parseCodexCollaborationModes(rawOptions.collaborationModes),
+    skills: parseCodexSkills(rawOptions.skills),
+    rateLimits: rateLimitsRaw,
+    rateLimitsByLimitId,
+    defaults: {
+      model: typeof defaultsRaw.model === "string" ? defaultsRaw.model : undefined,
+      approvalPolicy:
+        typeof defaultsRaw.approvalPolicy === "string"
+          ? defaultsRaw.approvalPolicy
+          : undefined,
+      sandboxMode:
+        typeof defaultsRaw.sandboxMode === "string"
+          ? defaultsRaw.sandboxMode
+          : undefined,
+      effort: typeof defaultsRaw.effort === "string" ? defaultsRaw.effort : undefined
+    }
   };
 };
 
@@ -871,95 +1094,9 @@ export class WsHub {
         pending.reject(new Error("codex_options_missing_payload"));
         return;
       }
-
-      const options = optionsRaw as Record<string, unknown>;
-      const modelsRaw = Array.isArray(options.models) ? options.models : [];
-      const models: CodexModelOption[] = modelsRaw
-        .filter((entry) => typeof entry === "object" && entry !== null)
-        .map((entry) => {
-          const model = entry as Record<string, unknown>;
-          const effortsRaw = Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [];
-          const supportedReasoningEfforts = effortsRaw
-            .filter((effort) => typeof effort === "object" && effort !== null)
-            .map((effort) => {
-              const value = effort as Record<string, unknown>;
-              return {
-                reasoningEffort: String(value.reasoningEffort ?? ""),
-                description: String(value.description ?? "")
-              };
-            })
-            .filter((effort) => effort.reasoningEffort.length > 0);
-
-          return {
-            id: String(model.id ?? ""),
-            model: String(model.model ?? ""),
-            displayName: String(model.displayName ?? model.model ?? ""),
-            description: String(model.description ?? ""),
-            isDefault: model.isDefault === true,
-            hidden: model.hidden === true,
-            defaultReasoningEffort: String(model.defaultReasoningEffort ?? "medium"),
-            supportedReasoningEfforts
-          };
-        })
-        .filter((model) => model.model.length > 0);
-
-      const toStringList = (value: unknown): string[] =>
-        Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-
-      const collaborationModesRaw = Array.isArray(options.collaborationModes) ? options.collaborationModes : [];
-      const collaborationModes = collaborationModesRaw
-        .filter((entry) => typeof entry === "object" && entry !== null)
-        .map((entry) => entry as Record<string, unknown>);
-
-      const skillsRaw = Array.isArray(options.skills) ? options.skills : [];
-      const skills = skillsRaw
-        .filter((entry) => typeof entry === "object" && entry !== null)
-        .map((entry) => {
-          const value = entry as Record<string, unknown>;
-          return {
-            name: String(value.name ?? ""),
-            path: String(value.path ?? "")
-          };
-        })
-        .filter((entry) => entry.path.length > 0);
-
-      const defaultsRaw = (options.defaults as Record<string, unknown> | undefined) ?? {};
-      const rateLimitsRaw =
-        options.rateLimits && typeof options.rateLimits === "object"
-          ? (options.rateLimits as Record<string, unknown>)
-          : undefined;
-      const rateLimitsByLimitIdRaw = options.rateLimitsByLimitId;
-      let rateLimitsByLimitId: Record<string, Record<string, unknown>> | null =
-        null;
-      if (rateLimitsByLimitIdRaw && typeof rateLimitsByLimitIdRaw === "object") {
-        const normalized: Record<string, Record<string, unknown>> = {};
-        for (const [limitId, value] of Object.entries(
-          rateLimitsByLimitIdRaw as Record<string, unknown>
-        )) {
-          if (!value || typeof value !== "object") {
-            continue;
-          }
-          normalized[limitId] = value as Record<string, unknown>;
-        }
-        rateLimitsByLimitId =
-          Object.keys(normalized).length > 0 ? normalized : null;
-      }
-      pending.resolve({
-        models,
-        approvalPolicies: toStringList(options.approvalPolicies),
-        sandboxModes: toStringList(options.sandboxModes),
-        reasoningEfforts: toStringList(options.reasoningEfforts),
-        collaborationModes,
-        skills,
-        rateLimits: rateLimitsRaw,
-        rateLimitsByLimitId,
-        defaults: {
-          model: typeof defaultsRaw.model === "string" ? defaultsRaw.model : undefined,
-          approvalPolicy: typeof defaultsRaw.approvalPolicy === "string" ? defaultsRaw.approvalPolicy : undefined,
-          sandboxMode: typeof defaultsRaw.sandboxMode === "string" ? defaultsRaw.sandboxMode : undefined,
-          effort: typeof defaultsRaw.effort === "string" ? defaultsRaw.effort : undefined
-        }
-      });
+      pending.resolve(
+        parseCodexRuntimeOptions(optionsRaw as Record<string, unknown>)
+      );
       return;
     }
 
@@ -1006,9 +1143,12 @@ export class WsHub {
       const conversationId = String(msg.conversationId ?? "");
       const turnId = String(msg.turnId ?? "");
       const codexTurnId = String(msg.codexTurnId ?? "");
+      const threadId = typeof msg.threadId === "string" ? msg.threadId.trim() : "";
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
 
-      if (conversationId) {
+      if (conversationId && threadId) {
+        void this.repositories.updateConversationThreadId(conversationId, threadId);
+      } else if (conversationId) {
         void this.repositories.updateConversationStatus(conversationId, "running");
       }
       if (turnId && conversationId) {
@@ -1023,7 +1163,7 @@ export class WsHub {
         userId,
         conversationId,
         turnId,
-        threadId: typeof msg.threadId === "string" ? msg.threadId : undefined,
+        threadId: threadId.length > 0 ? threadId : undefined,
         codexTurnId: codexTurnId.length > 0 ? codexTurnId : undefined
       });
       return;
@@ -1109,6 +1249,29 @@ export class WsHub {
     if (type === "conversation.thread.status.changed") {
       const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+      const thread = msg.thread && typeof msg.thread === "object" ? (msg.thread as Record<string, unknown>) : null;
+      const rawThreadName = typeof thread?.name === "string" ? thread.name.trim() : "";
+      const nextTitle =
+        rawThreadName.length > 240 ? `${rawThreadName.substring(0, 240)}...` : rawThreadName;
+      const statusRaw = String(msg.status ?? thread?.status ?? "").trim();
+      const nextStatus =
+        statusRaw === "running"
+          ? "running"
+          : statusRaw === "completed"
+            ? "idle"
+            : statusRaw === "interrupted"
+              ? "interrupted"
+              : statusRaw === "failed"
+                ? "failed"
+                : "";
+      if (conversationId) {
+        if (nextTitle.length > 0) {
+          void this.repositories.updateConversationTitle(conversationId, nextTitle);
+        }
+        if (nextStatus.length > 0) {
+          void this.repositories.updateConversationStatus(conversationId, nextStatus);
+        }
+      }
       this.broadcastToUser(userId, msg);
       return;
     }

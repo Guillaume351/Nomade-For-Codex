@@ -39,9 +39,8 @@ describe("ConversationManager app-server mapping", () => {
       params: {
         threadId: "thread-1",
         turnId: "turn-codex-1",
-        plan: {
-          steps: [{ title: "Do the thing", status: "in_progress" }]
-        }
+        explanation: "Do the thing",
+        plan: [{ step: "Do the thing", status: "in_progress" }]
       }
     });
 
@@ -59,6 +58,92 @@ describe("ConversationManager app-server mapping", () => {
         type: "conversation.turn.plan.updated",
         conversationId: "conversation-1",
         turnId: "turn-1"
+      })
+    );
+
+    manager.close();
+  });
+
+  it("normalizes v2 turn/plan/updated payload into a map", () => {
+    const emitted: Array<Record<string, unknown>> = [];
+    const manager = new ConversationManager((payload) => emitted.push(payload));
+    const anyManager = manager as unknown as Record<string, unknown>;
+
+    (anyManager["bindTurn"] as (
+      threadId: string,
+      codexTurnId: string,
+      context: { conversationId: string; turnId: string }
+    ) => void)("thread-v2", "turn-codex-v2", {
+      conversationId: "conversation-v2",
+      turnId: "turn-v2"
+    });
+
+    (anyManager["onNotification"] as (notification: {
+      method: string;
+      params: Record<string, unknown>;
+    }) => void)({
+      method: "turn/plan/updated",
+      params: {
+        threadId: "thread-v2",
+        turnId: "turn-codex-v2",
+        explanation: "Implement changes safely",
+        plan: [
+          { step: "Parse options", status: "completed" },
+          { step: "Render plan", status: "inProgress" }
+        ]
+      }
+    });
+
+    expect(emitted).toContainEqual(
+      expect.objectContaining({
+        type: "conversation.turn.plan.updated",
+        conversationId: "conversation-v2",
+        turnId: "turn-v2",
+        plan: {
+          explanation: "Implement changes safely",
+          plan: [
+            { step: "Parse options", status: "completed" },
+            { step: "Render plan", status: "inProgress" }
+          ]
+        }
+      })
+    );
+
+    manager.close();
+  });
+
+  it("maps thread/status/changed using thread-to-conversation binding when no turn context is available", () => {
+    const emitted: Array<Record<string, unknown>> = [];
+    const manager = new ConversationManager((payload) => emitted.push(payload));
+    const anyManager = manager as unknown as Record<string, unknown>;
+    const threadByConversation = anyManager["threadByConversation"] as Map<string, string>;
+    threadByConversation.set("conversation-3", "thread-3");
+
+    (anyManager["onNotification"] as (notification: {
+      method: string;
+      params: Record<string, unknown>;
+    }) => void)({
+      method: "thread/status/changed",
+      params: {
+        threadId: "thread-3",
+        status: "completed",
+        thread: {
+          name: "Renamed by Codex",
+          status: "completed"
+        }
+      }
+    });
+
+    expect(emitted).toContainEqual(
+      expect.objectContaining({
+        type: "conversation.thread.status.changed",
+        conversationId: "conversation-3",
+        threadId: "thread-3",
+        status: "completed",
+        thread: {
+          name: "Renamed by Codex",
+          status: "completed"
+        }
       })
     );
 

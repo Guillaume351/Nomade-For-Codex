@@ -1332,6 +1332,13 @@ export class Repositories {
     ]);
   }
 
+  async updateConversationTitle(conversationId: string, title: string): Promise<void> {
+    await this.pool.query("UPDATE conversations SET title = $1, updated_at = NOW() WHERE id = $2", [
+      title,
+      conversationId
+    ]);
+  }
+
   async listConversationTurnCounts(conversationIds: string[]): Promise<Map<string, number>> {
     if (conversationIds.length === 0) {
       return new Map();

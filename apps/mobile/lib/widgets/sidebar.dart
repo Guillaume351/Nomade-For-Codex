@@ -56,9 +56,25 @@ class Sidebar extends StatelessWidget {
     }
   }
 
+  String _sortModeLabel(String value) {
+    switch (value) {
+      case 'oldest':
+        return 'Oldest first';
+      case 'name':
+        return 'Name (A-Z)';
+      case 'latest':
+      default:
+        return 'Latest first';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<NomadeProvider>();
+    final sortedWorkspaces =
+        provider.sortWorkspacesForDisplay(provider.workspaces);
+    final sortedConversations =
+        provider.sortConversationsForDisplay(provider.conversations);
 
     return Drawer(
       child: SafeArea(
@@ -73,6 +89,35 @@ class Sidebar extends StatelessWidget {
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
                 children: [
+                  ListTile(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    leading: const Icon(Icons.tune_rounded, size: 20),
+                    title: const Text('Sort lists'),
+                    subtitle: Text(_sortModeLabel(provider.listSortMode)),
+                    trailing: PopupMenuButton<String>(
+                      initialValue: provider.listSortMode,
+                      onSelected: (value) {
+                        provider.listSortMode = value;
+                      },
+                      itemBuilder: (context) => const [
+                        PopupMenuItem(
+                          value: 'latest',
+                          child: Text('Latest first'),
+                        ),
+                        PopupMenuItem(
+                          value: 'oldest',
+                          child: Text('Oldest first'),
+                        ),
+                        PopupMenuItem(
+                          value: 'name',
+                          child: Text('Name (A-Z)'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
                   _buildSectionHeader(context, 'Agents'),
                   if (provider.agents.isEmpty)
                     _buildInfoLine(
@@ -119,7 +164,7 @@ class Sidebar extends StatelessWidget {
                               await provider.importCodexHistory();
                             },
                     ),
-                  if (provider.workspaces.isEmpty &&
+                  if (sortedWorkspaces.isEmpty &&
                       provider.selectedAgent != null)
                     ListTile(
                       shape: RoundedRectangleBorder(
@@ -135,7 +180,7 @@ class Sidebar extends StatelessWidget {
                         await provider.createDefaultWorkspace();
                       },
                     ),
-                  ...provider.workspaces.map(
+                  ...sortedWorkspaces.map(
                     (workspace) => ListTile(
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
@@ -167,12 +212,12 @@ class Sidebar extends StatelessWidget {
                       },
                     ),
                   if (provider.selectedWorkspace != null &&
-                      provider.conversations.isEmpty)
+                      sortedConversations.isEmpty)
                     _buildInfoLine(
                       context,
                       'No conversations yet. Import history or create one.',
                     ),
-                  ...provider.conversations.map(
+                  ...sortedConversations.map(
                     (conv) => ListTile(
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
@@ -188,219 +233,237 @@ class Sidebar extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  _buildSectionHeader(context, 'Dev Services'),
-                  if (provider.selectedWorkspace != null)
-                    SwitchListTile(
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 2),
-                      title: const Text('Trusted dev mode'),
-                      subtitle: const Text(
-                        'Disable token requirement for local dev previews',
-                        style: TextStyle(fontSize: 11),
-                      ),
-                      value: provider.trustedDevMode,
-                      onChanged: (value) async {
-                        if (value && !provider.trustedDevMode) {
-                          final confirmed = await showDialog<bool>(
-                                context: context,
-                                builder: (dialogContext) => AlertDialog(
-                                  title: const Text('Enable trusted dev mode?'),
-                                  content: const Text(
-                                    'Tunnel URLs in this workspace will become accessible without token. Use only on trusted networks/devices.',
-                                  ),
-                                  actions: [
-                                    TextButton(
-                                      onPressed: () =>
-                                          Navigator.of(dialogContext)
-                                              .pop(false),
-                                      child: const Text('Cancel'),
-                                    ),
-                                    FilledButton(
-                                      onPressed: () =>
-                                          Navigator.of(dialogContext).pop(true),
-                                      child: const Text('Enable'),
-                                    ),
-                                  ],
-                                ),
-                              ) ??
-                              false;
-                          if (!confirmed) {
-                            return;
-                          }
-                        }
-                        await provider.setTrustedDevMode(value);
-                      },
+                  ExpansionTile(
+                    tilePadding: const EdgeInsets.symmetric(horizontal: 8),
+                    childrenPadding: const EdgeInsets.only(bottom: 4),
+                    leading: const Icon(Icons.developer_mode_rounded, size: 20),
+                    title: const Text('Services & tunnels'),
+                    subtitle: const Text(
+                      'Advanced tools',
+                      style: TextStyle(fontSize: 11),
                     ),
-                  if (provider.loadingServices)
-                    const Padding(
-                      padding:
-                          EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      child: LinearProgressIndicator(),
-                    ),
-                  if (provider.selectedWorkspace != null &&
-                      provider.services.isEmpty)
-                    _buildInfoLine(context, 'No services configured yet.'),
-                  ...provider.services.map(
-                    (service) => ListTile(
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      leading: Icon(
-                        Icons.circle,
-                        size: 12,
-                        color: _serviceColor(service.state),
-                      ),
-                      title: Text(service.name),
-                      subtitle: Text(
-                        service.dependsOn.isEmpty
-                            ? '${service.state} • :${service.port}'
-                            : '${service.state} • :${service.port} • deps: ${service.dependsOn.join(', ')}',
-                        style: const TextStyle(fontSize: 11),
-                      ),
-                      selected: provider.selectedServiceId == service.id,
-                      onTap: () {
-                        provider.selectService(service.id);
-                      },
-                      trailing: IconButton(
-                        icon: Icon(
-                          service.state == 'healthy' ||
-                                  service.state == 'starting' ||
-                                  service.runtimeStatus == 'running'
-                              ? Icons.stop_circle_outlined
-                              : Icons.play_circle_outline,
+                    children: [
+                      _buildSectionHeader(context, 'Dev Services'),
+                      if (provider.selectedWorkspace != null)
+                        SwitchListTile(
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 2),
+                          title: const Text('Trusted dev mode'),
+                          subtitle: const Text(
+                            'Disable token requirement for local dev previews',
+                            style: TextStyle(fontSize: 11),
+                          ),
+                          value: provider.trustedDevMode,
+                          onChanged: (value) async {
+                            if (value && !provider.trustedDevMode) {
+                              final confirmed = await showDialog<bool>(
+                                    context: context,
+                                    builder: (dialogContext) => AlertDialog(
+                                      title: const Text(
+                                          'Enable trusted dev mode?'),
+                                      content: const Text(
+                                        'Tunnel URLs in this workspace will become accessible without token. Use only on trusted networks/devices.',
+                                      ),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () =>
+                                              Navigator.of(dialogContext)
+                                                  .pop(false),
+                                          child: const Text('Cancel'),
+                                        ),
+                                        FilledButton(
+                                          onPressed: () =>
+                                              Navigator.of(dialogContext)
+                                                  .pop(true),
+                                          child: const Text('Enable'),
+                                        ),
+                                      ],
+                                    ),
+                                  ) ??
+                                  false;
+                              if (!confirmed) {
+                                return;
+                              }
+                            }
+                            await provider.setTrustedDevMode(value);
+                          },
                         ),
-                        onPressed: () async {
-                          if (service.state == 'healthy' ||
-                              service.state == 'starting' ||
-                              service.runtimeStatus == 'running') {
-                            await provider.stopService(service.id);
-                          } else {
-                            await provider.startService(service.id);
-                          }
-                        },
+                      if (provider.loadingServices)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 10),
+                          child: LinearProgressIndicator(),
+                        ),
+                      if (provider.selectedWorkspace != null &&
+                          provider.services.isEmpty)
+                        _buildInfoLine(context, 'No services configured yet.'),
+                      ...provider.services.map(
+                        (service) => ListTile(
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          leading: Icon(
+                            Icons.circle,
+                            size: 12,
+                            color: _serviceColor(service.state),
+                          ),
+                          title: Text(service.name),
+                          subtitle: Text(
+                            service.dependsOn.isEmpty
+                                ? '${service.state} • :${service.port}'
+                                : '${service.state} • :${service.port} • deps: ${service.dependsOn.join(', ')}',
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                          selected: provider.selectedServiceId == service.id,
+                          onTap: () {
+                            provider.selectService(service.id);
+                          },
+                          trailing: IconButton(
+                            icon: Icon(
+                              service.state == 'healthy' ||
+                                      service.state == 'starting' ||
+                                      service.runtimeStatus == 'running'
+                                  ? Icons.stop_circle_outlined
+                                  : Icons.play_circle_outline,
+                            ),
+                            onPressed: () async {
+                              if (service.state == 'healthy' ||
+                                  service.state == 'starting' ||
+                                  service.runtimeStatus == 'running') {
+                                await provider.stopService(service.id);
+                              } else {
+                                await provider.startService(service.id);
+                              }
+                            },
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  _buildSectionHeader(context, 'Tunnels'),
-                  if (provider.selectedWorkspace != null)
-                    ListTile(
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      leading: const Icon(Icons.settings_ethernet, size: 20),
-                      title: const Text('Manage tunnels'),
-                      subtitle: const Text(
-                        'Create, open, rotate, or close',
-                        style: TextStyle(fontSize: 11),
-                      ),
-                      onTap: () {
-                        final rootContext =
-                            Navigator.of(context, rootNavigator: true).context;
-                        Navigator.of(context).pop();
-                        showTunnelManagerSheet(rootContext);
-                      },
-                    ),
-                  if (provider.loadingTunnels)
-                    const Padding(
-                      padding:
-                          EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      child: LinearProgressIndicator(),
-                    ),
-                  if (provider.selectedWorkspace != null &&
-                      provider.tunnels.isEmpty)
-                    _buildInfoLine(
-                        context, 'No active tunnel for this workspace.'),
-                  ...provider.tunnels.map(
-                    (tunnel) => ListTile(
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      leading: Icon(
-                        tunnel.isReachable
-                            ? Icons.wifi_tethering
-                            : Icons.wifi_tethering_off,
-                        size: 18,
-                        color: tunnel.isReachable ? Colors.green : Colors.grey,
-                      ),
-                      title: Text('${tunnel.slug} (:${tunnel.targetPort})'),
-                      subtitle: Text(
-                        '${tunnel.status} • ${tunnel.tokenRequired ? 'Protected' : 'Trusted'}',
-                        style: const TextStyle(fontSize: 11),
-                      ),
-                      trailing: PopupMenuButton<String>(
-                        onSelected: (value) async {
-                          if (value == 'open') {
-                            final link =
-                                await provider.issueTunnelLink(tunnel.id);
-                            if (link == null) {
-                              return;
-                            }
-                            await launchUrl(
-                              Uri.parse(link),
-                              mode: LaunchMode.externalApplication,
-                            );
-                            return;
-                          }
+                      const SizedBox(height: 8),
+                      _buildSectionHeader(context, 'Tunnels'),
+                      if (provider.selectedWorkspace != null)
+                        ListTile(
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          leading:
+                              const Icon(Icons.settings_ethernet, size: 20),
+                          title: const Text('Manage tunnels'),
+                          subtitle: const Text(
+                            'Create, open, rotate, or close',
+                            style: TextStyle(fontSize: 11),
+                          ),
+                          onTap: () {
+                            final rootContext =
+                                Navigator.of(context, rootNavigator: true)
+                                    .context;
+                            Navigator.of(context).pop();
+                            showTunnelManagerSheet(rootContext);
+                          },
+                        ),
+                      if (provider.loadingTunnels)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 10),
+                          child: LinearProgressIndicator(),
+                        ),
+                      if (provider.selectedWorkspace != null &&
+                          provider.tunnels.isEmpty)
+                        _buildInfoLine(
+                            context, 'No active tunnel for this workspace.'),
+                      ...provider.tunnels.map(
+                        (tunnel) => ListTile(
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          leading: Icon(
+                            tunnel.isReachable
+                                ? Icons.wifi_tethering
+                                : Icons.wifi_tethering_off,
+                            size: 18,
+                            color:
+                                tunnel.isReachable ? Colors.green : Colors.grey,
+                          ),
+                          title: Text('${tunnel.slug} (:${tunnel.targetPort})'),
+                          subtitle: Text(
+                            '${tunnel.status} • ${tunnel.tokenRequired ? 'Protected' : 'Trusted'}',
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                          trailing: PopupMenuButton<String>(
+                            onSelected: (value) async {
+                              if (value == 'open') {
+                                final link =
+                                    await provider.issueTunnelLink(tunnel.id);
+                                if (link == null) {
+                                  return;
+                                }
+                                await launchUrl(
+                                  Uri.parse(link),
+                                  mode: LaunchMode.externalApplication,
+                                );
+                                return;
+                              }
 
-                          if (value == 'rotate') {
-                            final link =
-                                await provider.rotateTunnelLink(tunnel.id);
-                            if (link == null) {
-                              return;
-                            }
-                            await launchUrl(
-                              Uri.parse(link),
-                              mode: LaunchMode.externalApplication,
-                            );
-                            return;
-                          }
+                              if (value == 'rotate') {
+                                final link =
+                                    await provider.rotateTunnelLink(tunnel.id);
+                                if (link == null) {
+                                  return;
+                                }
+                                await launchUrl(
+                                  Uri.parse(link),
+                                  mode: LaunchMode.externalApplication,
+                                );
+                                return;
+                              }
 
-                          if (value == 'copy') {
-                            final link = tunnel.tokenRequired
-                                ? await provider.issueTunnelLink(tunnel.id)
-                                : tunnel.previewUrl;
-                            if (link == null || link.trim().isEmpty) {
-                              return;
-                            }
-                            await Clipboard.setData(ClipboardData(text: link));
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('Tunnel URL copied'),
-                                ),
-                              );
-                            }
-                            return;
-                          }
+                              if (value == 'copy') {
+                                final link = tunnel.tokenRequired
+                                    ? await provider.issueTunnelLink(tunnel.id)
+                                    : tunnel.previewUrl;
+                                if (link == null || link.trim().isEmpty) {
+                                  return;
+                                }
+                                await Clipboard.setData(
+                                    ClipboardData(text: link));
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Tunnel URL copied'),
+                                    ),
+                                  );
+                                }
+                                return;
+                              }
 
-                          if (value == 'close') {
-                            await provider.closeTunnel(tunnel.id);
-                          }
-                        },
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(
-                            value: 'open',
-                            child: Text('Open preview'),
+                              if (value == 'close') {
+                                await provider.closeTunnel(tunnel.id);
+                              }
+                            },
+                            itemBuilder: (_) => const [
+                              PopupMenuItem(
+                                value: 'open',
+                                child: Text('Open preview'),
+                              ),
+                              PopupMenuItem(
+                                value: 'rotate',
+                                child: Text('Rotate token'),
+                              ),
+                              PopupMenuItem(
+                                value: 'copy',
+                                child: Text('Copy URL'),
+                              ),
+                              PopupMenuItem(
+                                value: 'close',
+                                child: Text('Close tunnel'),
+                              ),
+                            ],
                           ),
-                          PopupMenuItem(
-                            value: 'rotate',
-                            child: Text('Rotate token'),
-                          ),
-                          PopupMenuItem(
-                            value: 'copy',
-                            child: Text('Copy URL'),
-                          ),
-                          PopupMenuItem(
-                            value: 'close',
-                            child: Text('Close tunnel'),
-                          ),
-                        ],
+                        ),
                       ),
-                    ),
+                    ],
                   ),
                 ],
               ),

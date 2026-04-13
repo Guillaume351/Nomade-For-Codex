@@ -110,6 +110,7 @@ export interface AppServerServerRequestResolution {
 export type CodexApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
 export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type CodexReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type CodexModeKind = "default" | "plan";
 
 export interface CodexModelSummary {
   id: string;
@@ -127,15 +128,35 @@ export interface CodexModelSummary {
 
 export interface CodexCollaborationModeSummary {
   slug: string;
-  label: string;
-  description: string;
-  value: Record<string, unknown>;
+  name: string;
+  mode: CodexModeKind;
+  model: string | null;
+  reasoningEffort: CodexReasoningEffort | null;
+  modeMask: {
+    name: string;
+    mode: CodexModeKind;
+    model: string | null;
+    reasoning_effort: CodexReasoningEffort | null;
+  };
+  turnStartCollaborationMode: {
+    mode: CodexModeKind;
+    settings: {
+      developer_instructions: null;
+    };
+  };
 }
 
 export interface CodexSkillSummary {
   name: string;
   path: string;
+  description?: string;
+  shortDescription?: string;
+  scope?: string;
+  enabled?: boolean;
+  cwd?: string;
 }
+
+type TurnStartCollaborationMode = CodexCollaborationModeSummary["turnStartCollaborationMode"];
 
 const defaultThreadSourceKinds: ThreadSourceKind[] = [
   "cli",
@@ -161,6 +182,147 @@ const toSandboxPolicy = (sandboxMode?: CodexSandboxMode): Record<string, unknown
     return { type: "workspaceWrite" };
   }
   return { type: "dangerFullAccess" };
+};
+
+const toNormalizedString = (value: unknown): string | undefined => {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+};
+
+const toModeKind = (value: unknown): CodexModeKind | undefined => {
+  if (value === "default" || value === "plan") {
+    return value;
+  }
+  return undefined;
+};
+
+const toReasoningEffort = (value: unknown): CodexReasoningEffort | undefined => {
+  if (
+    value === "none" ||
+    value === "minimal" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh"
+  ) {
+    return value;
+  }
+  return undefined;
+};
+
+const defaultTurnStartCollaborationMode = (mode?: CodexModeKind): TurnStartCollaborationMode | undefined => {
+  if (!mode) {
+    return undefined;
+  }
+  return {
+    mode,
+    settings: {
+      developer_instructions: null
+    }
+  };
+};
+
+export const parseCodexCollaborationModeList = (rawModes: unknown): CodexCollaborationModeSummary[] => {
+  const items = Array.isArray(rawModes) ? rawModes : [];
+  const bySlug = new Map<string, CodexCollaborationModeSummary>();
+
+  for (const entry of items) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const value = entry as Record<string, unknown>;
+    const name = toNormalizedString(value.name);
+    const mode = toModeKind(value.mode);
+    if (!name || !mode) {
+      continue;
+    }
+    const slug = mode;
+    const model = toNormalizedString(value.model) ?? null;
+    const reasoningEffort = toReasoningEffort(value.reasoning_effort) ?? null;
+    const turnStartCollaborationMode = defaultTurnStartCollaborationMode(mode);
+    if (!turnStartCollaborationMode) {
+      continue;
+    }
+    const modeMask = {
+      name,
+      mode,
+      model,
+      reasoning_effort: reasoningEffort
+    };
+
+    bySlug.set(slug, {
+      slug,
+      name,
+      mode,
+      model,
+      reasoningEffort,
+      modeMask,
+      turnStartCollaborationMode,
+    });
+  }
+
+  return [...bySlug.values()];
+};
+
+const parseCodexSkillSummary = (
+  rawSkill: Record<string, unknown>,
+  cwd: string | undefined
+): CodexSkillSummary | null => {
+  const path = toNormalizedString(rawSkill.path);
+  if (!path) {
+    return null;
+  }
+
+  const interfaceRaw =
+    rawSkill.interface && typeof rawSkill.interface === "object" && !Array.isArray(rawSkill.interface)
+      ? (rawSkill.interface as Record<string, unknown>)
+      : undefined;
+  const shortDescription =
+    toNormalizedString(rawSkill.shortDescription) ??
+    toNormalizedString(interfaceRaw?.shortDescription);
+  const name =
+    toNormalizedString(rawSkill.name) ??
+    path.split("/").filter((segment) => segment.length > 0).pop() ??
+    path;
+
+  return {
+    name,
+    path,
+    description: toNormalizedString(rawSkill.description),
+    shortDescription,
+    scope: toNormalizedString(rawSkill.scope),
+    enabled: typeof rawSkill.enabled === "boolean" ? rawSkill.enabled : undefined,
+    cwd
+  };
+};
+
+export const parseCodexSkillsList = (rawSkills: unknown): CodexSkillSummary[] => {
+  const rows = Array.isArray(rawSkills) ? rawSkills : [];
+  const byPath = new Map<string, CodexSkillSummary>();
+
+  for (const row of rows) {
+    if (!row || typeof row !== "object") {
+      continue;
+    }
+    const record = row as Record<string, unknown>;
+    const cwd = toNormalizedString(record.cwd);
+    const nested = Array.isArray(record.skills) ? record.skills : [];
+
+    for (const skillEntry of nested) {
+      if (!skillEntry || typeof skillEntry !== "object") {
+        continue;
+      }
+      const parsed = parseCodexSkillSummary(skillEntry as Record<string, unknown>, cwd);
+      if (parsed) {
+        byPath.set(parsed.path, parsed);
+      }
+    }
+  }
+
+  return [...byPath.values()];
 };
 
 export class CodexAppServerClient {
@@ -213,6 +375,9 @@ export class CodexAppServerClient {
       clientInfo: {
         name: "nomade-agent",
         version: "0.1.0"
+      },
+      capabilities: {
+        experimentalApi: true
       }
     });
   }
@@ -405,38 +570,14 @@ export class CodexAppServerClient {
     const response = (await this.request("collaborationMode/list", {
       cwd: params?.cwd ?? null
     })) as CollaborationModeListResult;
-    const rawModes = Array.isArray(response?.data) ? response.data : [];
-    return rawModes
-      .filter((entry) => typeof entry === "object" && entry !== null)
-      .map((entry) => {
-        const value = entry as Record<string, unknown>;
-        const rawSlug = typeof value.slug === "string" ? value.slug : "";
-        const rawLabel = typeof value.label === "string" ? value.label : rawSlug;
-        return {
-          slug: rawSlug,
-          label: rawLabel,
-          description: typeof value.description === "string" ? value.description : "",
-          value
-        };
-      })
-      .filter((entry) => entry.slug.length > 0);
+    return parseCodexCollaborationModeList(response?.data);
   }
 
   async skillsList(params: { cwd: string }): Promise<CodexSkillSummary[]> {
     const response = (await this.request("skills/list", {
-      cwd: params.cwd
+      cwds: [params.cwd]
     })) as SkillListResult;
-    const rawSkills = Array.isArray(response?.data) ? response.data : [];
-    return rawSkills
-      .filter((entry) => typeof entry === "object" && entry !== null)
-      .map((entry) => {
-        const value = entry as Record<string, unknown>;
-        return {
-          name: typeof value.name === "string" ? value.name : "",
-          path: typeof value.path === "string" ? value.path : ""
-        };
-      })
-      .filter((entry) => entry.path.length > 0);
+    return parseCodexSkillsList(response?.data);
   }
 
   async configRead(params?: { cwd?: string | null }): Promise<Record<string, unknown>> {
@@ -630,16 +771,6 @@ export class CodexAppServerClient {
   }
 
   private normalizeReasoningEffort(value: unknown): CodexReasoningEffort | undefined {
-    if (
-      value === "none" ||
-      value === "minimal" ||
-      value === "low" ||
-      value === "medium" ||
-      value === "high" ||
-      value === "xhigh"
-    ) {
-      return value;
-    }
-    return undefined;
+    return toReasoningEffort(value);
   }
 }
