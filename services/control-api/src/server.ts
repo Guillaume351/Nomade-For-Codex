@@ -1448,9 +1448,23 @@ export const createServer = async (): Promise<http.Server> => {
   const tunnelDiagnostics = new Map<string, TunnelDiagnostic>();
   const codexImportLocks = new Set<string>();
   const codexAutoSyncLastAt = new Map<string, number>();
+  const codexAutoSyncBackoffUntil = new Map<string, number>();
   const codexAutoSyncCooldownMs = 15_000;
+  const codexAutoSyncAuthFailureBackoffMs = 5 * 60_000;
   const codexAutoSyncThreadLimit = 500;
   const codexAutoSyncThreadReadTimeoutMs = 45_000;
+  const isCodexAuthFailure = (value: unknown): boolean => {
+    const message = String(value ?? "").toLowerCase();
+    if (message.length === 0) {
+      return false;
+    }
+    return (
+      message.includes("403") ||
+      message.includes("forbidden") ||
+      message.includes("unauthorized") ||
+      message.includes("responses_websocket")
+    );
+  };
   const normalizeCodexTimestampMs = (value: unknown): number => {
     if (typeof value !== "number" || !Number.isFinite(value)) {
       return 0;
@@ -1796,6 +1810,10 @@ export const createServer = async (): Promise<http.Server> => {
     if (Date.now() - lastAt < codexAutoSyncCooldownMs) {
       return;
     }
+    const backoffUntil = codexAutoSyncBackoffUntil.get(lockKey) ?? 0;
+    if (Date.now() < backoffUntil) {
+      return;
+    }
 
     codexImportLocks.add(lockKey);
     void (async () => {
@@ -1807,11 +1825,25 @@ export const createServer = async (): Promise<http.Server> => {
           threadReadTimeoutMs: codexAutoSyncThreadReadTimeoutMs,
           emitRealtimeUpdate: true
         });
+        codexAutoSyncBackoffUntil.delete(lockKey);
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (isCodexAuthFailure(message)) {
+          const until = Date.now() + codexAutoSyncAuthFailureBackoffMs;
+          codexAutoSyncBackoffUntil.set(lockKey, until);
+          wsHub.publishToUser(params.userId, {
+            type: "codex.sync.error",
+            agentId: params.agentId,
+            createdAt: new Date().toISOString(),
+            code: "codex_auth_forbidden",
+            message:
+              "Codex desktop authentication failed (403). Re-login Codex on the computer and retry."
+          });
+        }
         console.warn("[control-api] codex auto sync failed", {
           userId: params.userId,
           agentId: params.agentId,
-          error: error instanceof Error ? error.message : String(error)
+          error: message
         });
       } finally {
         codexAutoSyncLastAt.set(lockKey, Date.now());

@@ -419,6 +419,16 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
       unawaited(_refreshAfterCodexSyncEvent(agentId: agentId));
       _notifyListenersSafe();
       return;
+    } else if (type == 'codex.sync.error') {
+      final message = event['message']?.toString().trim();
+      if (message != null && message.isNotEmpty) {
+        status = message;
+      } else {
+        status =
+            'Codex sync failed. Re-login Codex on your computer and try again.';
+      }
+      _notifyListenersSafe();
+      return;
     } else if (type == 'notification.event') {
       final eventType = event['eventType']?.toString() ?? 'unknown';
       final conversationId = event['conversationId']?.toString() ?? '';

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
@@ -141,6 +143,9 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<_PendingAttachment> _pendingAttachments = <_PendingAttachment>[];
 
   bool _showDiagnostics = false;
+  bool _chatBottomRefreshInProgress = false;
+  double _chatBottomOverscrollPx = 0;
+  DateTime? _chatBottomRefreshLastAt;
 
   void _setStateSafe(VoidCallback fn) {
     if (!mounted) {

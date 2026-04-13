@@ -842,10 +842,16 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
     }
 
     final conversationId = conversation.id;
-    if (selectedAgent?.isOnline == true) {
-      await importCodexHistory(silent: true);
-    } else {
+    if (selectedWorkspace == null) {
+      await loadTurns(conversationId);
+      return;
+    }
+
+    try {
       await loadConversations();
+    } catch (_) {
+      await loadTurns(conversationId);
+      return;
     }
 
     for (final entry in conversations) {

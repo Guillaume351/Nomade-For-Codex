@@ -86,3 +86,4 @@
 - `notification.event`
   - `eventType`: `action_required` | `quota_available` | `deferred_turn_started` | `deferred_turn_completed`
 - `codex.sync.updated` (automatic Codex thread sync completed, refresh local lists)
+- `codex.sync.error` (automatic Codex sync failed, includes recoverable auth/config hints)

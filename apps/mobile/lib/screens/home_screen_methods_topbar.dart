@@ -1,6 +1,62 @@
 part of 'home_screen.dart';
 
 extension _HomeScreenTopBarMethods on _HomeScreenState {
+  bool _onChatScrollNotification(
+    ScrollNotification notification,
+    NomadeProvider provider,
+  ) {
+    if (notification.metrics.axis != Axis.vertical) {
+      return false;
+    }
+
+    if (notification is ScrollEndNotification) {
+      _chatBottomOverscrollPx = 0;
+      return false;
+    }
+
+    if (notification is! OverscrollNotification) {
+      return false;
+    }
+
+    final metrics = notification.metrics;
+    final atBottom = metrics.pixels >= (metrics.maxScrollExtent - 1);
+    if (!atBottom || notification.overscroll <= 0) {
+      return false;
+    }
+
+    _chatBottomOverscrollPx += notification.overscroll;
+    if (_chatBottomOverscrollPx < 72) {
+      return false;
+    }
+    _chatBottomOverscrollPx = 0;
+    unawaited(_refreshFromBottomOverscroll(provider));
+    return false;
+  }
+
+  Future<void> _refreshFromBottomOverscroll(NomadeProvider provider) async {
+    if (_chatBottomRefreshInProgress) {
+      return;
+    }
+    final conversation = provider.selectedConversation;
+    if (conversation == null) {
+      return;
+    }
+
+    final lastAt = _chatBottomRefreshLastAt;
+    if (lastAt != null &&
+        DateTime.now().difference(lastAt).inMilliseconds < 1200) {
+      return;
+    }
+
+    _chatBottomRefreshInProgress = true;
+    _chatBottomRefreshLastAt = DateTime.now();
+    try {
+      await provider.refreshSelectedConversationFromDesktop();
+    } finally {
+      _chatBottomRefreshInProgress = false;
+    }
+  }
+
   Widget _buildTopBar(NomadeProvider provider, bool isWideLayout) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
@@ -664,13 +720,13 @@ extension _HomeScreenTopBarMethods on _HomeScreenState {
         Expanded(
           child: provider.turns.isEmpty
               ? _buildEmptyState(provider)
-              : RefreshIndicator(
-                  onRefresh: () => provider.refreshSelectedConversationFromDesktop(),
+              : NotificationListener<ScrollNotification>(
+                  onNotification: (notification) =>
+                      _onChatScrollNotification(notification, provider),
                   child: Scrollbar(
                     controller: _scrollController,
                     child: ListView.builder(
                       controller: _scrollController,
-                      physics: const AlwaysScrollableScrollPhysics(),
                       padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
                       itemCount: provider.turns.length,
                       itemBuilder: (context, index) {
