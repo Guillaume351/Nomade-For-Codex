@@ -214,6 +214,12 @@ export class ConversationManager {
         codexTurnId
       });
     } catch (error) {
+      const message =
+        error instanceof Error && error.message === "codex_auth_forbidden"
+          ? "Codex authentication failed. Run `codex login` on the computer and retry."
+          : error instanceof Error
+            ? error.message
+            : "turn_start_failed";
       this.emit({
         type: "conversation.turn.completed",
         conversationId: params.conversationId,
@@ -221,7 +227,7 @@ export class ConversationManager {
         threadId: currentThreadId,
         codexTurnId: "",
         status: "failed",
-        error: error instanceof Error ? error.message : "turn_start_failed"
+        error: message
       });
     }
   }

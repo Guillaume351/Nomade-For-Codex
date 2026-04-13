@@ -370,6 +370,9 @@ export class CodexAppServerClient {
   private readonly pending = new Map<number, PendingRequest>();
   private readonly threadStartLock = new Map<string, Promise<string>>();
   private readonly resolvedModelByCwdKey = new Map<string, string>();
+  private authBackoffUntil = 0;
+  private lastStderrLogLine = "";
+  private lastStderrLogAt = 0;
 
   constructor(
     private readonly onNotification: (notification: AppServerNotification) => void,
@@ -382,6 +385,9 @@ export class CodexAppServerClient {
     if (this.child) {
       return;
     }
+    if (Date.now() < this.authBackoffUntil) {
+      throw new Error("codex_auth_forbidden");
+    }
 
     const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
       stdio: "pipe",
@@ -393,9 +399,17 @@ export class CodexAppServerClient {
     lineReader.on("line", (line) => this.handleLine(line));
 
     child.stderr.on("data", (chunk: Buffer) => {
-      const value = chunk.toString("utf8").trim();
-      if (value) {
-        console.error("[agent] codex app-server stderr:", value);
+      const lines = chunk
+        .toString("utf8")
+        .split(/\r?\n/g)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      for (const line of lines) {
+        if (this.isCodexResponsesAuthForbidden(line)) {
+          this.enterAuthBackoff("codex_auth_forbidden");
+          continue;
+        }
+        this.logStderrDeduped(line);
       }
     });
 
@@ -412,15 +426,20 @@ export class CodexAppServerClient {
       this.child = null;
     });
 
-    await this.request("initialize", {
-      clientInfo: {
-        name: "nomade-agent",
-        version: "0.1.0"
-      },
-      capabilities: {
-        experimentalApi: true
-      }
-    });
+    try {
+      await this.request("initialize", {
+        clientInfo: {
+          name: "nomade-agent",
+          version: "0.1.0"
+        },
+        capabilities: {
+          experimentalApi: true
+        }
+      });
+    } catch (error) {
+      this.close();
+      throw error;
+    }
   }
 
   async ensureThread(params: {
@@ -906,6 +925,47 @@ export class CodexAppServerClient {
       return;
     }
     this.child.stdin.write(`${JSON.stringify(value)}\n`);
+  }
+
+  private enterAuthBackoff(reason: string): void {
+    // Prevent tight restart/error loops when Codex app-server auth is invalid.
+    this.authBackoffUntil = Date.now() + 30_000;
+    const error = new Error(reason);
+    for (const [id, pending] of this.pending.entries()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+      this.pending.delete(id);
+    }
+    this.threadStartLock.clear();
+    this.resolvedModelByCwdKey.clear();
+
+    if (this.child) {
+      try {
+        this.child.kill("SIGTERM");
+      } catch {
+        // no-op
+      }
+      this.child = null;
+    }
+  }
+
+  private isCodexResponsesAuthForbidden(line: string): boolean {
+    const normalized = line.toLowerCase();
+    return (
+      normalized.includes("responses_websocket") &&
+      normalized.includes("403") &&
+      normalized.includes("forbidden")
+    );
+  }
+
+  private logStderrDeduped(line: string): void {
+    const now = Date.now();
+    if (line === this.lastStderrLogLine && now - this.lastStderrLogAt < 1_000) {
+      return;
+    }
+    this.lastStderrLogLine = line;
+    this.lastStderrLogAt = now;
+    console.error("[agent] codex app-server stderr:", line);
   }
 
   private normalizeReasoningEffort(value: unknown): CodexReasoningEffort | undefined {
