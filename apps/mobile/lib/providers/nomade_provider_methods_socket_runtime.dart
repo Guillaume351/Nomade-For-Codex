@@ -3,6 +3,13 @@ part of 'nomade_provider.dart';
 extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
   Future<void> connectSocket() async {
     if (accessToken == null) return;
+    final tokenReady = await ensureFreshToken();
+    if (!tokenReady || accessToken == null) {
+      await logout();
+      status = 'Session expired. Please sign in again.';
+      _notifyListenersSafe();
+      return;
+    }
     try {
       await socketSub?.cancel();
       await socket?.sink.close();

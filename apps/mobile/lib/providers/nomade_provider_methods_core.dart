@@ -647,14 +647,26 @@ extension NomadeProviderCoreMethods on NomadeProvider {
 
   Future<bool> refreshTokens() async {
     if (refreshToken == null) return false;
-    try {
-      final payload = await api.refreshAccessToken(refreshToken!);
-      _setTokensFromPayload(payload);
-      await persistSession();
-      return true;
-    } catch (_) {
-      return false;
+    final inFlight = _refreshTokensInFlight;
+    if (inFlight != null) {
+      return inFlight;
     }
+
+    final pending = () async {
+      try {
+        final payload = await api.refreshAccessToken(refreshToken!);
+        _setTokensFromPayload(payload);
+        await persistSession();
+        return true;
+      } catch (_) {
+        return false;
+      } finally {
+        _refreshTokensInFlight = null;
+      }
+    }();
+
+    _refreshTokensInFlight = pending;
+    return pending;
   }
 
   void _setTokensFromPayload(Map<String, dynamic> payload) {
@@ -680,6 +692,13 @@ extension NomadeProviderCoreMethods on NomadeProvider {
   Future<bool> _logoutIfUnauthorized(Object error) async {
     if (!_isUnauthorizedError(error)) {
       return false;
+    }
+    // Access tokens are short-lived; attempt a silent refresh first so iOS
+    // resume flows do not force a full re-login after idle periods.
+    final refreshed = await refreshTokens();
+    if (refreshed) {
+      unawaited(connectSocket());
+      return true;
     }
     await logout();
     status = 'Session expired. Please sign in again.';

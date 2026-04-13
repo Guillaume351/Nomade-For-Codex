@@ -86,6 +86,7 @@ class NomadeProvider with ChangeNotifier {
   bool pushProviderReady = false;
   String? pushRegistrationError;
   String? _registeredPushToken;
+  Future<bool>? _refreshTokensInFlight;
 
   List<Agent> agents = [];
   List<Workspace> workspaces = [];
