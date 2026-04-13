@@ -343,6 +343,7 @@ export class CodexAppServerClient {
   private nextRequestId = 1;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly threadStartLock = new Map<string, Promise<string>>();
+  private readonly resolvedModelByCwdKey = new Map<string, string>();
 
   constructor(
     private readonly onNotification: (notification: AppServerNotification) => void,
@@ -381,6 +382,7 @@ export class CodexAppServerClient {
         this.pending.delete(id);
       }
       this.threadStartLock.clear();
+      this.resolvedModelByCwdKey.clear();
       this.child = null;
     });
 
@@ -422,9 +424,13 @@ export class CodexAppServerClient {
     approvalPolicy?: CodexApprovalPolicy;
     sandboxMode?: CodexSandboxMode;
   }): Promise<string> {
+    const model = await this.resolveModelForTurn({
+      model: params.model,
+      cwd: params.cwd
+    });
     const response = (await this.request("thread/start", {
       cwd: params.cwd,
-      model: params.model,
+      model,
       approvalPolicy: params.approvalPolicy ?? "never",
       sandbox: params.sandboxMode,
       ephemeral: false
@@ -458,12 +464,17 @@ export class CodexAppServerClient {
       throw new Error("turn_start_missing_input");
     }
 
+    const model = await this.resolveModelForTurn({
+      model: params.model,
+      cwd: params.cwd
+    });
+
     const response = (await this.request("turn/start", {
       threadId: params.threadId,
       input: inputItems,
       collaborationMode: params.collaborationMode,
       cwd: params.cwd,
-      model: params.model,
+      model,
       approvalPolicy: params.approvalPolicy ?? "never",
       sandboxPolicy: toSandboxPolicy(params.sandboxMode),
       effort: params.effort
@@ -686,7 +697,52 @@ export class CodexAppServerClient {
       return;
     }
     this.child.kill("SIGTERM");
+    this.resolvedModelByCwdKey.clear();
     this.child = null;
+  }
+
+  private cwdCacheKey(cwd?: string): string {
+    const normalized = toNormalizedString(cwd);
+    return normalized ?? "__default__";
+  }
+
+  private async resolveModelForTurn(params: {
+    model?: string;
+    cwd?: string;
+  }): Promise<string> {
+    const explicitModel = toNormalizedString(params.model);
+    if (explicitModel) {
+      this.resolvedModelByCwdKey.set(this.cwdCacheKey(params.cwd), explicitModel);
+      return explicitModel;
+    }
+
+    const cacheKey = this.cwdCacheKey(params.cwd);
+    const cached = this.resolvedModelByCwdKey.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const config = await this.configRead({ cwd: params.cwd ?? null });
+    const configuredModel = toNormalizedString(config.model);
+    if (configuredModel) {
+      this.resolvedModelByCwdKey.set(cacheKey, configuredModel);
+      return configuredModel;
+    }
+
+    const modelPage = await this.modelList({
+      limit: 200,
+      includeHidden: false
+    });
+    const fallbackModel =
+      modelPage.data.find((entry) => entry.isDefault)?.model ??
+      modelPage.data[0]?.model;
+    const normalizedFallback = toNormalizedString(fallbackModel);
+    if (normalizedFallback) {
+      this.resolvedModelByCwdKey.set(cacheKey, normalizedFallback);
+      return normalizedFallback;
+    }
+
+    throw new Error("model_missing_for_turn_start");
   }
 
   private handleLine(line: string): void {
