@@ -112,7 +112,7 @@ describe("ConversationManager app-server mapping", () => {
     manager.close();
   });
 
-  it("maps thread/status/changed using thread-to-conversation binding when no turn context is available", () => {
+  it("maps thread/status/changed v2 payload and thread/name/updated into conversation events", () => {
     const emitted: Array<Record<string, unknown>> = [];
     const manager = new ConversationManager((payload) => emitted.push(payload));
     const anyManager = manager as unknown as Record<string, unknown>;
@@ -126,10 +126,8 @@ describe("ConversationManager app-server mapping", () => {
       method: "thread/status/changed",
       params: {
         threadId: "thread-3",
-        status: "completed",
-        thread: {
-          name: "Renamed by Codex",
-          status: "completed"
+        status: {
+          type: "idle"
         }
       }
     });
@@ -141,9 +139,28 @@ describe("ConversationManager app-server mapping", () => {
         threadId: "thread-3",
         status: "completed",
         thread: {
-          name: "Renamed by Codex",
           status: "completed"
         }
+      })
+    );
+
+    (anyManager["onNotification"] as (notification: {
+      method: string;
+      params: Record<string, unknown>;
+    }) => void)({
+      method: "thread/name/updated",
+      params: {
+        threadId: "thread-3",
+        threadName: "Renamed by Codex"
+      }
+    });
+
+    expect(emitted).toContainEqual(
+      expect.objectContaining({
+        type: "conversation.thread.name.updated",
+        conversationId: "conversation-3",
+        threadId: "thread-3",
+        threadName: "Renamed by Codex"
       })
     );
 

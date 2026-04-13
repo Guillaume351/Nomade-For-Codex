@@ -357,10 +357,24 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
       return;
     } else if (type == 'conversation.thread.status.changed') {
       final conversationId = event['conversationId']?.toString() ?? '';
-      final statusValue = event['status']?.toString() ?? 'unknown';
+      final rawStatus = event['status'];
+      final statusValue = switch (rawStatus) {
+        String() => rawStatus.trim().toLowerCase(),
+        Map() =>
+          switch ((rawStatus['type']?.toString().trim().toLowerCase() ?? '')) {
+            'active' => 'running',
+            'idle' => 'completed',
+            'systemerror' => 'failed',
+            _ => 'unknown',
+          },
+        _ => 'unknown',
+      };
       final thread = (event['thread'] as Map?)?.cast<String, dynamic>() ??
           const <String, dynamic>{};
-      final rawThreadName = thread['name']?.toString().trim() ?? '';
+      final rawThreadName =
+          event['threadName']?.toString().trim() ??
+          thread['name']?.toString().trim() ??
+          '';
       final nextTitle = rawThreadName.isEmpty
           ? null
           : (rawThreadName.length > 240
@@ -368,7 +382,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
               : rawThreadName);
       final nextStatus = statusValue == 'running'
           ? 'running'
-          : statusValue == 'completed'
+          : statusValue == 'completed' || statusValue == 'idle'
               ? 'idle'
               : statusValue == 'interrupted'
                   ? 'interrupted'
@@ -389,6 +403,32 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
         _trackConversationEvent(
           conversationId: conversationId,
           method: 'conversation.thread.status.changed',
+          rendered: true,
+        );
+      }
+      _notifyListenersSafe();
+      return;
+    } else if (type == 'conversation.thread.name.updated') {
+      final conversationId = event['conversationId']?.toString() ?? '';
+      final rawThreadName = event['threadName']?.toString().trim() ?? '';
+      final nextTitle = rawThreadName.isEmpty
+          ? null
+          : (rawThreadName.length > 240
+              ? '${rawThreadName.substring(0, 240)}...'
+              : rawThreadName);
+      if (conversationId.isNotEmpty && nextTitle != null) {
+        _patchConversationLocal(
+          conversationId,
+          title: nextTitle,
+        );
+        _appendConversationDebugEvent(
+          conversationId: conversationId,
+          type: 'thread.name.updated',
+          message: 'title=$nextTitle',
+        );
+        _trackConversationEvent(
+          conversationId: conversationId,
+          method: 'conversation.thread.name.updated',
           rendered: true,
         );
       }

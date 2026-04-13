@@ -76,6 +76,8 @@
 ### Messages from agent
 - `session.output`, `session.status`, `tunnel.status`, `tunnel.http.response`, `agent.heartbeat`
 - `conversation.thread.started`
+- `conversation.thread.status.changed`
+- `conversation.thread.name.updated`
 - `conversation.turn.started`
 - `conversation.item.delta`
 - `conversation.item.completed`

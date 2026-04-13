@@ -223,6 +223,48 @@ const normalizeString = (value: unknown): string | undefined => {
   return trimmed.length > 0 ? trimmed : undefined;
 };
 
+const normalizeConversationThreadStatus = (
+  value: unknown
+): "running" | "completed" | "interrupted" | "failed" | "" => {
+  const normalizeRaw = (raw: string): "running" | "completed" | "interrupted" | "failed" | "" => {
+    const lowered = raw.trim().toLowerCase();
+    if (lowered === "running" || lowered === "active") {
+      return "running";
+    }
+    if (lowered === "completed" || lowered === "idle") {
+      return "completed";
+    }
+    if (lowered === "interrupted") {
+      return "interrupted";
+    }
+    if (
+      lowered === "failed" ||
+      lowered === "systemerror" ||
+      lowered === "system_error" ||
+      lowered === "system-error" ||
+      lowered === "error"
+    ) {
+      return "failed";
+    }
+    return "";
+  };
+
+  if (typeof value === "string") {
+    return normalizeRaw(value);
+  }
+  if (value && typeof value === "object") {
+    const statusRecord = value as Record<string, unknown>;
+    const typeValue =
+      typeof statusRecord.type === "string"
+        ? statusRecord.type
+        : typeof statusRecord.status === "string"
+          ? statusRecord.status
+          : "";
+    return normalizeRaw(typeValue);
+  }
+  return "";
+};
+
 const normalizeModeKind = (value: unknown): "default" | "plan" | undefined => {
   if (value === "default" || value === "plan") {
     return value;
@@ -1283,10 +1325,15 @@ export class WsHub {
       const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
       const thread = msg.thread && typeof msg.thread === "object" ? (msg.thread as Record<string, unknown>) : null;
-      const rawThreadName = typeof thread?.name === "string" ? thread.name.trim() : "";
+      const rawThreadName =
+        typeof msg.threadName === "string"
+          ? msg.threadName.trim()
+          : typeof thread?.name === "string"
+            ? thread.name.trim()
+            : "";
       const nextTitle =
         rawThreadName.length > 240 ? `${rawThreadName.substring(0, 240)}...` : rawThreadName;
-      const statusRaw = String(msg.status ?? thread?.status ?? "").trim();
+      const statusRaw = normalizeConversationThreadStatus(msg.status ?? thread?.status);
       const nextStatus =
         statusRaw === "running"
           ? "running"
@@ -1305,7 +1352,37 @@ export class WsHub {
           void this.repositories.updateConversationStatus(conversationId, nextStatus);
         }
       }
-      this.broadcastToUser(userId, msg);
+      const payload =
+        msg && typeof msg === "object"
+          ? ({ ...(msg as Record<string, unknown>) } as Record<string, unknown>)
+          : ({ type } as Record<string, unknown>);
+      if (statusRaw.length > 0) {
+        payload.status = statusRaw;
+      }
+      if (nextTitle.length > 0) {
+        payload.threadName = nextTitle;
+      }
+      this.broadcastToUser(userId, payload);
+      return;
+    }
+
+    if (type === "conversation.thread.name.updated") {
+      const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
+      const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+      const rawThreadName = typeof msg.threadName === "string" ? msg.threadName.trim() : "";
+      const nextTitle =
+        rawThreadName.length > 240 ? `${rawThreadName.substring(0, 240)}...` : rawThreadName;
+      if (conversationId && nextTitle.length > 0) {
+        void this.repositories.updateConversationTitle(conversationId, nextTitle);
+      }
+      const payload =
+        msg && typeof msg === "object"
+          ? ({ ...(msg as Record<string, unknown>) } as Record<string, unknown>)
+          : ({ type } as Record<string, unknown>);
+      if (nextTitle.length > 0) {
+        payload.threadName = nextTitle;
+      }
+      this.broadcastToUser(userId, payload);
       return;
     }
 

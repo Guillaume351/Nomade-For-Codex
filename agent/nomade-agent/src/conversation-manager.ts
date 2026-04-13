@@ -644,7 +644,15 @@ export class ConversationManager {
         return;
       }
       const thread = (params.thread as Record<string, unknown>) ?? {};
-      const status = String(params.status ?? thread.status ?? "unknown");
+      const status = this.normalizeThreadStatus(params.status ?? thread.status);
+      const threadName = this.normalizeThreadName(thread.name);
+      const threadPayload: Record<string, unknown> = {};
+      if (threadName !== null) {
+        threadPayload.name = threadName;
+      }
+      if (status !== "unknown") {
+        threadPayload.status = status;
+      }
       this.emit({
         type: "conversation.thread.status.changed",
         conversationId: eventConversationId,
@@ -652,7 +660,22 @@ export class ConversationManager {
         threadId,
         codexTurnId: effectiveCodexTurnId,
         status,
-        thread
+        thread: threadPayload
+      });
+      return;
+    }
+
+    if (method === "thread/name/updated") {
+      if (!threadId || !eventConversationId) {
+        return;
+      }
+      this.emit({
+        type: "conversation.thread.name.updated",
+        conversationId: eventConversationId,
+        turnId: eventTurnId,
+        threadId,
+        codexTurnId: effectiveCodexTurnId,
+        threadName: this.normalizeThreadName(params.threadName)
       });
       return;
     }
@@ -879,6 +902,57 @@ export class ConversationManager {
       }
     }
     return parts.join("\n\n");
+  }
+
+  private normalizeThreadStatus(value: unknown): "running" | "completed" | "interrupted" | "failed" | "unknown" {
+    const normalizeRaw = (raw: string): "running" | "completed" | "interrupted" | "failed" | "unknown" => {
+      const lowered = raw.trim().toLowerCase();
+      if (lowered === "running" || lowered === "active") {
+        return "running";
+      }
+      if (lowered === "completed" || lowered === "idle") {
+        return "completed";
+      }
+      if (lowered === "interrupted") {
+        return "interrupted";
+      }
+      if (
+        lowered === "failed" ||
+        lowered === "systemerror" ||
+        lowered === "system_error" ||
+        lowered === "system-error" ||
+        lowered === "error"
+      ) {
+        return "failed";
+      }
+      return "unknown";
+    };
+
+    if (typeof value === "string") {
+      return normalizeRaw(value);
+    }
+    if (value && typeof value === "object") {
+      const statusRecord = value as Record<string, unknown>;
+      const typeValue =
+        typeof statusRecord.type === "string"
+          ? statusRecord.type
+          : typeof statusRecord.status === "string"
+            ? statusRecord.status
+            : "";
+      return normalizeRaw(typeValue);
+    }
+    return "unknown";
+  }
+
+  private normalizeThreadName(value: unknown): string | null {
+    if (typeof value !== "string") {
+      return null;
+    }
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+    return trimmed.length > 240 ? `${trimmed.substring(0, 240)}...` : trimmed;
   }
 
   private isApprovalPolicy(value: unknown): value is CodexApprovalPolicy {
