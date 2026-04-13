@@ -167,6 +167,123 @@ describe("ConversationManager app-server mapping", () => {
     manager.close();
   });
 
+  it("emits synthetic turn.completed when thread becomes terminal without explicit turn/completed", () => {
+    const emitted: Array<Record<string, unknown>> = [];
+    const manager = new ConversationManager((payload) => emitted.push(payload));
+    const anyManager = manager as unknown as Record<string, unknown>;
+
+    (anyManager["bindTurn"] as (
+      threadId: string,
+      codexTurnId: string,
+      context: { conversationId: string; turnId: string }
+    ) => void)("thread-fallback", "codex-turn-fallback", {
+      conversationId: "conversation-fallback",
+      turnId: "turn-fallback"
+    });
+
+    (anyManager["onNotification"] as (notification: {
+      method: string;
+      params: Record<string, unknown>;
+    }) => void)({
+      method: "thread/status/changed",
+      params: {
+        threadId: "thread-fallback",
+        status: {
+          type: "idle"
+        }
+      }
+    });
+
+    expect(emitted).toContainEqual(
+      expect.objectContaining({
+        type: "conversation.turn.completed",
+        conversationId: "conversation-fallback",
+        turnId: "turn-fallback",
+        threadId: "thread-fallback",
+        status: "completed"
+      })
+    );
+
+    manager.close();
+  });
+
+  it("maps turn/completed even when codex turn id is missing in the payload", () => {
+    const emitted: Array<Record<string, unknown>> = [];
+    const manager = new ConversationManager((payload) => emitted.push(payload));
+    const anyManager = manager as unknown as Record<string, unknown>;
+
+    (anyManager["bindTurn"] as (
+      threadId: string,
+      codexTurnId: string,
+      context: { conversationId: string; turnId: string }
+    ) => void)("thread-no-id", "codex-turn-no-id", {
+      conversationId: "conversation-no-id",
+      turnId: "turn-no-id"
+    });
+
+    (anyManager["onNotification"] as (notification: {
+      method: string;
+      params: Record<string, unknown>;
+    }) => void)({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-no-id",
+        turn: {
+          status: "interrupted"
+        }
+      }
+    });
+
+    expect(emitted).toContainEqual(
+      expect.objectContaining({
+        type: "conversation.turn.completed",
+        conversationId: "conversation-no-id",
+        turnId: "turn-no-id",
+        threadId: "thread-no-id",
+        status: "interrupted"
+      })
+    );
+
+    manager.close();
+  });
+
+  it("normalizes inline directive placeholders in imported user prompts", () => {
+    const manager = new ConversationManager(() => undefined);
+    const anyManager = manager as unknown as Record<string, unknown>;
+
+    const text = 'Please run ::git-stage{cwd="/repo"} and ::git-push{cwd="/repo" branch="main"}';
+    const startStage = text.indexOf("::git-stage");
+    const endStage = text.indexOf("}", startStage) + 1;
+    const startPush = text.indexOf("::git-push");
+    const endPush = text.indexOf("}", startPush) + 1;
+
+    const prompt = (anyManager["extractUserPrompt"] as (
+      payload: Record<string, unknown>
+    ) => string)({
+      content: [
+        {
+          type: "text",
+          text,
+          text_elements: [
+            {
+              byteRange: { start: startStage, end: endStage },
+              placeholder: "[git stage] /repo"
+            },
+            {
+              byteRange: { start: startPush, end: endPush },
+              placeholder: "[git push] /repo (main)"
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(prompt).toContain("[git stage] /repo");
+    expect(prompt).toContain("[git push] /repo (main)");
+
+    manager.close();
+  });
+
   it("supports server request round-trip from app-server to mobile response", async () => {
     const emitted: Array<Record<string, unknown>> = [];
     const manager = new ConversationManager((payload) => emitted.push(payload));
@@ -261,6 +378,71 @@ describe("ConversationManager app-server mapping", () => {
     expect(calls.start).toBe(1);
     expect(calls.loadedList).toBe(1);
     expect(calls.resume).toBe(0);
+
+    manager.close();
+  });
+
+  it("backs off sync after codex auth failures and avoids repeated start attempts", async () => {
+    const manager = new ConversationManager(() => undefined);
+    const anyManager = manager as unknown as Record<string, unknown>;
+    const calls = {
+      start: 0
+    };
+    anyManager["codexClient"] = {
+      start: async () => {
+        calls.start += 1;
+        throw new Error("codex_auth_forbidden");
+      },
+      close: () => undefined
+    };
+
+    await expect(
+      manager.syncThreads({
+        bindings: [{ conversationId: "conversation-1", threadId: "thread-1" }]
+      })
+    ).resolves.toBeUndefined();
+    await expect(
+      manager.syncThreads({
+        bindings: [{ conversationId: "conversation-2", threadId: "thread-2" }]
+      })
+    ).resolves.toBeUndefined();
+
+    expect(calls.start).toBe(1);
+
+    manager.close();
+  });
+
+  it("backs off sync after transient overload errors", async () => {
+    const manager = new ConversationManager(() => undefined);
+    const anyManager = manager as unknown as Record<string, unknown>;
+    const calls = {
+      start: 0,
+      loadedList: 0
+    };
+    anyManager["codexClient"] = {
+      start: async () => {
+        calls.start += 1;
+      },
+      threadLoadedList: async () => {
+        calls.loadedList += 1;
+        throw new Error("codex_server_overloaded_backoff");
+      },
+      close: () => undefined
+    };
+
+    await expect(
+      manager.syncThreads({
+        bindings: [{ conversationId: "conversation-1", threadId: "thread-1" }]
+      })
+    ).resolves.toBeUndefined();
+    await expect(
+      manager.syncThreads({
+        bindings: [{ conversationId: "conversation-2", threadId: "thread-2" }]
+      })
+    ).resolves.toBeUndefined();
+
+    expect(calls.start).toBe(1);
+    expect(calls.loadedList).toBe(1);
 
     manager.close();
   });

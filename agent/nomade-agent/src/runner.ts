@@ -1071,8 +1071,11 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           await conversationManager.syncThreads({ bindings });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
+          if (message === "codex_auth_forbidden" || message === "codex_server_overloaded_backoff") {
+            return;
+          }
           console.warn("[agent] conversation.sync.threads failed", {
-            bindings: bindings.length,
+            bindingCount: bindings.length,
             error: message
           });
         }
