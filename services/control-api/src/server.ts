@@ -1330,11 +1330,13 @@ export const createServer = async (): Promise<http.Server> => {
   };
 
   wsHub = new WsHub(auth, repositories, server, {
-    onAgentHello: ({ agentId }) => {
+    onAgentHello: ({ agentId, userId }) => {
       scheduleDeferredDispatch(agentId);
+      scheduleCodexAutoSync({ userId, agentId });
     },
-    onAgentHeartbeat: ({ agentId }) => {
+    onAgentHeartbeat: ({ agentId, userId }) => {
       scheduleDeferredDispatch(agentId);
+      scheduleCodexAutoSync({ userId, agentId });
     },
     onConversationServerRequest: ({ userId, conversationId, turnId, requestId, method }) => {
       void emitMobileNotificationEvent({
@@ -1445,6 +1447,361 @@ export const createServer = async (): Promise<http.Server> => {
 
   const tunnelDiagnostics = new Map<string, TunnelDiagnostic>();
   const codexImportLocks = new Set<string>();
+  const codexAutoSyncLastAt = new Map<string, number>();
+  const codexAutoSyncCooldownMs = 15_000;
+  const codexAutoSyncThreadLimit = 500;
+  const codexAutoSyncThreadReadTimeoutMs = 45_000;
+
+  type CodexThreadSyncSummary = {
+    threadsScanned: number;
+    importedWorkspaces: number;
+    importedConversations: number;
+    skippedConversations: number;
+    hydrationAttempts: number;
+    hydrationSkipped: number;
+    hydratedOrRepaired: number;
+    failedHydrations: number;
+    threadReadTimeouts: number;
+    threadReadTimeoutMs: number;
+  };
+
+  const listAgentConversationThreadBindings = async (params: {
+    userId: string;
+    agentId: string;
+  }): Promise<Array<{ conversationId: string; threadId: string }>> => {
+    const bindings: Array<{ conversationId: string; threadId: string }> = [];
+    const workspaces = await repositories.listWorkspaces(params.userId, params.agentId);
+    for (const workspace of workspaces) {
+      const conversations = await repositories.listConversations(params.userId, workspace.id);
+      for (const conversation of conversations) {
+        if (!conversation.codex_thread_id) {
+          continue;
+        }
+        bindings.push({
+          conversationId: conversation.id,
+          threadId: conversation.codex_thread_id
+        });
+      }
+    }
+    return bindings;
+  };
+
+  const pushConversationThreadSyncToAgent = async (params: {
+    userId: string;
+    agentId: string;
+  }): Promise<void> => {
+    const bindings = await listAgentConversationThreadBindings(params);
+    wsHub.sendToAgent(params.agentId, {
+      type: "conversation.sync.threads",
+      items: bindings
+    });
+  };
+
+  const runCodexThreadSync = async (params: {
+    userId: string;
+    agentId: string;
+    limit: number;
+    threadReadTimeoutMs: number;
+    emitRealtimeUpdate?: boolean;
+  }): Promise<CodexThreadSyncSummary> => {
+    const threadReadTimeoutMs = Math.max(5_000, Math.min(params.threadReadTimeoutMs, 120_000));
+    let threads: Array<{
+      threadId: string;
+      title: string;
+      preview: string;
+      cwd: string;
+      updatedAt: number;
+    }> = [];
+
+    threads = await wsHub.listCodexThreadsThroughAgent({
+      agentId: params.agentId,
+      limit: Math.max(1, Math.min(params.limit, 500))
+    });
+
+    const existingWorkspaces = await repositories.listWorkspaces(params.userId);
+    const workspaceByPath = new Map<string, { id: string; name: string; path: string; agent_id: string }>();
+    for (const workspace of existingWorkspaces) {
+      if (workspace.agent_id === params.agentId) {
+        workspaceByPath.set(workspace.path, workspace);
+      }
+    }
+
+    const conversationByThreadId = new Map<string, { id: string; updatedAtMs: number }>();
+    for (const workspace of workspaceByPath.values()) {
+      const conversations = await repositories.listConversations(params.userId, workspace.id);
+      for (const conversation of conversations) {
+        if (conversation.codex_thread_id) {
+          conversationByThreadId.set(conversation.codex_thread_id, {
+            id: conversation.id,
+            updatedAtMs: conversation.updated_at.getTime()
+          });
+        }
+      }
+    }
+
+    const existingConversationIds = Array.from(conversationByThreadId.values(), (entry) => entry.id);
+    const turnCountByConversationId = await repositories.listConversationTurnCounts(existingConversationIds);
+
+    let importedWorkspaces = 0;
+    let importedConversations = 0;
+    let skippedConversations = 0;
+    let hydrationSkipped = 0;
+    let hydrationAttempts = 0;
+    let hydratedOrRepaired = 0;
+    let failedHydrations = 0;
+    let threadReadTimeouts = 0;
+
+    for (const thread of threads) {
+      const normalizedPath = thread.cwd.trim() || ".";
+      let workspace = workspaceByPath.get(normalizedPath);
+
+      if (!workspace) {
+        const baseName = path.basename(normalizedPath) || "Workspace";
+        workspace = await repositories.createWorkspace({
+          userId: params.userId,
+          agentId: params.agentId,
+          name: baseName.length > 120 ? `${baseName.substring(0, 120)}...` : baseName,
+          path: normalizedPath
+        });
+        workspaceByPath.set(normalizedPath, workspace);
+        importedWorkspaces += 1;
+      }
+
+      let conversationMeta = conversationByThreadId.get(thread.threadId);
+      let conversationId = conversationMeta?.id;
+      let createdConversation = false;
+      if (conversationId) {
+        skippedConversations += 1;
+      } else {
+        const fallback = thread.preview
+          .split("\n")
+          .find((line) => line.trim().length > 0)
+          ?.trim() ?? "Imported Codex thread";
+        const rawTitle = thread.title.trim().length > 0 ? thread.title.trim() : fallback;
+        const title = rawTitle.length > 240 ? `${rawTitle.substring(0, 240)}...` : rawTitle;
+
+        const conversation = await repositories.createConversation({
+          userId: params.userId,
+          workspaceId: workspace.id,
+          agentId: params.agentId,
+          title
+        });
+        await repositories.updateConversationThreadId(conversation.id, thread.threadId);
+        await repositories.updateConversationStatus(conversation.id, "idle");
+        wsHub.rememberConversationOwner(conversation.id, params.userId, params.agentId);
+
+        conversationMeta = {
+          id: conversation.id,
+          updatedAtMs: conversation.updated_at.getTime()
+        };
+        conversationByThreadId.set(thread.threadId, conversationMeta);
+        turnCountByConversationId.set(conversation.id, 0);
+        conversationId = conversation.id;
+        createdConversation = true;
+        importedConversations += 1;
+      }
+
+      if (!conversationId) {
+        failedHydrations += 1;
+        continue;
+      }
+
+      const existingTurnCount = turnCountByConversationId.get(conversationId) ?? 0;
+      const conversationUpdatedAtMs = conversationMeta?.updatedAtMs ?? 0;
+      const threadUpdatedAtMs = Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0;
+      const threadAppearsNewer = threadUpdatedAtMs > conversationUpdatedAtMs + 1_000;
+      const shouldHydrate = createdConversation || existingTurnCount === 0 || threadAppearsNewer;
+      if (!shouldHydrate) {
+        hydrationSkipped += 1;
+        continue;
+      }
+
+      wsHub.rememberConversationOwner(conversationId, params.userId, params.agentId);
+      hydrationAttempts += 1;
+
+      let threadDetail:
+        | {
+            turns: Array<{
+              turnId: string;
+              status: "running" | "completed" | "interrupted" | "failed";
+              error?: string;
+              userPrompt: string;
+              items: Array<{
+                itemId: string;
+                itemType: string;
+                payload: Record<string, unknown>;
+              }>;
+            }>;
+          }
+        | null = null;
+      try {
+        threadDetail = await wsHub.readCodexThreadThroughAgent({
+          agentId: params.agentId,
+          threadId: thread.threadId,
+          conversationId,
+          timeoutMs: threadReadTimeoutMs
+        });
+      } catch (error) {
+        failedHydrations += 1;
+        const message = error instanceof Error ? error.message : "thread_read_failed";
+        if (message === "thread_read_timeout") {
+          threadReadTimeouts += 1;
+        }
+        console.warn("[control-api] codex thread read failed", {
+          conversationId,
+          threadId: thread.threadId,
+          error: message
+        });
+        continue;
+      }
+
+      try {
+        await repositories.deleteConversationTurns(conversationId);
+        let lastTurnStatus: "running" | "completed" | "interrupted" | "failed" | undefined;
+        for (const importedTurn of threadDetail.turns) {
+          const createdTurn = await repositories.createConversationTurn({
+            conversationId,
+            prompt: importedTurn.userPrompt ?? "",
+            deliveryPolicy: "immediate"
+          });
+          const codexTurnId = importedTurn.turnId?.trim() ?? "";
+          if (codexTurnId.length > 0) {
+            await repositories.markConversationTurnStarted({
+              turnId: createdTurn.id,
+              codexTurnId
+            });
+          }
+          const importedItems = Array.isArray(importedTurn.items) ? importedTurn.items : [];
+          for (let itemIndex = 0; itemIndex < importedItems.length; itemIndex += 1) {
+            const item = importedItems[itemIndex]!;
+            const itemId = item.itemId?.trim() || `item-${itemIndex + 1}`;
+            const itemType = item.itemType?.trim() || "unknown";
+            const payload = item.payload && typeof item.payload === "object" ? item.payload : { value: item.payload };
+            await repositories.upsertConversationItem({
+              turnId: createdTurn.id,
+              itemId,
+              itemType,
+              payload
+            });
+          }
+          if (
+            importedTurn.status === "completed" ||
+            importedTurn.status === "interrupted" ||
+            importedTurn.status === "failed"
+          ) {
+            await repositories.completeConversationTurn({
+              turnId: createdTurn.id,
+              status: importedTurn.status,
+              error: importedTurn.error
+            });
+          }
+          lastTurnStatus = importedTurn.status;
+        }
+
+        const conversationStatus =
+          lastTurnStatus === "running"
+            ? "running"
+            : lastTurnStatus === "interrupted"
+              ? "interrupted"
+              : lastTurnStatus === "failed"
+                ? "failed"
+                : "idle";
+        await repositories.updateConversationStatus(conversationId, conversationStatus);
+        turnCountByConversationId.set(conversationId, threadDetail.turns.length);
+        conversationByThreadId.set(thread.threadId, {
+          id: conversationId,
+          updatedAtMs: Date.now()
+        });
+        hydratedOrRepaired += 1;
+      } catch (error) {
+        failedHydrations += 1;
+        const message = error instanceof Error ? error.message : "thread_hydration_failed";
+        console.warn("[control-api] codex thread hydration failed", {
+          conversationId,
+          threadId: thread.threadId,
+          error: message
+        });
+      }
+    }
+
+    const summary: CodexThreadSyncSummary = {
+      threadsScanned: threads.length,
+      importedWorkspaces,
+      importedConversations,
+      skippedConversations,
+      hydrationAttempts,
+      hydrationSkipped,
+      hydratedOrRepaired,
+      failedHydrations,
+      threadReadTimeouts,
+      threadReadTimeoutMs
+    };
+
+    try {
+      await pushConversationThreadSyncToAgent({
+        userId: params.userId,
+        agentId: params.agentId
+      });
+    } catch (error) {
+      console.warn("[control-api] thread subscription sync failed", {
+        agentId: params.agentId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    if (
+      params.emitRealtimeUpdate &&
+      (summary.importedConversations > 0 ||
+        summary.importedWorkspaces > 0 ||
+        summary.hydratedOrRepaired > 0 ||
+        summary.failedHydrations > 0)
+    ) {
+      wsHub.publishToUser(params.userId, {
+        type: "codex.sync.updated",
+        agentId: params.agentId,
+        createdAt: new Date().toISOString(),
+        ...summary
+      });
+    }
+
+    return summary;
+  };
+
+  const scheduleCodexAutoSync = (params: { userId: string; agentId: string }): void => {
+    if (!params.userId || !params.agentId) {
+      return;
+    }
+    const lockKey = `${params.userId}:${params.agentId}`;
+    if (codexImportLocks.has(lockKey)) {
+      return;
+    }
+    const lastAt = codexAutoSyncLastAt.get(lockKey) ?? 0;
+    if (Date.now() - lastAt < codexAutoSyncCooldownMs) {
+      return;
+    }
+
+    codexImportLocks.add(lockKey);
+    void (async () => {
+      try {
+        await runCodexThreadSync({
+          userId: params.userId,
+          agentId: params.agentId,
+          limit: codexAutoSyncThreadLimit,
+          threadReadTimeoutMs: codexAutoSyncThreadReadTimeoutMs,
+          emitRealtimeUpdate: true
+        });
+      } catch (error) {
+        console.warn("[control-api] codex auto sync failed", {
+          userId: params.userId,
+          agentId: params.agentId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      } finally {
+        codexAutoSyncLastAt.set(lockKey, Date.now());
+        codexImportLocks.delete(lockKey);
+      }
+    })();
+  };
 
   const tunnelStatusFromRecord = (
     tunnel: TunnelRecord
@@ -3028,257 +3385,29 @@ export const createServer = async (): Promise<http.Server> => {
 
     codexImportLocks.add(importLockKey);
     try {
-      const threadReadTimeoutMs = parsed.data.threadReadTimeoutMs ?? 45_000;
-      let threads: Array<{
-        threadId: string;
-        title: string;
-        preview: string;
-        cwd: string;
-        updatedAt: number;
-      }> = [];
-
-      try {
-        threads = await wsHub.listCodexThreadsThroughAgent({
-          agentId,
-          limit: parsed.data.limit ?? 500
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "thread_list_failed";
-        const status = message === "agent_offline" ? 409 : 502;
-        res.status(status).json({ error: message });
-        return;
-      }
-
-      const existingWorkspaces = await repositories.listWorkspaces(userId);
-      const workspaceByPath = new Map<string, { id: string; name: string; path: string; agent_id: string }>();
-      for (const workspace of existingWorkspaces) {
-        if (workspace.agent_id === agentId) {
-          workspaceByPath.set(workspace.path, workspace);
-        }
-      }
-
-      const conversationByThreadId = new Map<string, { id: string; updatedAtMs: number }>();
-      for (const workspace of workspaceByPath.values()) {
-        const conversations = await repositories.listConversations(userId, workspace.id);
-        for (const conversation of conversations) {
-          if (conversation.codex_thread_id) {
-            conversationByThreadId.set(conversation.codex_thread_id, {
-              id: conversation.id,
-              updatedAtMs: conversation.updated_at.getTime()
-            });
-          }
-        }
-      }
-
-      const existingConversationIds = Array.from(conversationByThreadId.values(), (entry) => entry.id);
-      const turnCountByConversationId = await repositories.listConversationTurnCounts(existingConversationIds);
-
-      let importedWorkspaces = 0;
-      let importedConversations = 0;
-      let skippedConversations = 0;
-      let hydrationSkipped = 0;
-      let hydrationAttempts = 0;
-      let hydratedOrRepaired = 0;
-      let failedHydrations = 0;
-      let threadReadTimeouts = 0;
-
-      for (const thread of threads) {
-        const normalizedPath = thread.cwd.trim() || ".";
-        let workspace = workspaceByPath.get(normalizedPath);
-
-        if (!workspace) {
-          const baseName = path.basename(normalizedPath) || "Workspace";
-          workspace = await repositories.createWorkspace({
-            userId,
-            agentId,
-            name: baseName.length > 120 ? `${baseName.substring(0, 120)}...` : baseName,
-            path: normalizedPath
-          });
-          workspaceByPath.set(normalizedPath, workspace);
-          importedWorkspaces += 1;
-        }
-
-        let conversationMeta = conversationByThreadId.get(thread.threadId);
-        let conversationId = conversationMeta?.id;
-        let createdConversation = false;
-        if (conversationId) {
-          skippedConversations += 1;
-        } else {
-          const fallback = thread.preview
-            .split("\n")
-            .find((line) => line.trim().length > 0)
-            ?.trim() ?? "Imported Codex thread";
-          const rawTitle = thread.title.trim().length > 0 ? thread.title.trim() : fallback;
-          const title = rawTitle.length > 240 ? `${rawTitle.substring(0, 240)}...` : rawTitle;
-
-          const conversation = await repositories.createConversation({
-            userId,
-            workspaceId: workspace.id,
-            agentId,
-            title
-          });
-          await repositories.updateConversationThreadId(conversation.id, thread.threadId);
-          await repositories.updateConversationStatus(conversation.id, "idle");
-          wsHub.rememberConversationOwner(conversation.id, userId, agentId);
-
-          conversationMeta = {
-            id: conversation.id,
-            updatedAtMs: conversation.updated_at.getTime()
-          };
-          conversationByThreadId.set(thread.threadId, conversationMeta);
-          turnCountByConversationId.set(conversation.id, 0);
-          conversationId = conversation.id;
-          createdConversation = true;
-          importedConversations += 1;
-        }
-
-        if (!conversationId) {
-          failedHydrations += 1;
-          continue;
-        }
-
-        const existingTurnCount = turnCountByConversationId.get(conversationId) ?? 0;
-        const conversationUpdatedAtMs = conversationMeta?.updatedAtMs ?? 0;
-        const threadUpdatedAtMs = Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0;
-        const threadAppearsNewer = threadUpdatedAtMs > conversationUpdatedAtMs + 1_000;
-        const shouldHydrate = createdConversation || existingTurnCount === 0 || threadAppearsNewer;
-        if (!shouldHydrate) {
-          hydrationSkipped += 1;
-          continue;
-        }
-
-        wsHub.rememberConversationOwner(conversationId, userId, agentId);
-        hydrationAttempts += 1;
-
-        let threadDetail:
-          | {
-              turns: Array<{
-                turnId: string;
-                status: "running" | "completed" | "interrupted" | "failed";
-                error?: string;
-                userPrompt: string;
-                items: Array<{
-                  itemId: string;
-                  itemType: string;
-                  payload: Record<string, unknown>;
-                }>;
-              }>;
-            }
-          | null = null;
-        try {
-          threadDetail = await wsHub.readCodexThreadThroughAgent({
-            agentId,
-            threadId: thread.threadId,
-            conversationId,
-            timeoutMs: threadReadTimeoutMs
-          });
-        } catch (error) {
-          failedHydrations += 1;
-          const message = error instanceof Error ? error.message : "thread_read_failed";
-          if (message === "thread_read_timeout") {
-            threadReadTimeouts += 1;
-          }
-          console.warn("[control-api] codex thread read failed", {
-            conversationId,
-            threadId: thread.threadId,
-            error: message
-          });
-          continue;
-        }
-
-        try {
-          await repositories.deleteConversationTurns(conversationId);
-          let lastTurnStatus: "running" | "completed" | "interrupted" | "failed" | undefined;
-          for (const importedTurn of threadDetail.turns) {
-            const createdTurn = await repositories.createConversationTurn({
-              conversationId,
-              prompt: importedTurn.userPrompt ?? "",
-              deliveryPolicy: "immediate"
-            });
-            const codexTurnId = importedTurn.turnId?.trim() ?? "";
-            if (codexTurnId.length > 0) {
-              await repositories.markConversationTurnStarted({
-                turnId: createdTurn.id,
-                codexTurnId
-              });
-            }
-            const importedItems = Array.isArray(importedTurn.items) ? importedTurn.items : [];
-            for (let itemIndex = 0; itemIndex < importedItems.length; itemIndex += 1) {
-              const item = importedItems[itemIndex]!;
-              const itemId = item.itemId?.trim() || `item-${itemIndex + 1}`;
-              const itemType = item.itemType?.trim() || "unknown";
-              const payload =
-                item.payload && typeof item.payload === "object"
-                  ? item.payload
-                  : { value: item.payload };
-              await repositories.upsertConversationItem({
-                turnId: createdTurn.id,
-                itemId,
-                itemType,
-                payload
-              });
-            }
-            if (
-              importedTurn.status === "completed" ||
-              importedTurn.status === "interrupted" ||
-              importedTurn.status === "failed"
-            ) {
-              await repositories.completeConversationTurn({
-                turnId: createdTurn.id,
-                status: importedTurn.status,
-                error: importedTurn.error
-              });
-            }
-            lastTurnStatus = importedTurn.status;
-          }
-
-          const conversationStatus =
-            lastTurnStatus === "running"
-              ? "running"
-              : lastTurnStatus === "interrupted"
-                ? "interrupted"
-                : lastTurnStatus === "failed"
-                  ? "failed"
-                  : "idle";
-          await repositories.updateConversationStatus(conversationId, conversationStatus);
-          turnCountByConversationId.set(conversationId, threadDetail.turns.length);
-          conversationByThreadId.set(thread.threadId, {
-            id: conversationId,
-            updatedAtMs: Date.now()
-          });
-          hydratedOrRepaired += 1;
-        } catch (error) {
-          failedHydrations += 1;
-          const message = error instanceof Error ? error.message : "thread_hydration_failed";
-          console.warn("[control-api] codex thread hydration failed", {
-            conversationId,
-            threadId: thread.threadId,
-            error: message
-          });
-        }
-      }
-
-      res.json({
-        threadsScanned: threads.length,
-        importedWorkspaces,
-        importedConversations,
-        skippedConversations,
-        hydrationAttempts,
-        hydrationSkipped,
-        hydratedOrRepaired,
-        failedHydrations,
-        threadReadTimeouts,
-        threadReadTimeoutMs,
-        threads_scanned: threads.length,
-        imported: importedConversations,
-        skipped: skippedConversations,
-        hydration_attempts: hydrationAttempts,
-        hydration_skipped: hydrationSkipped,
-        hydrated_or_repaired: hydratedOrRepaired,
-        failed_hydrations: failedHydrations,
-        thread_read_timeouts: threadReadTimeouts,
-        thread_read_timeout_ms: threadReadTimeoutMs
+      const summary = await runCodexThreadSync({
+        userId,
+        agentId,
+        limit: parsed.data.limit ?? 500,
+        threadReadTimeoutMs: parsed.data.threadReadTimeoutMs ?? 45_000,
+        emitRealtimeUpdate: true
       });
+      res.json({
+        ...summary,
+        threads_scanned: summary.threadsScanned,
+        imported: summary.importedConversations,
+        skipped: summary.skippedConversations,
+        hydration_attempts: summary.hydrationAttempts,
+        hydration_skipped: summary.hydrationSkipped,
+        hydrated_or_repaired: summary.hydratedOrRepaired,
+        failed_hydrations: summary.failedHydrations,
+        thread_read_timeouts: summary.threadReadTimeouts,
+        thread_read_timeout_ms: summary.threadReadTimeoutMs
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "thread_sync_failed";
+      const status = message === "agent_offline" ? 409 : 502;
+      res.status(status).json({ error: message });
     } finally {
       codexImportLocks.delete(importLockKey);
     }
@@ -3545,6 +3674,19 @@ export const createServer = async (): Promise<http.Server> => {
     const conversations = await repositories.listConversations(req.userId!, workspaceId);
     for (const conversation of conversations) {
       wsHub.rememberConversationOwner(conversation.id, req.userId!, conversation.agent_id);
+    }
+    const uniqueAgents = new Set<string>(conversations.map((conversation) => conversation.agent_id));
+    for (const agentId of uniqueAgents) {
+      void pushConversationThreadSyncToAgent({
+        userId: req.userId!,
+        agentId
+      }).catch((error) => {
+        console.warn("[control-api] failed to push thread sync snapshot", {
+          userId: req.userId!,
+          agentId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
     }
     res.json({ items: conversations });
   });

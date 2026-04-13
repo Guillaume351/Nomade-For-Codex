@@ -1054,6 +1054,23 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         return;
       }
 
+      if (type === "conversation.sync.threads") {
+        const rawItems = Array.isArray(msg.items) ? msg.items : [];
+        const bindings = rawItems
+          .filter((entry) => entry && typeof entry === "object")
+          .map((entry) => {
+            const item = entry as Record<string, unknown>;
+            return {
+              conversationId: String(item.conversationId ?? ""),
+              threadId: String(item.threadId ?? "")
+            };
+          })
+          .filter((entry) => entry.conversationId.length > 0 && entry.threadId.length > 0);
+
+        await conversationManager.syncThreads({ bindings });
+        return;
+      }
+
       if (type === "codex.thread.list") {
         const requestId = String(msg.requestId ?? randomToken("ctl"));
         try {

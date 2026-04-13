@@ -27,7 +27,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           unawaited(loadTurns(conversationId));
         }
       }
-      notifyListeners();
+      _notifyListenersSafe();
     } catch (e) {
       _handleSocketDisconnected('Connection failed');
     }
@@ -42,7 +42,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
       if (error.code == 'e2e_runtime_unavailable') {
         status =
             'Realtime encrypted updates are paused. Complete secure scan to continue.';
-        notifyListeners();
+        _notifyListenersSafe();
         return;
       }
       if (allowPeerRecovery && error.code == 'e2e_unknown_sender_device') {
@@ -94,7 +94,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           at: DateTime.now(),
         ));
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'session.status') {
       final sessionId = event['sessionId']?.toString();
@@ -113,7 +113,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           );
         }
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'tunnel.status') {
       final tunnelId = event['tunnelId']?.toString();
@@ -164,7 +164,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           );
         }
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'conversation.thread.started') {
       final conversationId = event['conversationId']?.toString() ?? '';
@@ -193,7 +193,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           rendered: true,
         );
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'conversation.item.started') {
       final conversationId = event['conversationId']?.toString() ?? '';
@@ -225,7 +225,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           rendered: true,
         );
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'conversation.item.delta') {
       final turnId = event['turnId'] as String?;
@@ -262,7 +262,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
             rendered: true,
           );
         }
-        notifyListeners();
+        _notifyListenersSafe();
       } else if (conversationId.isNotEmpty) {
         _trackConversationEvent(
           conversationId: conversationId,
@@ -325,7 +325,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           rendered: true,
         );
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'conversation.turn.plan.updated') {
       final conversationId = event['conversationId']?.toString() ?? '';
@@ -353,7 +353,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           rendered: true,
         );
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'conversation.thread.status.changed') {
       final conversationId = event['conversationId']?.toString() ?? '';
@@ -392,7 +392,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           rendered: true,
         );
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'account.rate_limits.updated') {
       final updated = _asStringKeyedMap(event['rateLimits']);
@@ -406,7 +406,18 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           codexRateLimitsByLimitId = next;
         }
       }
-      notifyListeners();
+      _notifyListenersSafe();
+      return;
+    } else if (type == 'codex.sync.updated') {
+      final agentId = event['agentId']?.toString();
+      final hydratedOrRepaired = (event['hydratedOrRepaired'] as num?)?.toInt();
+      final importedConversations =
+          (event['importedConversations'] as num?)?.toInt();
+      if ((hydratedOrRepaired ?? 0) > 0 || (importedConversations ?? 0) > 0) {
+        status = 'Codex sync updated your conversations.';
+      }
+      unawaited(_refreshAfterCodexSyncEvent(agentId: agentId));
+      _notifyListenersSafe();
       return;
     } else if (type == 'notification.event') {
       final eventType = event['eventType']?.toString() ?? 'unknown';
@@ -428,7 +439,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
       } else if (eventType == 'action_required') {
         status = 'Action required on a running turn.';
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'conversation.thread.token_usage.updated') {
       final conversationId = event['conversationId']?.toString() ?? '';
@@ -479,7 +490,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           rendered: true,
         );
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'conversation.server.request.resolved') {
       final conversationId = event['conversationId']?.toString() ?? '';
@@ -512,7 +523,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           rendered: true,
         );
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'conversation.turn.diff.updated') {
       final conversationId = event['conversationId']?.toString() ?? '';
@@ -603,7 +614,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           ),
         );
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'conversation.turn.started') {
       final conversationId = event['conversationId']?.toString() ?? '';
@@ -660,7 +671,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
           ),
         );
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     } else if (type == 'error') {
       final conversationId = selectedConversation?.id;
@@ -672,7 +683,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
               'code=${event['code']?.toString() ?? "-"} message=${event['message']?.toString() ?? "-"}',
         );
       }
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     }
     // Handle other events...
@@ -717,7 +728,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
         message: reason,
       );
     }
-    notifyListeners();
+    _notifyListenersSafe();
     _scheduleSocketReconnect();
   }
 

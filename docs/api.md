@@ -71,6 +71,7 @@
 ### Messages to agent
 - `session.create`, `session.input`, `session.terminate`, `tunnel.open`, `tunnel.http.request`
 - `conversation.turn.start`, `conversation.turn.interrupt`
+- `conversation.sync.threads` (internal sync bindings: conversation <-> thread)
 
 ### Messages from agent
 - `session.output`, `session.status`, `tunnel.status`, `tunnel.http.response`, `agent.heartbeat`
@@ -84,3 +85,4 @@
 ### Messages from control-api to user socket
 - `notification.event`
   - `eventType`: `action_required` | `quota_available` | `deferred_turn_started` | `deferred_turn_completed`
+- `codex.sync.updated` (automatic Codex thread sync completed, refresh local lists)

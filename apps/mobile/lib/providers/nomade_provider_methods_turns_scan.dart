@@ -34,7 +34,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         } else {
           status = 'Command applied.';
         }
-        notifyListeners();
+        _notifyListenersSafe();
         return;
       }
 
@@ -42,7 +42,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         final ready = await createDefaultWorkspace();
         if (!ready) {
           status = 'No workspace available';
-          notifyListeners();
+          _notifyListenersSafe();
           return;
         }
       }
@@ -53,7 +53,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         );
         if (!created) {
           status = 'Unable to create conversation';
-          notifyListeners();
+          _notifyListenersSafe();
           return;
         }
       }
@@ -92,14 +92,14 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
       if (effectiveDeliveryPolicy == 'defer_if_offline' &&
           !canUseDeferredTurns) {
         status = 'Queued execution is not available on your current plan.';
-        notifyListeners();
+        _notifyListenersSafe();
         return;
       }
       final e2eRuntime = _e2eRuntime;
       if (e2eRuntime == null || !e2eRuntime.isReady) {
         status =
             'Secure scan required before sending messages. Tap the shield icon to approve secure scan.';
-        notifyListeners();
+        _notifyListenersSafe();
         return;
       }
       // Always refresh the realtime socket before a new turn to avoid stale
@@ -160,7 +160,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         if (error.code == 'e2e_runtime_unavailable') {
           status =
               'Secure scan required before sending messages. Tap the shield icon to approve secure scan.';
-          notifyListeners();
+          _notifyListenersSafe();
           return;
         }
         await _triggerStrictSecurityFailure('e2e_prompt_encrypt_failed',
@@ -248,7 +248,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         await loadTurns(conversationId);
       }
       status = 'Error: ${e.message}';
-      notifyListeners();
+      _notifyListenersSafe();
     } catch (e) {
       final conversationId = selectedConversation?.id;
       if (conversationId != null) {
@@ -267,7 +267,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         await loadTurns(conversationId);
       }
       status = 'Error: $e';
-      notifyListeners();
+      _notifyListenersSafe();
     }
   }
 
@@ -397,7 +397,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
       scanPayload: scanPayload,
       scanShortCode: scanShortCode,
     );
-    notifyListeners();
+    _notifyListenersSafe();
   }
 
   Future<void> approvePendingSecureScanIfAny() async {
@@ -432,7 +432,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         : '$fallbackVerificationUri?user_code=${Uri.encodeComponent(userCode!)}';
     status = 'Awaiting browser authorization...';
     debugPrint('[mobile-auth] device code started');
-    notifyListeners();
+    _notifyListenersSafe();
     return {
       'userCode': userCode!,
       'deviceCode': deviceCode!,
@@ -445,7 +445,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
     deviceCode = null;
     userCode = null;
     status = 'Login canceled';
-    notifyListeners();
+    _notifyListenersSafe();
   }
 
   Future<void> approveSecureScan({
@@ -457,7 +457,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
     }
     if (_secureScanApprovalInProgress) {
       status = 'Secure scan already in progress...';
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     }
     final normalizedPayload = scanPayload?.trim();
@@ -600,7 +600,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
           await _syncE2EPeersFromServer();
           await clearPendingScan();
           status = 'Secure scan approved';
-          notifyListeners();
+          _notifyListenersSafe();
           return;
         }
         if (statusValue == 'pending_key_exchange' || statusValue == 'pending') {
@@ -658,13 +658,13 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
       } else {
         status = 'Waiting for browser authorization...';
       }
-      notifyListeners();
+      _notifyListenersSafe();
       await Future.delayed(const Duration(seconds: 2));
     }
     deviceCode = null;
     userCode = null;
     _cancelLoginWait = false;
-    notifyListeners();
+    _notifyListenersSafe();
   }
 
   Future<void> onAgentSelected(Agent agent) async {
@@ -678,7 +678,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
     tunnels = [];
     trustedDevMode = false;
     selectedServiceId = null;
-    notifyListeners();
+    _notifyListenersSafe();
 
     await loadWorkspacesForSelectedAgent();
     await loadCodexOptions();
@@ -687,8 +687,6 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
       await loadDevSettings();
       await loadServices();
       await loadTunnels();
-    } else {
-      await importCodexHistory(silent: true);
     }
   }
 
@@ -706,7 +704,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
     if (selectedWorkspace != null) return true;
 
     status = 'Creating workspace...';
-    notifyListeners();
+    _notifyListenersSafe();
     try {
       await api.createWorkspace(
         accessToken: accessToken!,
@@ -722,14 +720,14 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         await loadTunnels();
       }
       status = 'Workspace ready';
-      notifyListeners();
+      _notifyListenersSafe();
       return selectedWorkspace != null;
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return false;
       }
       status = 'Workspace creation failed: $e';
-      notifyListeners();
+      _notifyListenersSafe();
       return false;
     }
   }
@@ -763,14 +761,14 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         type: 'conversation.created',
         message: 'workspace=${conversation.workspaceId}',
       );
-      notifyListeners();
+      _notifyListenersSafe();
       return true;
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return false;
       }
       status = 'Conversation creation failed: $e';
-      notifyListeners();
+      _notifyListenersSafe();
       return false;
     }
   }
@@ -780,7 +778,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
     if (!selectedAgent!.isOnline) {
       if (!silent) {
         status = 'Import unavailable: selected agent is offline';
-        notifyListeners();
+        _notifyListenersSafe();
       }
       return;
     }
@@ -789,9 +787,9 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
     importingHistory = true;
     if (!silent) {
       status = 'Importing Codex history...';
-      notifyListeners();
+      _notifyListenersSafe();
     } else {
-      notifyListeners();
+      _notifyListenersSafe();
     }
 
     try {
@@ -833,7 +831,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
       }
     } finally {
       importingHistory = false;
-      notifyListeners();
+      _notifyListenersSafe();
     }
   }
 

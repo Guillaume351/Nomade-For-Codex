@@ -53,6 +53,19 @@ interface ThreadReadResult {
   thread: Record<string, unknown>;
 }
 
+interface ThreadLoadedListResult {
+  data?: unknown;
+  nextCursor?: unknown;
+}
+
+interface ThreadResumeResult {
+  thread?: unknown;
+}
+
+interface ThreadUnsubscribeResult {
+  status?: unknown;
+}
+
 interface ModelListReasoningEffortEntry {
   reasoningEffort?: unknown;
   description?: unknown;
@@ -512,6 +525,47 @@ export class CodexAppServerClient {
       throw new Error("thread_read_missing_thread");
     }
     return response.thread;
+  }
+
+  async threadLoadedList(params?: {
+    limit?: number | null;
+    cursor?: string | null;
+  }): Promise<{ data: string[]; nextCursor: string | null }> {
+    const response = (await this.request("thread/loaded/list", {
+      limit: params?.limit ?? null,
+      cursor: params?.cursor ?? null
+    })) as ThreadLoadedListResult;
+
+    const data = Array.isArray(response?.data)
+      ? response.data.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+      : [];
+
+    return {
+      data,
+      nextCursor: typeof response?.nextCursor === "string" ? response.nextCursor : null
+    };
+  }
+
+  async threadResume(params: { threadId: string }): Promise<Record<string, unknown>> {
+    const response = (await this.request("thread/resume", {
+      threadId: params.threadId
+    })) as ThreadResumeResult;
+
+    if (!response?.thread || typeof response.thread !== "object") {
+      throw new Error("thread_resume_missing_thread");
+    }
+    return response.thread as Record<string, unknown>;
+  }
+
+  async threadUnsubscribe(params: { threadId: string }): Promise<"notLoaded" | "notSubscribed" | "unsubscribed"> {
+    const response = (await this.request("thread/unsubscribe", {
+      threadId: params.threadId
+    })) as ThreadUnsubscribeResult;
+    const status = response?.status;
+    if (status === "notLoaded" || status === "notSubscribed" || status === "unsubscribed") {
+      return status;
+    }
+    throw new Error("thread_unsubscribe_missing_status");
   }
 
   async modelList(params?: {

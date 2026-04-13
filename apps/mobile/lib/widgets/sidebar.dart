@@ -143,27 +143,6 @@ class Sidebar extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   _buildSectionHeader(context, 'Workspaces'),
-                  if (provider.selectedAgent != null &&
-                      provider.selectedAgent!.isOnline)
-                    ListTile(
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      leading: provider.importingHistory
-                          ? const SizedBox(
-                              height: 16,
-                              width: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.sync_rounded, size: 20),
-                      title: const Text('Import Codex history'),
-                      enabled: !provider.importingHistory,
-                      onTap: provider.importingHistory
-                          ? null
-                          : () async {
-                              await provider.importCodexHistory();
-                            },
-                    ),
                   if (sortedWorkspaces.isEmpty &&
                       provider.selectedAgent != null)
                     ListTile(
@@ -215,7 +194,7 @@ class Sidebar extends StatelessWidget {
                       sortedConversations.isEmpty)
                     _buildInfoLine(
                       context,
-                      'No conversations yet. Import history or create one.',
+                      'No conversations yet. Create one to start.',
                     ),
                   ...sortedConversations.map(
                     (conv) => ListTile(

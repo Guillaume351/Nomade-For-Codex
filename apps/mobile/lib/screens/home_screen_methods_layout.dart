@@ -1,6 +1,6 @@
 part of 'home_screen.dart';
 
-extension HomeScreenLayoutMethods on _HomeScreenState {
+extension _HomeScreenLayoutMethods on _HomeScreenState {
   void _ensureWorkspaceExpansion(NomadeProvider provider) {
     final selectedWorkspaceId = provider.selectedWorkspace?.id;
     if (selectedWorkspaceId == null || selectedWorkspaceId.isEmpty) {
@@ -20,7 +20,7 @@ extension HomeScreenLayoutMethods on _HomeScreenState {
     required Workspace workspace,
     required bool expanded,
   }) {
-    setState(() {
+    _setStateSafe(() {
       if (expanded) {
         _expandedWorkspaceIds
           ..clear()
@@ -504,7 +504,7 @@ extension HomeScreenLayoutMethods on _HomeScreenState {
                 children: [
                   OutlinedButton.icon(
                     onPressed: () {
-                      setState(() {
+                      _setStateSafe(() {
                         _showDiagnostics = true;
                       });
                     },
@@ -678,7 +678,7 @@ extension HomeScreenLayoutMethods on _HomeScreenState {
                       maxLines: 6,
                       minLines: 1,
                       enabled: !isRunning,
-                      onChanged: (_) => setState(() {}),
+                      onChanged: (_) => _setStateSafe(() {}),
                       onSubmitted: (_) => isRunning ? null : _handleSend(),
                       decoration: InputDecoration(
                         hintText: isRunning

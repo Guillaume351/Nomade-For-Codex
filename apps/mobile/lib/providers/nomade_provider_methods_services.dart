@@ -84,7 +84,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
         workspaceId: selectedWorkspace!.id,
       );
       trustedDevMode = payload['trustedDevMode'] == true;
-      notifyListeners();
+      _notifyListenersSafe();
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return;
@@ -97,7 +97,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
     if (selectedWorkspace == null || accessToken == null) return;
     final previous = trustedDevMode;
     trustedDevMode = enabled;
-    notifyListeners();
+    _notifyListenersSafe();
     try {
       await api.updateWorkspaceDevSettings(
         accessToken: accessToken!,
@@ -112,14 +112,14 @@ extension NomadeProviderServiceMethods on NomadeProvider {
       }
       trustedDevMode = previous;
       status = 'Failed to update trusted mode: $e';
-      notifyListeners();
+      _notifyListenersSafe();
     }
   }
 
   Future<void> loadServices() async {
     if (selectedWorkspace == null || accessToken == null) return;
     loadingServices = true;
-    notifyListeners();
+    _notifyListenersSafe();
     try {
       final payload = await api.listWorkspaceServices(
         accessToken: accessToken!,
@@ -137,14 +137,14 @@ extension NomadeProviderServiceMethods on NomadeProvider {
       status = 'Failed to load services: $e';
     } finally {
       loadingServices = false;
-      notifyListeners();
+      _notifyListenersSafe();
     }
   }
 
   Future<void> loadTunnels() async {
     if (selectedWorkspace == null || accessToken == null) return;
     loadingTunnels = true;
-    notifyListeners();
+    _notifyListenersSafe();
     try {
       final payload = await api.listTunnels(
         accessToken: accessToken!,
@@ -158,7 +158,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
       status = 'Failed to load tunnels: $e';
     } finally {
       loadingTunnels = false;
-      notifyListeners();
+      _notifyListenersSafe();
     }
   }
 
@@ -169,14 +169,14 @@ extension NomadeProviderServiceMethods on NomadeProvider {
   }) async {
     if (targetPort < 1 || targetPort > 65535) {
       status = 'Invalid port: $targetPort';
-      notifyListeners();
+      _notifyListenersSafe();
       return false;
     }
     if (selectedWorkspace == null ||
         selectedAgent == null ||
         accessToken == null) {
       status = 'Select an online agent and workspace first';
-      notifyListeners();
+      _notifyListenersSafe();
       return false;
     }
     try {
@@ -198,14 +198,14 @@ extension NomadeProviderServiceMethods on NomadeProvider {
       await loadTunnels();
       await loadServices();
       status = 'Tunnel created for :$targetPort';
-      notifyListeners();
+      _notifyListenersSafe();
       return true;
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return false;
       }
       status = 'Tunnel creation failed: $e';
-      notifyListeners();
+      _notifyListenersSafe();
       return false;
     }
   }
@@ -226,7 +226,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
       }
       status = 'Start failed: $e';
     }
-    notifyListeners();
+    _notifyListenersSafe();
   }
 
   Future<void> stopService(String serviceId) async {
@@ -244,7 +244,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
       }
       status = 'Stop failed: $e';
     }
-    notifyListeners();
+    _notifyListenersSafe();
   }
 
   Future<void> refreshServiceState(String serviceId) async {
@@ -255,7 +255,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
         serviceId: serviceId,
       );
       _upsertService(DevService.fromJson(payload));
-      notifyListeners();
+      _notifyListenersSafe();
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return;
@@ -272,14 +272,14 @@ extension NomadeProviderServiceMethods on NomadeProvider {
         tunnelId: tunnelId,
       );
       status = 'Tunnel link issued';
-      notifyListeners();
+      _notifyListenersSafe();
       return payload['previewUrl']?.toString();
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return null;
       }
       status = 'Issue token failed: $e';
-      notifyListeners();
+      _notifyListenersSafe();
       return null;
     }
   }
@@ -292,14 +292,14 @@ extension NomadeProviderServiceMethods on NomadeProvider {
         tunnelId: tunnelId,
       );
       status = 'Tunnel token rotated';
-      notifyListeners();
+      _notifyListenersSafe();
       return payload['previewUrl']?.toString();
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return null;
       }
       status = 'Rotate token failed: $e';
-      notifyListeners();
+      _notifyListenersSafe();
       return null;
     }
   }
@@ -319,7 +319,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
       }
       status = 'Close tunnel failed: $e';
     }
-    notifyListeners();
+    _notifyListenersSafe();
   }
 
   void sendSessionInput(String sessionId, String data) {
@@ -328,7 +328,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
     if (runtime == null || !runtime.isReady) {
       status =
           'Secure scan required before sending terminal input. Approve secure scan first.';
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     }
     try {
@@ -347,7 +347,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
       if (error.code == 'e2e_runtime_unavailable') {
         status =
             'Secure scan required before sending terminal input. Approve secure scan first.';
-        notifyListeners();
+        _notifyListenersSafe();
         return;
       }
       unawaited(
@@ -380,7 +380,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
     if (runtime == null || !runtime.isReady) {
       status =
           'Secure scan required before approving server actions. Approve secure scan first.';
-      notifyListeners();
+      _notifyListenersSafe();
       return;
     }
     try {
@@ -403,7 +403,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
       if (decryptError.code == 'e2e_runtime_unavailable') {
         status =
             'Secure scan required before approving server actions. Approve secure scan first.';
-        notifyListeners();
+        _notifyListenersSafe();
         return;
       }
       unawaited(
@@ -447,7 +447,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
       message:
           'turn=$turnId request=$requestId status=$requestStatus${error != null && error.trim().isNotEmpty ? ' error=$error' : ''}',
     );
-    notifyListeners();
+    _notifyListenersSafe();
   }
 
   void terminateSession(String sessionId, {String? agentId}) {
@@ -488,7 +488,7 @@ extension NomadeProviderServiceMethods on NomadeProvider {
 
   void selectService(String? serviceId) {
     selectedServiceId = serviceId;
-    notifyListeners();
+    _notifyListenersSafe();
   }
 
   void _upsertService(DevService incoming) {

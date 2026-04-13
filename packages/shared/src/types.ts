@@ -188,6 +188,14 @@ export interface ConversationTurnInterruptMessage {
   threadId?: string;
 }
 
+export interface ConversationSyncThreadsMessage {
+  type: "conversation.sync.threads";
+  items: Array<{
+    conversationId: string;
+    threadId: string;
+  }>;
+}
+
 export interface ConversationThreadStartedMessage {
   type: "conversation.thread.started";
   conversationId: string;
@@ -337,6 +345,7 @@ export type MobileToAgentMessage =
   | TunnelWsOpenMessage
   | TunnelWsFrameMessage
   | TunnelWsCloseMessage
+  | ConversationSyncThreadsMessage
   | ConversationTurnStartMessage
   | ConversationTurnInterruptMessage
   | ConversationServerResponseMessage;

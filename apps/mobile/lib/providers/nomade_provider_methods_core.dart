@@ -13,7 +13,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     }
     _selectedSkillPaths = normalized;
     persistSession();
-    notifyListeners();
+    _notifyListenersSafe();
   }
 
   void toggleSkillPath(String path) {
@@ -30,7 +30,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     values.sort();
     _selectedSkillPaths = values;
     persistSession();
-    notifyListeners();
+    _notifyListenersSafe();
   }
 
   TurnTimeline timelineForTurn(String turnId) {
@@ -109,7 +109,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       {required String context}) async {
     final waitSec = _resolveRateLimitWaitSec(error);
     status = '$context rate limited. Retrying in ${waitSec}s...';
-    notifyListeners();
+    _notifyListenersSafe();
     await Future.delayed(Duration(seconds: waitSec));
   }
 
@@ -232,7 +232,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       _registeredPushToken = registration.token;
       pushRegistrationError = null;
       pushProviderReady = payload['providerReady'] == true;
-      notifyListeners();
+      _notifyListenersSafe();
     } on ApiException catch (error) {
       if (error.errorCode == 'feature_not_enabled') {
         pushRegistrationError = null;
@@ -240,11 +240,11 @@ extension NomadeProviderCoreMethods on NomadeProvider {
         pushRegistrationError = error.errorCode ?? error.message;
       }
       pushProviderReady = false;
-      notifyListeners();
+      _notifyListenersSafe();
     } catch (error) {
       pushRegistrationError = error.toString();
       pushProviderReady = false;
-      notifyListeners();
+      _notifyListenersSafe();
     }
   }
 
@@ -410,7 +410,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       await logout();
     } finally {
       status = 'Security lock: $code. Re-login with secure scan is required.';
-      notifyListeners();
+      _notifyListenersSafe();
       _strictFailureInProgress = false;
     }
   }
@@ -488,7 +488,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
 
       if (accessToken != null) {
         status = 'Restoring session...';
-        notifyListeners();
+        _notifyListenersSafe();
 
         final ready = await ensureFreshToken();
         if (ready) {
@@ -513,7 +513,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       status = 'Secure storage unavailable';
       debugPrint('Secure storage error: $e');
     }
-    notifyListeners();
+    _notifyListenersSafe();
   }
 
   Future<void> persistSession() async {
@@ -628,7 +628,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     realtimeConnected = false;
 
     await _storage.deleteAll();
-    notifyListeners();
+    _notifyListenersSafe();
   }
 
   Future<bool> ensureFreshToken() async {
@@ -683,7 +683,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     }
     await logout();
     status = 'Session expired. Please sign in again.';
-    notifyListeners();
+    _notifyListenersSafe();
     return true;
   }
 
@@ -731,7 +731,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       }
       unawaited(syncNativePushRegistration());
       if (notifyListenersNow) {
-        notifyListeners();
+        _notifyListenersSafe();
       }
     } catch (error) {
       if (await _logoutIfUnauthorized(error)) {
@@ -743,7 +743,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
   Future<void> bootstrapData(
       {String? storedAgentId, String? storedWorkspaceId}) async {
     loadingData = true;
-    notifyListeners();
+    _notifyListenersSafe();
     try {
       await loadEntitlements(notifyListenersNow: false);
       final loadedAgents = await api.listAgents(accessToken!);
@@ -765,8 +765,6 @@ extension NomadeProviderCoreMethods on NomadeProvider {
           await loadDevSettings();
           await loadServices();
           await loadTunnels();
-        } else {
-          await importCodexHistory(silent: true);
         }
       } else {
         workspaces = [];
@@ -780,16 +778,16 @@ extension NomadeProviderCoreMethods on NomadeProvider {
         _selectedWorkspace = null;
         _selectedConversation = null;
       }
-      notifyListeners();
+      _notifyListenersSafe();
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return;
       }
       status = 'Error: $e';
-      notifyListeners();
+      _notifyListenersSafe();
     } finally {
       loadingData = false;
-      notifyListeners();
+      _notifyListenersSafe();
     }
   }
 
@@ -816,13 +814,13 @@ extension NomadeProviderCoreMethods on NomadeProvider {
         trustedDevMode = false;
         selectedServiceId = null;
       }
-      notifyListeners();
+      _notifyListenersSafe();
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return;
       }
       status = 'Error: $e';
-      notifyListeners();
+      _notifyListenersSafe();
     }
   }
 
@@ -845,13 +843,42 @@ extension NomadeProviderCoreMethods on NomadeProvider {
         _selectedConversation = null;
         turns = [];
       }
-      notifyListeners();
+      _notifyListenersSafe();
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return;
       }
       status = 'Error: $e';
-      notifyListeners();
+      _notifyListenersSafe();
+    }
+  }
+
+  Future<void> _refreshAfterCodexSyncEvent({String? agentId}) async {
+    if (_realtimeSyncRefreshInProgress) {
+      return;
+    }
+    if (accessToken == null || selectedAgent == null) {
+      return;
+    }
+    final normalizedAgentId = agentId?.trim();
+    if (normalizedAgentId != null &&
+        normalizedAgentId.isNotEmpty &&
+        normalizedAgentId != selectedAgent!.id) {
+      return;
+    }
+
+    _realtimeSyncRefreshInProgress = true;
+    try {
+      await loadWorkspacesForSelectedAgent(
+          storedWorkspaceId: selectedWorkspace?.id);
+      if (selectedWorkspace != null) {
+        await loadConversations();
+        await loadDevSettings();
+        await loadServices();
+        await loadTunnels();
+      }
+    } finally {
+      _realtimeSyncRefreshInProgress = false;
     }
   }
 
@@ -910,7 +937,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
         activeTurnId = null;
       }
       unawaited(_persistE2ERuntime());
-      notifyListeners();
+      _notifyListenersSafe();
     } on E2ERuntimeException catch (error) {
       debugPrint(
         '[mobile-auth] turn hydration failed for $conversationId with code=${error.code}',
@@ -923,13 +950,13 @@ extension NomadeProviderCoreMethods on NomadeProvider {
         status =
             'Encrypted history could not be decrypted (${error.code}). Start a new conversation or complete secure scan.';
       }
-      notifyListeners();
+      _notifyListenersSafe();
     } catch (e) {
       if (await _logoutIfUnauthorized(e)) {
         return;
       }
       status = 'Error: $e';
-      notifyListeners();
+      _notifyListenersSafe();
     }
   }
 
@@ -937,7 +964,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     if (selectedAgent == null || !selectedAgent!.isOnline) return;
 
     loadingCodexOptions = true;
-    notifyListeners();
+    _notifyListenersSafe();
 
     try {
       final payload = await api.getCodexOptions(
@@ -953,7 +980,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       debugPrint('Load codex options error: $e');
     } finally {
       loadingCodexOptions = false;
-      notifyListeners();
+      _notifyListenersSafe();
     }
   }
 }

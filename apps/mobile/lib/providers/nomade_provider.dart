@@ -125,6 +125,10 @@ class NomadeProvider with ChangeNotifier {
     return remaining < 0 ? 0 : remaining;
   }
 
+  void _notifyListenersSafe() {
+    notifyListeners();
+  }
+
   Agent? _selectedAgent;
   Agent? get selectedAgent => _selectedAgent;
   set selectedAgent(Agent? value) {
@@ -378,6 +382,7 @@ class NomadeProvider with ChangeNotifier {
   Timer? reconnectTimer;
   int reconnectAttempts = 0;
   bool realtimeConnected = false;
+  bool _realtimeSyncRefreshInProgress = false;
 
   bool secureStorageAvailable = true;
 

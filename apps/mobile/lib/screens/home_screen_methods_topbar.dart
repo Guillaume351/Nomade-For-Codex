@@ -1,6 +1,6 @@
 part of 'home_screen.dart';
 
-extension HomeScreenTopBarMethods on _HomeScreenState {
+extension _HomeScreenTopBarMethods on _HomeScreenState {
   Widget _buildTopBar(NomadeProvider provider, bool isWideLayout) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
@@ -147,7 +147,7 @@ extension HomeScreenTopBarMethods on _HomeScreenState {
                   : Icons.bug_report_rounded,
               tooltip: 'Diagnostics & logs',
               onPressed: () {
-                setState(() {
+                _setStateSafe(() {
                   _showDiagnostics = !_showDiagnostics;
                 });
               },

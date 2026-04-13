@@ -1,6 +1,6 @@
 part of 'home_screen.dart';
 
-extension HomeScreenComposerMethods on _HomeScreenState {
+extension _HomeScreenComposerMethods on _HomeScreenState {
   Future<void> _handleSend() async {
     final rawInput = _promptController.text.trim();
     if (rawInput.isEmpty) {
@@ -17,7 +17,7 @@ extension HomeScreenComposerMethods on _HomeScreenState {
     }
     if (slashResolution.consumeOnly) {
       _promptController.clear();
-      setState(() {});
+      _setStateSafe(() {});
       return;
     }
     final text = slashResolution.promptToSend?.trim() ?? '';
@@ -42,7 +42,7 @@ extension HomeScreenComposerMethods on _HomeScreenState {
         .map((attachment) => attachment.toInputItem())
         .toList(growable: false);
     _promptController.clear();
-    setState(() {
+    _setStateSafe(() {
       _pendingAttachments.clear();
     });
     await provider.sendPrompt(
@@ -260,7 +260,7 @@ extension HomeScreenComposerMethods on _HomeScreenState {
       text: nextText,
       selection: TextSelection.collapsed(offset: nextText.length),
     );
-    setState(() {});
+    _setStateSafe(() {});
   }
 
   Future<void> _handleComposerAction(
@@ -302,7 +302,7 @@ extension HomeScreenComposerMethods on _HomeScreenState {
       return;
     }
     var added = 0;
-    setState(() {
+    _setStateSafe(() {
       for (final file in result.files) {
         final path = (file.path ?? '').trim();
         if (path.isEmpty) {
@@ -343,7 +343,7 @@ extension HomeScreenComposerMethods on _HomeScreenState {
   }
 
   void _removePendingAttachment(String path) {
-    setState(() {
+    _setStateSafe(() {
       _pendingAttachments.removeWhere((entry) => entry.path == path);
     });
   }
@@ -613,7 +613,7 @@ extension HomeScreenComposerMethods on _HomeScreenState {
         await _copyUsefulLogs(provider);
         return;
       case _TopBarMenuAction.toggleDiagnostics:
-        setState(() {
+        _setStateSafe(() {
           _showDiagnostics = !_showDiagnostics;
         });
         return;

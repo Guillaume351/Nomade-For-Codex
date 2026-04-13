@@ -142,6 +142,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   bool _showDiagnostics = false;
 
+  void _setStateSafe(VoidCallback fn) {
+    if (!mounted) {
+      return;
+    }
+    setState(fn);
+  }
+
   @override
   void dispose() {
     _promptController.dispose();

@@ -43,6 +43,11 @@ interface PendingServerRequest {
   codexTurnId: string;
 }
 
+interface ConversationThreadBinding {
+  conversationId: string;
+  threadId: string;
+}
+
 export interface CodexThreadSummary {
   threadId: string;
   title: string;
@@ -403,6 +408,75 @@ export class ConversationManager {
       rateLimitsByLimitId: rateLimitSnapshot?.rateLimitsByLimitId ?? null,
       defaults
     };
+  }
+
+  async syncThreads(params: { bindings: ConversationThreadBinding[] }): Promise<void> {
+    await this.codexClient.start();
+
+    const normalizedBindings: ConversationThreadBinding[] = [];
+    const desiredThreadIds = new Set<string>();
+    const desiredConversationIds = new Set<string>();
+
+    for (const binding of params.bindings) {
+      const conversationId = binding.conversationId.trim();
+      const threadId = binding.threadId.trim();
+      if (!conversationId || !threadId) {
+        continue;
+      }
+      if (desiredThreadIds.has(threadId) || desiredConversationIds.has(conversationId)) {
+        continue;
+      }
+      desiredThreadIds.add(threadId);
+      desiredConversationIds.add(conversationId);
+      normalizedBindings.push({ conversationId, threadId });
+    }
+
+    const staleConversationIds: string[] = [];
+    for (const conversationId of this.threadByConversation.keys()) {
+      if (!desiredConversationIds.has(conversationId)) {
+        staleConversationIds.push(conversationId);
+      }
+    }
+    for (const conversationId of staleConversationIds) {
+      this.threadByConversation.delete(conversationId);
+    }
+    for (const binding of normalizedBindings) {
+      this.threadByConversation.set(binding.conversationId, binding.threadId);
+    }
+
+    const loadedThreadIds = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const page = await this.codexClient.threadLoadedList({
+        limit: 200,
+        cursor
+      });
+      for (const threadId of page.data) {
+        loadedThreadIds.add(threadId);
+      }
+      cursor = page.nextCursor;
+    } while (cursor);
+
+    const unsubscribeOps: Promise<unknown>[] = [];
+    for (const loadedThreadId of loadedThreadIds) {
+      if (desiredThreadIds.has(loadedThreadId)) {
+        continue;
+      }
+      unsubscribeOps.push(
+        this.codexClient.threadUnsubscribe({ threadId: loadedThreadId }).catch(() => undefined)
+      );
+    }
+    if (unsubscribeOps.length > 0) {
+      await Promise.all(unsubscribeOps);
+    }
+
+    for (const binding of normalizedBindings) {
+      try {
+        await this.codexClient.threadResume({ threadId: binding.threadId });
+      } catch {
+        // Keep the binding in memory; the server remains source of truth and can refresh it on the next sync cycle.
+      }
+    }
   }
 
   close(): void {
