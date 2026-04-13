@@ -657,16 +657,17 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                       ),
                     ],
                     child: Container(
-                      width: 36,
-                      height: 36,
+                      width: 32,
+                      height: 32,
                       alignment: Alignment.center,
                       decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(10),
+                        borderRadius: BorderRadius.circular(9),
                         color: scheme.surfaceContainerHighest
                             .withValues(alpha: 0.66),
                       ),
                       child: Icon(
                         Icons.add_rounded,
+                        size: 20,
                         color: scheme.onSurfaceVariant,
                       ),
                     ),
