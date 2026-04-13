@@ -1357,6 +1357,26 @@ export class Repositories {
     return counts;
   }
 
+  async listConversationHasActiveTurns(conversationIds: string[]): Promise<Map<string, boolean>> {
+    if (conversationIds.length === 0) {
+      return new Map();
+    }
+    const result = await this.pool.query<{ conversation_id: string; has_active: boolean }>(
+      `SELECT
+         conversation_id,
+         BOOL_OR(status IN ('queued', 'running')) AS has_active
+       FROM conversation_turns
+       WHERE conversation_id = ANY($1::text[])
+       GROUP BY conversation_id`,
+      [conversationIds]
+    );
+    const activity = new Map<string, boolean>();
+    for (const row of result.rows) {
+      activity.set(row.conversation_id, row.has_active === true);
+    }
+    return activity;
+  }
+
   async createConversationTurn(params: {
     conversationId: string;
     prompt: string;

@@ -455,6 +455,17 @@ export class WsHub {
   private readonly pendingThreadRead = new Map<string, PendingThreadRead>();
   private readonly pendingCodexOptions = new Map<string, PendingCodexOptions>();
 
+  private isTurnForeignKeyRace(error: unknown): boolean {
+    if (!error || typeof error !== "object") {
+      return false;
+    }
+    const pgError = error as { code?: string; constraint?: string };
+    return (
+      pgError.code === "23503" &&
+      pgError.constraint === "conversation_items_turn_id_fkey"
+    );
+  }
+
   constructor(
     private readonly auth: AuthService,
     private readonly repositories: Repositories,
@@ -1197,12 +1208,23 @@ export class WsHub {
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
 
       if (turnId && itemId) {
-        void this.repositories.upsertConversationItem({
-          turnId,
-          itemId,
-          itemType,
-          payload
-        });
+        void this.repositories
+          .upsertConversationItem({
+            turnId,
+            itemId,
+            itemType,
+            payload
+          })
+          .catch((error) => {
+            if (this.isTurnForeignKeyRace(error)) {
+              return;
+            }
+            console.warn("[ws-hub] conversation.item.started persist failed", {
+              turnId,
+              itemId,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          });
       }
       this.broadcastToUser(userId, msg);
       return;
@@ -1221,12 +1243,23 @@ export class WsHub {
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
 
       if (turnId && itemId) {
-        void this.repositories.upsertConversationItem({
-          turnId,
-          itemId,
-          itemType,
-          payload
-        });
+        void this.repositories
+          .upsertConversationItem({
+            turnId,
+            itemId,
+            itemType,
+            payload
+          })
+          .catch((error) => {
+            if (this.isTurnForeignKeyRace(error)) {
+              return;
+            }
+            console.warn("[ws-hub] conversation.item.completed persist failed", {
+              turnId,
+              itemId,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          });
       }
       this.broadcastToUser(userId, msg);
       return;

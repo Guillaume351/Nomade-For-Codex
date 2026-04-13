@@ -1517,6 +1517,8 @@ export const createServer = async (): Promise<http.Server> => {
   const codexAutoSyncBackoffUntil = new Map<string, number>();
   const codexAutoSyncCooldownMs = 15_000;
   const codexAutoSyncAuthFailureBackoffMs = 5 * 60_000;
+  const codexAutoSyncActiveTurnProtectionMs = 5 * 60_000;
+  const codexAutoSyncStaleRunningReconcileMs = 90_000;
   const codexAutoSyncThreadLimit = 500;
   const codexAutoSyncThreadReadTimeoutMs = 45_000;
   const isCodexAuthFailure = (value: unknown): boolean => {
@@ -1634,6 +1636,7 @@ export const createServer = async (): Promise<http.Server> => {
 
     const existingConversationIds = Array.from(conversationByThreadId.values(), (entry) => entry.id);
     const turnCountByConversationId = await repositories.listConversationTurnCounts(existingConversationIds);
+    const hasActiveTurnByConversationId = await repositories.listConversationHasActiveTurns(existingConversationIds);
 
     let importedWorkspaces = 0;
     let importedConversations = 0;
@@ -1690,6 +1693,7 @@ export const createServer = async (): Promise<http.Server> => {
         };
         conversationByThreadId.set(thread.threadId, conversationMeta);
         turnCountByConversationId.set(conversation.id, 0);
+        hasActiveTurnByConversationId.set(conversation.id, false);
         conversationId = conversation.id;
         createdConversation = true;
         importedConversations += 1;
@@ -1704,9 +1708,23 @@ export const createServer = async (): Promise<http.Server> => {
       const conversationUpdatedAtMs = conversationMeta?.updatedAtMs ?? 0;
       const threadUpdatedAtMs = normalizeCodexTimestampMs(thread.updatedAt);
       const threadAppearsNewer = threadUpdatedAtMs > conversationUpdatedAtMs + 1_000;
-      const conversationLooksActive =
-        conversationMeta?.status === "running" || conversationMeta?.status === "queued";
-      const shouldHydrate = createdConversation || existingTurnCount === 0 || threadAppearsNewer || conversationLooksActive;
+      const conversationHasActiveTurn = hasActiveTurnByConversationId.get(conversationId) ?? false;
+      const conversationAgeMs = Math.max(0, Date.now() - conversationUpdatedAtMs);
+      const protectActiveConversation =
+        !createdConversation &&
+        conversationHasActiveTurn &&
+        conversationAgeMs < codexAutoSyncActiveTurnProtectionMs;
+      if (protectActiveConversation) {
+        hydrationSkipped += 1;
+        continue;
+      }
+
+      const conversationLooksStaleRunning =
+        (conversationMeta?.status === "running" || conversationMeta?.status === "queued") &&
+        !conversationHasActiveTurn &&
+        conversationAgeMs >= codexAutoSyncStaleRunningReconcileMs;
+      const shouldHydrate =
+        createdConversation || existingTurnCount === 0 || threadAppearsNewer || conversationLooksStaleRunning;
       if (!shouldHydrate) {
         hydrationSkipped += 1;
         continue;
@@ -1804,6 +1822,7 @@ export const createServer = async (): Promise<http.Server> => {
                 : "idle";
         await repositories.updateConversationStatus(conversationId, conversationStatus);
         turnCountByConversationId.set(conversationId, threadDetail.turns.length);
+        hasActiveTurnByConversationId.set(conversationId, conversationStatus === "running");
         conversationByThreadId.set(thread.threadId, {
           id: conversationId,
           updatedAtMs: Date.now(),
