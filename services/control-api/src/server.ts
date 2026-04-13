@@ -1526,14 +1526,15 @@ export const createServer = async (): Promise<http.Server> => {
       }
     }
 
-    const conversationByThreadId = new Map<string, { id: string; updatedAtMs: number }>();
+    const conversationByThreadId = new Map<string, { id: string; updatedAtMs: number; status: string }>();
     for (const workspace of workspaceByPath.values()) {
       const conversations = await repositories.listConversations(params.userId, workspace.id);
       for (const conversation of conversations) {
         if (conversation.codex_thread_id) {
           conversationByThreadId.set(conversation.codex_thread_id, {
             id: conversation.id,
-            updatedAtMs: conversation.updated_at.getTime()
+            updatedAtMs: conversation.updated_at.getTime(),
+            status: conversation.status
           });
         }
       }
@@ -1592,7 +1593,8 @@ export const createServer = async (): Promise<http.Server> => {
 
         conversationMeta = {
           id: conversation.id,
-          updatedAtMs: conversation.updated_at.getTime()
+          updatedAtMs: conversation.updated_at.getTime(),
+          status: "idle"
         };
         conversationByThreadId.set(thread.threadId, conversationMeta);
         turnCountByConversationId.set(conversation.id, 0);
@@ -1610,7 +1612,9 @@ export const createServer = async (): Promise<http.Server> => {
       const conversationUpdatedAtMs = conversationMeta?.updatedAtMs ?? 0;
       const threadUpdatedAtMs = Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0;
       const threadAppearsNewer = threadUpdatedAtMs > conversationUpdatedAtMs + 1_000;
-      const shouldHydrate = createdConversation || existingTurnCount === 0 || threadAppearsNewer;
+      const conversationLooksActive =
+        conversationMeta?.status === "running" || conversationMeta?.status === "queued";
+      const shouldHydrate = createdConversation || existingTurnCount === 0 || threadAppearsNewer || conversationLooksActive;
       if (!shouldHydrate) {
         hydrationSkipped += 1;
         continue;
@@ -1710,7 +1714,8 @@ export const createServer = async (): Promise<http.Server> => {
         turnCountByConversationId.set(conversationId, threadDetail.turns.length);
         conversationByThreadId.set(thread.threadId, {
           id: conversationId,
-          updatedAtMs: Date.now()
+          updatedAtMs: Date.now(),
+          status: conversationStatus
         });
         hydratedOrRepaired += 1;
       } catch (error) {
