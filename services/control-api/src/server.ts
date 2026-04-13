@@ -1591,14 +1591,91 @@ export const createServer = async (): Promise<http.Server> => {
     });
   };
 
+  const hydrateConversationFromCodexThread = async (params: {
+    userId: string;
+    agentId: string;
+    conversationId: string;
+    threadId: string;
+    timeoutMs: number;
+  }): Promise<{
+    turnCount: number;
+    conversationStatus: "running" | "idle" | "interrupted" | "failed";
+  }> => {
+    wsHub.rememberConversationOwner(params.conversationId, params.userId, params.agentId);
+    const threadDetail = await wsHub.readCodexThreadThroughAgent({
+      agentId: params.agentId,
+      threadId: params.threadId,
+      conversationId: params.conversationId,
+      timeoutMs: Math.max(5_000, Math.min(params.timeoutMs, 120_000))
+    });
+
+    await repositories.deleteConversationTurns(params.conversationId);
+    let lastTurnStatus: "running" | "completed" | "interrupted" | "failed" | undefined;
+    for (const importedTurn of threadDetail.turns) {
+      const createdTurn = await repositories.createConversationTurn({
+        conversationId: params.conversationId,
+        prompt: importedTurn.userPrompt ?? "",
+        deliveryPolicy: "immediate"
+      });
+      const codexTurnId = importedTurn.turnId?.trim() ?? "";
+      if (codexTurnId.length > 0) {
+        await repositories.markConversationTurnStarted({
+          turnId: createdTurn.id,
+          codexTurnId
+        });
+      }
+      const importedItems = Array.isArray(importedTurn.items) ? importedTurn.items : [];
+      for (let itemIndex = 0; itemIndex < importedItems.length; itemIndex += 1) {
+        const item = importedItems[itemIndex]!;
+        const itemId = item.itemId?.trim() || `item-${itemIndex + 1}`;
+        const itemType = item.itemType?.trim() || "unknown";
+        const payload = item.payload && typeof item.payload === "object" ? item.payload : { value: item.payload };
+        await repositories.upsertConversationItem({
+          turnId: createdTurn.id,
+          itemId,
+          itemType,
+          payload
+        });
+      }
+      if (
+        importedTurn.status === "completed" ||
+        importedTurn.status === "interrupted" ||
+        importedTurn.status === "failed"
+      ) {
+        await repositories.completeConversationTurn({
+          turnId: createdTurn.id,
+          status: importedTurn.status,
+          error: importedTurn.error
+        });
+      }
+      lastTurnStatus = importedTurn.status;
+    }
+
+    const conversationStatus =
+      lastTurnStatus === "running"
+        ? "running"
+        : lastTurnStatus === "interrupted"
+          ? "interrupted"
+          : lastTurnStatus === "failed"
+            ? "failed"
+            : "idle";
+    await repositories.updateConversationStatus(params.conversationId, conversationStatus);
+    return {
+      turnCount: threadDetail.turns.length,
+      conversationStatus
+    };
+  };
+
   const runCodexThreadSync = async (params: {
     userId: string;
     agentId: string;
     limit: number;
     threadReadTimeoutMs: number;
     emitRealtimeUpdate?: boolean;
+    hydrateThreads?: boolean;
   }): Promise<CodexThreadSyncSummary> => {
     const threadReadTimeoutMs = Math.max(5_000, Math.min(params.threadReadTimeoutMs, 120_000));
+    const shouldHydrateThreads = params.hydrateThreads !== false;
     let threads: Array<{
       threadId: string;
       title: string;
@@ -1635,8 +1712,12 @@ export const createServer = async (): Promise<http.Server> => {
     }
 
     const existingConversationIds = Array.from(conversationByThreadId.values(), (entry) => entry.id);
-    const turnCountByConversationId = await repositories.listConversationTurnCounts(existingConversationIds);
-    const hasActiveTurnByConversationId = await repositories.listConversationHasActiveTurns(existingConversationIds);
+    const turnCountByConversationId = shouldHydrateThreads
+      ? await repositories.listConversationTurnCounts(existingConversationIds)
+      : new Map<string, number>();
+    const hasActiveTurnByConversationId = shouldHydrateThreads
+      ? await repositories.listConversationHasActiveTurns(existingConversationIds)
+      : new Map<string, boolean>();
 
     let importedWorkspaces = 0;
     let importedConversations = 0;
@@ -1692,8 +1773,10 @@ export const createServer = async (): Promise<http.Server> => {
           status: "idle"
         };
         conversationByThreadId.set(thread.threadId, conversationMeta);
-        turnCountByConversationId.set(conversation.id, 0);
-        hasActiveTurnByConversationId.set(conversation.id, false);
+        if (shouldHydrateThreads) {
+          turnCountByConversationId.set(conversation.id, 0);
+          hasActiveTurnByConversationId.set(conversation.id, false);
+        }
         conversationId = conversation.id;
         createdConversation = true;
         importedConversations += 1;
@@ -1701,6 +1784,11 @@ export const createServer = async (): Promise<http.Server> => {
 
       if (!conversationId) {
         failedHydrations += 1;
+        continue;
+      }
+
+      if (!shouldHydrateThreads) {
+        hydrationSkipped += 1;
         continue;
       }
 
@@ -1733,105 +1821,31 @@ export const createServer = async (): Promise<http.Server> => {
       wsHub.rememberConversationOwner(conversationId, params.userId, params.agentId);
       hydrationAttempts += 1;
 
-      let threadDetail:
-        | {
-            turns: Array<{
-              turnId: string;
-              status: "running" | "completed" | "interrupted" | "failed";
-              error?: string;
-              userPrompt: string;
-              items: Array<{
-                itemId: string;
-                itemType: string;
-                payload: Record<string, unknown>;
-              }>;
-            }>;
-          }
-        | null = null;
       try {
-        threadDetail = await wsHub.readCodexThreadThroughAgent({
+        const hydrationResult = await hydrateConversationFromCodexThread({
+          userId: params.userId,
           agentId: params.agentId,
-          threadId: thread.threadId,
           conversationId,
+          threadId: thread.threadId,
           timeoutMs: threadReadTimeoutMs
         });
-      } catch (error) {
-        failedHydrations += 1;
-        const message = error instanceof Error ? error.message : "thread_read_failed";
-        if (message === "thread_read_timeout") {
-          threadReadTimeouts += 1;
-        }
-        console.warn("[control-api] codex thread read failed", {
+        turnCountByConversationId.set(conversationId, hydrationResult.turnCount);
+        hasActiveTurnByConversationId.set(
           conversationId,
-          threadId: thread.threadId,
-          error: message
-        });
-        continue;
-      }
-
-      try {
-        await repositories.deleteConversationTurns(conversationId);
-        let lastTurnStatus: "running" | "completed" | "interrupted" | "failed" | undefined;
-        for (const importedTurn of threadDetail.turns) {
-          const createdTurn = await repositories.createConversationTurn({
-            conversationId,
-            prompt: importedTurn.userPrompt ?? "",
-            deliveryPolicy: "immediate"
-          });
-          const codexTurnId = importedTurn.turnId?.trim() ?? "";
-          if (codexTurnId.length > 0) {
-            await repositories.markConversationTurnStarted({
-              turnId: createdTurn.id,
-              codexTurnId
-            });
-          }
-          const importedItems = Array.isArray(importedTurn.items) ? importedTurn.items : [];
-          for (let itemIndex = 0; itemIndex < importedItems.length; itemIndex += 1) {
-            const item = importedItems[itemIndex]!;
-            const itemId = item.itemId?.trim() || `item-${itemIndex + 1}`;
-            const itemType = item.itemType?.trim() || "unknown";
-            const payload = item.payload && typeof item.payload === "object" ? item.payload : { value: item.payload };
-            await repositories.upsertConversationItem({
-              turnId: createdTurn.id,
-              itemId,
-              itemType,
-              payload
-            });
-          }
-          if (
-            importedTurn.status === "completed" ||
-            importedTurn.status === "interrupted" ||
-            importedTurn.status === "failed"
-          ) {
-            await repositories.completeConversationTurn({
-              turnId: createdTurn.id,
-              status: importedTurn.status,
-              error: importedTurn.error
-            });
-          }
-          lastTurnStatus = importedTurn.status;
-        }
-
-        const conversationStatus =
-          lastTurnStatus === "running"
-            ? "running"
-            : lastTurnStatus === "interrupted"
-              ? "interrupted"
-              : lastTurnStatus === "failed"
-                ? "failed"
-                : "idle";
-        await repositories.updateConversationStatus(conversationId, conversationStatus);
-        turnCountByConversationId.set(conversationId, threadDetail.turns.length);
-        hasActiveTurnByConversationId.set(conversationId, conversationStatus === "running");
+          hydrationResult.conversationStatus === "running"
+        );
         conversationByThreadId.set(thread.threadId, {
           id: conversationId,
           updatedAtMs: Date.now(),
-          status: conversationStatus
+          status: hydrationResult.conversationStatus
         });
         hydratedOrRepaired += 1;
       } catch (error) {
         failedHydrations += 1;
-        const message = error instanceof Error ? error.message : "thread_hydration_failed";
+        const message = error instanceof Error ? error.message : "conversation_hydration_failed";
+        if (message === "thread_read_timeout") {
+          threadReadTimeouts += 1;
+        }
         console.warn("[control-api] codex thread hydration failed", {
           conversationId,
           threadId: thread.threadId,
@@ -1908,7 +1922,8 @@ export const createServer = async (): Promise<http.Server> => {
           agentId: params.agentId,
           limit: codexAutoSyncThreadLimit,
           threadReadTimeoutMs: codexAutoSyncThreadReadTimeoutMs,
-          emitRealtimeUpdate: true
+          emitRealtimeUpdate: true,
+          hydrateThreads: false
         });
         codexAutoSyncBackoffUntil.delete(lockKey);
       } catch (error) {
@@ -3524,7 +3539,8 @@ export const createServer = async (): Promise<http.Server> => {
         agentId,
         limit: parsed.data.limit ?? 500,
         threadReadTimeoutMs: parsed.data.threadReadTimeoutMs ?? 45_000,
-        emitRealtimeUpdate: true
+        emitRealtimeUpdate: true,
+        hydrateThreads: true
       });
       res.json({
         ...summary,
@@ -3865,10 +3881,50 @@ export const createServer = async (): Promise<http.Server> => {
         hydration.reason = message;
         console.warn("[control-api] failed to purge legacy turns", conversation.id, message);
       }
-    } else if (forceHydrate) {
+    } else if (forceHydrate && !conversation.codex_thread_id) {
       hydration.attempted = true;
-      hydration.repaired = true;
-      hydration.reason = "strict_e2e_resync_noop";
+      hydration.deferred = true;
+      hydration.reason = "conversation_thread_missing";
+    }
+
+    const canHydrateOnDemand = !needsRepair || hydration.repaired;
+    const shouldHydrateOnDemand =
+      canHydrateOnDemand &&
+      Boolean(conversation.codex_thread_id) &&
+      (forceHydrate || turns.length === 0);
+
+    if (shouldHydrateOnDemand && conversation.codex_thread_id) {
+      hydration.attempted = true;
+      const conversationLooksActive = conversation.status === "running" || conversation.status === "queued";
+      if (conversationLooksActive && !forceHydrate) {
+        hydration.deferred = true;
+        hydration.reason = "conversation_active";
+      } else {
+        try {
+          await hydrateConversationFromCodexThread({
+            userId: req.userId!,
+            agentId: conversation.agent_id,
+            conversationId: conversation.id,
+            threadId: conversation.codex_thread_id,
+            timeoutMs: codexAutoSyncThreadReadTimeoutMs
+          });
+          turns = await repositories.listConversationTurns(conversation.id);
+          hydration.repaired = true;
+          hydration.deferred = false;
+          hydration.reason = forceHydrate
+            ? "conversation_hydrated_on_demand_forced"
+            : "conversation_hydrated_on_demand";
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "conversation_hydration_failed";
+          hydration.deferred = true;
+          hydration.reason = message;
+          console.warn("[control-api] on-demand conversation hydration failed", {
+            conversationId: conversation.id,
+            threadId: conversation.codex_thread_id,
+            error: message
+          });
+        }
+      }
     }
 
     for (const turn of turns) {
@@ -3898,18 +3954,39 @@ export const createServer = async (): Promise<http.Server> => {
       ciphertext: z.string().min(1),
       sig: z.string().min(20)
     });
-    const inputItemSchema = z.discriminatedUnion("type", [
+    const textElementSchema = z.object({
+      byteRange: z
+        .object({
+          start: z.number().int().nonnegative(),
+          end: z.number().int().nonnegative()
+        })
+        .optional(),
+      start: z.number().int().nonnegative().optional(),
+      end: z.number().int().nonnegative().optional(),
+      placeholder: z.string().nullable().optional()
+    });
+    const inputItemSchema = z.union([
       z.object({
         type: z.literal("text"),
-        text: z.string().min(1)
+        text: z.string().min(1),
+        text_elements: z.array(textElementSchema).optional(),
+        textElements: z.array(textElementSchema).optional()
       }),
       z.object({
         type: z.literal("image"),
-        imageUrl: z.string().min(1),
+        imageUrl: z.string().min(1).optional(),
+        image_url: z.string().min(1).optional(),
+        url: z.string().min(1).optional(),
         detail: z.string().min(1).optional()
+      }).refine((item) => Boolean(item.imageUrl || item.image_url || item.url), {
+        message: "image input requires one of imageUrl, image_url, or url"
       }),
       z.object({
         type: z.literal("local_image"),
+        path: z.string().min(1)
+      }),
+      z.object({
+        type: z.literal("localImage"),
         path: z.string().min(1)
       }),
       z.object({

@@ -99,6 +99,9 @@ export interface CodexRuntimeOptions {
 const codexApprovalPolicies: CodexApprovalPolicy[] = ["untrusted", "on-failure", "on-request", "never"];
 const codexSandboxModes: CodexSandboxMode[] = ["read-only", "workspace-write", "danger-full-access"];
 const codexReasoningEfforts: CodexReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+const syncThreadsSnapshotDedupMs = 10_000;
+const syncThreadsAuthBackoffMs = 30_000;
+const syncThreadsTransientBackoffMs = 5_000;
 
 const buildTurnKey = (threadId: string, codexTurnId: string): string => `${threadId}:${codexTurnId}`;
 const normalizeCodexTimestampMs = (value: number): number => {
@@ -118,9 +121,13 @@ export class ConversationManager {
   private readonly turnByCodex = new Map<string, TurnContext>();
   private readonly codexByTurn = new Map<string, { threadId: string; codexTurnId: string }>();
   private readonly pendingTurnByThread = new Map<string, TurnContext>();
+  private readonly activeTurnByThread = new Map<string, TurnContext>();
+  private readonly terminalTurnIds = new Set<string>();
   private readonly pendingServerRequests = new Map<string, PendingServerRequest>();
   private lastSyncSignature = "";
   private lastSyncAt = 0;
+  private syncAuthBackoffUntil = 0;
+  private syncTransientBackoffUntil = 0;
 
   constructor(private readonly emit: (payload: Record<string, unknown>) => void) {
     this.codexClient = new CodexAppServerClient(
@@ -222,10 +229,11 @@ export class ConversationManager {
           : error instanceof Error
             ? error.message
             : "turn_start_failed";
-      this.emit({
-        type: "conversation.turn.completed",
-        conversationId: params.conversationId,
-        turnId: params.turnId,
+      this.emitTurnCompleted({
+        context: {
+          conversationId: params.conversationId,
+          turnId: params.turnId
+        },
         threadId: currentThreadId,
         codexTurnId: "",
         status: "failed",
@@ -470,50 +478,76 @@ export class ConversationManager {
     const now = Date.now();
     // Control API can send the same binding snapshot repeatedly in short bursts.
     // Skip expensive Codex sync work when the snapshot is unchanged.
-    if (syncSignature === this.lastSyncSignature && now - this.lastSyncAt < 10_000) {
+    if (syncSignature === this.lastSyncSignature && now - this.lastSyncAt < syncThreadsSnapshotDedupMs) {
       return;
     }
 
-    await this.codexClient.start();
-
-    const loadedThreadIds = new Set<string>();
-    let cursor: string | null = null;
-    do {
-      const page = await this.codexClient.threadLoadedList({
-        limit: 200,
-        cursor
-      });
-      for (const threadId of page.data) {
-        loadedThreadIds.add(threadId);
-      }
-      cursor = page.nextCursor;
-    } while (cursor);
-
-    const unsubscribeOps: Promise<unknown>[] = [];
-    for (const loadedThreadId of loadedThreadIds) {
-      if (desiredThreadIds.has(loadedThreadId)) {
-        continue;
-      }
-      unsubscribeOps.push(
-        this.codexClient.threadUnsubscribe({ threadId: loadedThreadId }).catch(() => undefined)
-      );
-    }
-    if (unsubscribeOps.length > 0) {
-      await Promise.all(unsubscribeOps);
+    if (now < this.syncAuthBackoffUntil || now < this.syncTransientBackoffUntil) {
+      this.lastSyncSignature = syncSignature;
+      this.lastSyncAt = now;
+      return;
     }
 
-    for (const binding of normalizedBindings) {
-      if (loadedThreadIds.has(binding.threadId)) {
-        continue;
+    try {
+      await this.codexClient.start();
+
+      const loadedThreadIds = new Set<string>();
+      let cursor: string | null = null;
+      do {
+        const page = await this.codexClient.threadLoadedList({
+          limit: 200,
+          cursor
+        });
+        for (const threadId of page.data) {
+          loadedThreadIds.add(threadId);
+        }
+        cursor = page.nextCursor;
+      } while (cursor);
+
+      const unsubscribeOps: Promise<unknown>[] = [];
+      for (const loadedThreadId of loadedThreadIds) {
+        if (desiredThreadIds.has(loadedThreadId)) {
+          continue;
+        }
+        unsubscribeOps.push(
+          this.codexClient.threadUnsubscribe({ threadId: loadedThreadId }).catch(() => undefined)
+        );
       }
-      try {
-        await this.codexClient.threadResume({ threadId: binding.threadId });
-      } catch {
-        // Keep the binding in memory; the server remains source of truth and can refresh it on the next sync cycle.
+      if (unsubscribeOps.length > 0) {
+        await Promise.all(unsubscribeOps);
       }
+
+      for (const binding of normalizedBindings) {
+        if (loadedThreadIds.has(binding.threadId)) {
+          continue;
+        }
+        try {
+          await this.codexClient.threadResume({ threadId: binding.threadId });
+        } catch {
+          // Keep the binding in memory; the server remains source of truth and can refresh it on the next sync cycle.
+        }
+      }
+      this.syncAuthBackoffUntil = 0;
+      this.syncTransientBackoffUntil = 0;
+      this.lastSyncSignature = syncSignature;
+      this.lastSyncAt = now;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failedAt = Date.now();
+      if (message === "codex_auth_forbidden") {
+        this.syncAuthBackoffUntil = failedAt + syncThreadsAuthBackoffMs;
+        this.lastSyncSignature = syncSignature;
+        this.lastSyncAt = failedAt;
+        return;
+      }
+      if (message === "codex_server_overloaded_backoff") {
+        this.syncTransientBackoffUntil = failedAt + syncThreadsTransientBackoffMs;
+        this.lastSyncSignature = syncSignature;
+        this.lastSyncAt = failedAt;
+        return;
+      }
+      throw error;
     }
-    this.lastSyncSignature = syncSignature;
-    this.lastSyncAt = now;
   }
 
   close(): void {
@@ -521,6 +555,8 @@ export class ConversationManager {
       pending.reject(new Error(`server_request_cancelled:${requestId}`));
     }
     this.pendingServerRequests.clear();
+    this.activeTurnByThread.clear();
+    this.terminalTurnIds.clear();
     this.codexClient.close();
   }
 
@@ -609,9 +645,13 @@ export class ConversationManager {
 
     const threadId = typeof params.threadId === "string" ? params.threadId : "";
     const codexTurnId = this.extractTurnId(method, params);
-    let context = threadId && codexTurnId ? this.turnByCodex.get(buildTurnKey(threadId, codexTurnId)) : undefined;
+    let context =
+      threadId && codexTurnId ? this.turnByCodex.get(buildTurnKey(threadId, codexTurnId)) : undefined;
     if (!context && threadId) {
       context = this.pendingTurnByThread.get(threadId);
+    }
+    if (!context && threadId) {
+      context = this.activeTurnByThread.get(threadId);
     }
     const mappedCodex = context ? this.codexByTurn.get(context.turnId) : undefined;
     const effectiveCodexTurnId = codexTurnId || mappedCodex?.codexTurnId || "";
@@ -680,6 +720,15 @@ export class ConversationManager {
         status,
         thread: threadPayload
       });
+      if (context && (status === "completed" || status === "interrupted" || status === "failed")) {
+        this.emitTurnCompleted({
+          context,
+          threadId,
+          codexTurnId: effectiveCodexTurnId,
+          status,
+          error: status === "failed" ? "thread_status_failed" : undefined
+        });
+      }
       return;
     }
 
@@ -862,17 +911,13 @@ export class ConversationManager {
       const errorValue = turn.error as Record<string, unknown> | undefined;
       const errorMessage =
         typeof errorValue?.message === "string" ? errorValue.message : status === "failed" ? "turn_failed" : undefined;
-
-      this.emit({
-        type: "conversation.turn.completed",
-        conversationId: context.conversationId,
-        turnId: context.turnId,
+      this.emitTurnCompleted({
+        context,
         threadId,
         codexTurnId: effectiveCodexTurnId,
         status,
         error: errorMessage
       });
-      this.pendingTurnByThread.delete(threadId);
       return;
     }
   }
@@ -881,6 +926,35 @@ export class ConversationManager {
     this.pendingTurnByThread.delete(threadId);
     this.turnByCodex.set(buildTurnKey(threadId, codexTurnId), context);
     this.codexByTurn.set(context.turnId, { threadId, codexTurnId });
+    this.activeTurnByThread.set(threadId, context);
+    this.terminalTurnIds.delete(context.turnId);
+  }
+
+  private emitTurnCompleted(params: {
+    context: TurnContext;
+    threadId: string;
+    codexTurnId: string;
+    status: "completed" | "interrupted" | "failed";
+    error?: string;
+  }): void {
+    if (this.terminalTurnIds.has(params.context.turnId)) {
+      return;
+    }
+    this.terminalTurnIds.add(params.context.turnId);
+    this.emit({
+      type: "conversation.turn.completed",
+      conversationId: params.context.conversationId,
+      turnId: params.context.turnId,
+      threadId: params.threadId,
+      codexTurnId: params.codexTurnId,
+      status: params.status,
+      error: params.error
+    });
+    this.pendingTurnByThread.delete(params.threadId);
+    const active = this.activeTurnByThread.get(params.threadId);
+    if (active && active.turnId === params.context.turnId) {
+      this.activeTurnByThread.delete(params.threadId);
+    }
   }
 
   private findConversationIdByThread(threadId: string): string {
@@ -895,9 +969,9 @@ export class ConversationManager {
   private extractTurnId(method: string, params: Record<string, unknown>): string {
     if (method === "turn/started" || method === "turn/completed") {
       const turn = (params.turn as Record<string, unknown>) ?? {};
-      return String(turn.id ?? "");
+      return String(turn.id ?? params.turnId ?? params.turn_id ?? "");
     }
-    return String(params.turnId ?? "");
+    return String(params.turnId ?? params.turn_id ?? "");
   }
 
   private extractUserPrompt(payload?: Record<string, unknown>): string {
@@ -914,12 +988,161 @@ export class ConversationManager {
         continue;
       }
       const entry = item as Record<string, unknown>;
-      const text = entry.text;
-      if (typeof text === "string" && text.trim().length > 0) {
-        parts.push(text.trim());
+      const type = typeof entry.type === "string" ? entry.type : "";
+      if (type === "text" || typeof entry.text === "string") {
+        const text = this.extractDisplayTextFromInputText(entry);
+        if (text.length > 0) {
+          parts.push(text);
+        }
+        continue;
+      }
+      if (type === "image") {
+        const imageUrl = this.firstNonEmptyString(entry.url, entry.imageUrl, entry.image_url);
+        if (imageUrl) {
+          parts.push(`[image] ${imageUrl}`);
+        }
+        continue;
+      }
+      if (type === "localImage" || type === "local_image") {
+        const path = this.firstNonEmptyString(entry.path);
+        if (path) {
+          parts.push(`[image] ${path}`);
+        }
+        continue;
+      }
+      if (type === "mention" || type === "skill") {
+        const path = this.firstNonEmptyString(entry.path);
+        const name = this.firstNonEmptyString(entry.name);
+        if (path) {
+          parts.push(type === "skill" ? `[skill] ${name ?? path}` : `[mention] ${name ?? path}`);
+        }
       }
     }
     return parts.join("\n\n");
+  }
+
+  private firstNonEmptyString(...values: unknown[]): string | null {
+    for (const value of values) {
+      if (typeof value !== "string") {
+        continue;
+      }
+      const trimmed = value.trim();
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+    }
+    return null;
+  }
+
+  private extractDisplayTextFromInputText(entry: Record<string, unknown>): string {
+    const rawText = this.firstNonEmptyString(entry.text);
+    if (!rawText) {
+      return "";
+    }
+    const textElementsRaw = Array.isArray(entry.text_elements)
+      ? entry.text_elements
+      : Array.isArray(entry.textElements)
+        ? entry.textElements
+        : [];
+    if (textElementsRaw.length === 0) {
+      return this.normalizeInlinePromptDirectives(rawText);
+    }
+
+    const normalizedElements = textElementsRaw
+      .filter((value): value is Record<string, unknown> => Boolean(value && typeof value === "object"))
+      .map((value) => {
+        const rangeRaw =
+          value.byteRange && typeof value.byteRange === "object"
+            ? (value.byteRange as Record<string, unknown>)
+            : {};
+        const start = Number(rangeRaw.start ?? value.start ?? -1);
+        const end = Number(rangeRaw.end ?? value.end ?? -1);
+        const placeholder = this.firstNonEmptyString(value.placeholder);
+        return {
+          start: Number.isFinite(start) ? Math.trunc(start) : -1,
+          end: Number.isFinite(end) ? Math.trunc(end) : -1,
+          placeholder
+        };
+      })
+      .filter((value) => value.start >= 0 && value.end > value.start)
+      .sort((a, b) => a.start - b.start);
+
+    if (normalizedElements.length === 0) {
+      return this.normalizeInlinePromptDirectives(rawText);
+    }
+
+    const buffer = Buffer.from(rawText, "utf8");
+    const rendered: string[] = [];
+    let cursor = 0;
+    for (const element of normalizedElements) {
+      if (element.start < cursor || element.start >= buffer.length || element.end > buffer.length) {
+        continue;
+      }
+      rendered.push(buffer.subarray(cursor, element.start).toString("utf8"));
+      const rawFragment = buffer.subarray(element.start, element.end).toString("utf8");
+      const replacement =
+        element.placeholder ?? this.renderInlineDirective(rawFragment) ?? rawFragment;
+      rendered.push(replacement);
+      cursor = element.end;
+    }
+    if (cursor < buffer.length) {
+      rendered.push(buffer.subarray(cursor).toString("utf8"));
+    }
+    return this.normalizeInlinePromptDirectives(rendered.join(""));
+  }
+
+  private normalizeInlinePromptDirectives(text: string): string {
+    return text
+      .replace(/::[a-zA-Z0-9_-]+\{[^{}]*\}/g, (directive) => this.renderInlineDirective(directive) ?? directive)
+      .trim();
+  }
+
+  private renderInlineDirective(directive: string): string | null {
+    const match = directive.trim().match(/^::([a-zA-Z0-9_-]+)\{([^{}]*)\}$/);
+    if (!match) {
+      return null;
+    }
+    const command = match[1]!;
+    const args = this.parseDirectiveArgs(match[2] ?? "");
+    const cwd = args.cwd;
+    const branch = args.branch;
+    if (command === "git-stage") {
+      return cwd ? `[git stage] ${cwd}` : "[git stage]";
+    }
+    if (command === "git-commit") {
+      return cwd ? `[git commit] ${cwd}` : "[git commit]";
+    }
+    if (command === "git-push") {
+      if (cwd && branch) {
+        return `[git push] ${cwd} (${branch})`;
+      }
+      if (cwd) {
+        return `[git push] ${cwd}`;
+      }
+      if (branch) {
+        return `[git push] ${branch}`;
+      }
+      return "[git push]";
+    }
+    if (Object.keys(args).length > 0) {
+      const details = Object.entries(args)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(", ");
+      return `[${command}] ${details}`;
+    }
+    return `[${command}]`;
+  }
+
+  private parseDirectiveArgs(rawArgs: string): Record<string, string> {
+    const values: Record<string, string> = {};
+    for (const match of rawArgs.matchAll(/([a-zA-Z0-9_]+)\s*=\s*"([^"]*)"/g)) {
+      const key = match[1]?.trim();
+      if (!key) {
+        continue;
+      }
+      values[key] = match[2] ?? "";
+    }
+    return values;
   }
 
   private normalizeThreadStatus(value: unknown): "running" | "completed" | "interrupted" | "failed" | "unknown" {
