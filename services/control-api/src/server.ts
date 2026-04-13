@@ -1230,6 +1230,69 @@ export const createServer = async (): Promise<http.Server> => {
     }
   };
 
+  const normalizeOptionalModel = (value: unknown): string | undefined => {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  };
+
+  const extractModelFromCollaborationMode = (
+    collaborationMode: Record<string, unknown> | undefined
+  ): string | undefined => {
+    if (!collaborationMode) {
+      return undefined;
+    }
+    const direct = normalizeOptionalModel(collaborationMode.model);
+    if (direct) {
+      return direct;
+    }
+    const modeMaskRaw = collaborationMode.modeMask;
+    if (!modeMaskRaw || typeof modeMaskRaw !== "object" || Array.isArray(modeMaskRaw)) {
+      return undefined;
+    }
+    const modeMask = modeMaskRaw as Record<string, unknown>;
+    return normalizeOptionalModel(modeMask.model);
+  };
+
+  const resolveModelForTurnStart = async (params: {
+    agentId: string;
+    cwd?: string;
+    model?: string;
+    collaborationMode?: Record<string, unknown>;
+  }): Promise<string | undefined> => {
+    const explicitModel = normalizeOptionalModel(params.model);
+    if (explicitModel) {
+      return explicitModel;
+    }
+
+    const modeModel = extractModelFromCollaborationMode(params.collaborationMode);
+    if (modeModel) {
+      return modeModel;
+    }
+
+    try {
+      const options = await wsHub.getCodexOptionsThroughAgent({
+        agentId: params.agentId,
+        cwd: params.cwd
+      });
+      const configured = normalizeOptionalModel(options.defaults.model);
+      if (configured) {
+        return configured;
+      }
+      const defaultOptionModel = normalizeOptionalModel(
+        options.models.find((entry) => entry.isDefault)?.model
+      );
+      if (defaultOptionModel) {
+        return defaultOptionModel;
+      }
+      return normalizeOptionalModel(options.models[0]?.model);
+    } catch {
+      return undefined;
+    }
+  };
+
   const dispatchDeferredTurnsForAgent = async (agentId: string): Promise<void> => {
     const claimed = await repositories.claimDeferredConversationTurns({
       agentId,
@@ -1262,12 +1325,15 @@ export const createServer = async (): Promise<http.Server> => {
         collaborationModeRaw && typeof collaborationModeRaw === "object" && !Array.isArray(collaborationModeRaw)
           ? (collaborationModeRaw as Record<string, unknown>)
           : undefined;
-      const model = typeof requestOptions.model === "string" && requestOptions.model.trim().length > 0
-        ? requestOptions.model.trim()
-        : undefined;
       const cwd = typeof requestOptions.cwd === "string" && requestOptions.cwd.trim().length > 0
         ? requestOptions.cwd.trim()
         : queued.workspacePath ?? undefined;
+      const model = await resolveModelForTurnStart({
+        agentId,
+        cwd,
+        model: typeof requestOptions.model === "string" ? requestOptions.model : undefined,
+        collaborationMode
+      });
       const approvalPolicy = typeof requestOptions.approvalPolicy === "string"
         ? requestOptions.approvalPolicy
         : undefined;
@@ -3865,6 +3931,24 @@ export const createServer = async (): Promise<http.Server> => {
 
     const workspace = await repositories.findWorkspaceById(req.userId!, conversation.workspace_id);
     const normalizedPrompt = parsed.data.prompt?.trim() ?? "";
+    const collaborationMode =
+      parsed.data.collaborationMode && typeof parsed.data.collaborationMode === "object"
+        ? (parsed.data.collaborationMode as Record<string, unknown>)
+        : undefined;
+    const resolvedModel = await resolveModelForTurnStart({
+      agentId: conversation.agent_id,
+      cwd: parsed.data.cwd ?? workspace?.path ?? undefined,
+      model: parsed.data.model,
+      collaborationMode
+    });
+    if (!resolvedModel) {
+      res.status(503).json({
+        error: "model_unavailable",
+        message:
+          "Unable to resolve a Codex model for this turn. Select a model in Turn options or refresh Codex options."
+      });
+      return;
+    }
     const deliveryPolicy: TurnDeliveryPolicy = parsed.data.deliveryPolicy ?? "immediate";
     if (deliveryPolicy === "defer_if_offline") {
       const enabled = await ensureEntitlementFeature({
@@ -3882,8 +3966,8 @@ export const createServer = async (): Promise<http.Server> => {
       prompt: userPrompt,
       deliveryPolicy,
       requestOptions: {
-        collaborationMode: parsed.data.collaborationMode,
-        model: parsed.data.model,
+        collaborationMode,
+        model: resolvedModel,
         cwd: parsed.data.cwd ?? workspace?.path ?? null,
         approvalPolicy: parsed.data.approvalPolicy,
         sandboxMode: parsed.data.sandboxMode,
@@ -3902,8 +3986,8 @@ export const createServer = async (): Promise<http.Server> => {
       prompt: normalizedPrompt.length > 0 ? normalizedPrompt : undefined,
       inputItems: parsed.data.inputItems,
       e2ePromptEnvelope: parsed.data.e2ePromptEnvelope,
-      collaborationMode: parsed.data.collaborationMode,
-      model: parsed.data.model,
+      collaborationMode,
+      model: resolvedModel,
       cwd: parsed.data.cwd ?? workspace?.path,
       approvalPolicy: parsed.data.approvalPolicy,
       sandboxMode: parsed.data.sandboxMode,

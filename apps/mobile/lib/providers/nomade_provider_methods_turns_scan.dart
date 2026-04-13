@@ -75,11 +75,16 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
       final modeMaskModel = NomadeCodexUtils.normalizeString(
         selectedMode['model'] ?? selectedModeMask['model'],
       );
+      final codexDefaultModel = codexModels.isEmpty
+          ? null
+          : NomadeCodexUtils.normalizeString(codexModels.first['model']);
       final modeMaskEffort = NomadeCodexUtils.normalizeReasoningEffort(
         selectedMode['reasoningEffort'] ?? selectedModeMask['reasoning_effort'],
       );
       final requestedModel =
-          NomadeCodexUtils.normalizeString(selectedModel) ?? modeMaskModel;
+          NomadeCodexUtils.normalizeString(selectedModel) ??
+              modeMaskModel ??
+              codexDefaultModel;
       final requestedEffort =
           NomadeCodexUtils.normalizeReasoningEffort(selectedEffort) ??
               modeMaskEffort;
