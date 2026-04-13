@@ -238,6 +238,32 @@ const defaultTurnStartCollaborationMode = (mode?: CodexModeKind): TurnStartColla
   };
 };
 
+const normalizeTurnStartSettings = (value: unknown): Record<string, unknown> | undefined => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+};
+
+const extractTurnStartModeParams = (value: unknown): {
+  mode?: CodexModeKind;
+  settings?: Record<string, unknown>;
+} => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const source = value as Record<string, unknown>;
+  const mode =
+    toModeKind(source.mode) ??
+    toModeKind(
+      source.modeMask && typeof source.modeMask === "object" && !Array.isArray(source.modeMask)
+        ? (source.modeMask as Record<string, unknown>).mode
+        : undefined
+    );
+  const settings = normalizeTurnStartSettings(source.settings);
+  return { mode, settings };
+};
+
 export const parseCodexCollaborationModeList = (rawModes: unknown): CodexCollaborationModeSummary[] => {
   const items = Array.isArray(rawModes) ? rawModes : [];
   const bySlug = new Map<string, CodexCollaborationModeSummary>();
@@ -468,11 +494,13 @@ export class CodexAppServerClient {
       model: params.model,
       cwd: params.cwd
     });
+    const turnStartMode = extractTurnStartModeParams(params.collaborationMode);
 
     const response = (await this.request("turn/start", {
       threadId: params.threadId,
       input: inputItems,
-      collaborationMode: params.collaborationMode,
+      mode: turnStartMode.mode,
+      settings: turnStartMode.settings,
       cwd: params.cwd,
       model,
       approvalPolicy: params.approvalPolicy ?? "never",
