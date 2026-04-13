@@ -226,4 +226,42 @@ describe("ConversationManager app-server mapping", () => {
 
     manager.close();
   });
+
+  it("coalesces repeated sync snapshots and skips resume for already-loaded threads", async () => {
+    const manager = new ConversationManager(() => undefined);
+    const anyManager = manager as unknown as Record<string, unknown>;
+    const calls = {
+      start: 0,
+      loadedList: 0,
+      resume: 0
+    };
+    anyManager["codexClient"] = {
+      start: async () => {
+        calls.start += 1;
+      },
+      threadLoadedList: async () => {
+        calls.loadedList += 1;
+        return { data: ["thread-1"], nextCursor: null };
+      },
+      threadUnsubscribe: async () => "notSubscribed",
+      threadResume: async () => {
+        calls.resume += 1;
+        return { thread: { id: "thread-1" } };
+      },
+      close: () => undefined
+    };
+
+    await manager.syncThreads({
+      bindings: [{ conversationId: "conversation-1", threadId: "thread-1" }]
+    });
+    await manager.syncThreads({
+      bindings: [{ conversationId: "conversation-1", threadId: "thread-1" }]
+    });
+
+    expect(calls.start).toBe(1);
+    expect(calls.loadedList).toBe(1);
+    expect(calls.resume).toBe(0);
+
+    manager.close();
+  });
 });

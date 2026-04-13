@@ -371,6 +371,8 @@ export class CodexAppServerClient {
   private readonly threadStartLock = new Map<string, Promise<string>>();
   private readonly resolvedModelByCwdKey = new Map<string, string>();
   private authBackoffUntil = 0;
+  private transientBackoffUntil = 0;
+  private transientBackoffMs = 0;
   private lastStderrLogLine = "";
   private lastStderrLogAt = 0;
 
@@ -387,6 +389,9 @@ export class CodexAppServerClient {
     }
     if (Date.now() < this.authBackoffUntil) {
       throw new Error("codex_auth_forbidden");
+    }
+    if (Date.now() < this.transientBackoffUntil) {
+      throw new Error("codex_server_overloaded_backoff");
     }
 
     const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
@@ -408,6 +413,9 @@ export class CodexAppServerClient {
         if (this.isCodexResponsesAuthForbidden(line)) {
           this.enterAuthBackoff("codex_auth_forbidden");
           continue;
+        }
+        if (this.isCodexTransientOverloadError(line)) {
+          this.enterTransientBackoff(line);
         }
         this.logStderrDeduped(line);
       }
@@ -436,6 +444,7 @@ export class CodexAppServerClient {
           experimentalApi: true
         }
       });
+      this.clearTransientBackoff();
     } catch (error) {
       this.close();
       throw error;
@@ -815,7 +824,11 @@ export class CodexAppServerClient {
 
     if (typeof idValue === "number" && Object.hasOwn(payload, "error")) {
       const error = payload.error as JsonRpcErrorShape | undefined;
-      this.rejectPending(idValue, new Error(error?.message ?? "jsonrpc_error"));
+      const message = error?.message ?? "jsonrpc_error";
+      if (this.isCodexTransientOverloadError(message)) {
+        this.enterTransientBackoff(message);
+      }
+      this.rejectPending(idValue, new Error(message));
       return;
     }
 
@@ -884,6 +897,7 @@ export class CodexAppServerClient {
     clearTimeout(pending.timeout);
     this.pending.delete(id);
     pending.resolve(result);
+    this.clearTransientBackoff();
   }
 
   private rejectPending(id: number, error: Error): void {
@@ -897,6 +911,9 @@ export class CodexAppServerClient {
   }
 
   private async request(method: string, params: unknown): Promise<unknown> {
+    if (Date.now() < this.transientBackoffUntil) {
+      throw new Error("codex_server_overloaded_backoff");
+    }
     if (!this.child) {
       throw new Error("codex_app_server_not_started");
     }
@@ -947,6 +964,31 @@ export class CodexAppServerClient {
       }
       this.child = null;
     }
+  }
+
+  private enterTransientBackoff(reason: string): void {
+    const nextBackoffMs = this.transientBackoffMs > 0 ? Math.min(this.transientBackoffMs * 2, 60_000) : 5_000;
+    this.transientBackoffMs = nextBackoffMs;
+    this.transientBackoffUntil = Date.now() + nextBackoffMs;
+    this.logStderrDeduped(
+      `[agent] codex transient backoff ${Math.round(nextBackoffMs / 1_000)}s due to: ${reason}`
+    );
+  }
+
+  private clearTransientBackoff(): void {
+    this.transientBackoffMs = 0;
+    this.transientBackoffUntil = 0;
+  }
+
+  private isCodexTransientOverloadError(message: string): boolean {
+    const normalized = message.toLowerCase();
+    return (
+      normalized.includes("server overloaded") ||
+      normalized.includes("retry later") ||
+      normalized.includes("upstream connect error") ||
+      normalized.includes("connection timeout") ||
+      normalized.includes("temporarily unavailable")
+    );
   }
 
   private isCodexResponsesAuthForbidden(line: string): boolean {

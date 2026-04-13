@@ -1067,7 +1067,15 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           })
           .filter((entry) => entry.conversationId.length > 0 && entry.threadId.length > 0);
 
-        await conversationManager.syncThreads({ bindings });
+        try {
+          await conversationManager.syncThreads({ bindings });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn("[agent] conversation.sync.threads failed", {
+            bindings: bindings.length,
+            error: message
+          });
+        }
         return;
       }
 

@@ -119,6 +119,8 @@ export class ConversationManager {
   private readonly codexByTurn = new Map<string, { threadId: string; codexTurnId: string }>();
   private readonly pendingTurnByThread = new Map<string, TurnContext>();
   private readonly pendingServerRequests = new Map<string, PendingServerRequest>();
+  private lastSyncSignature = "";
+  private lastSyncAt = 0;
 
   constructor(private readonly emit: (payload: Record<string, unknown>) => void) {
     this.codexClient = new CodexAppServerClient(
@@ -430,8 +432,6 @@ export class ConversationManager {
   }
 
   async syncThreads(params: { bindings: ConversationThreadBinding[] }): Promise<void> {
-    await this.codexClient.start();
-
     const normalizedBindings: ConversationThreadBinding[] = [];
     const desiredThreadIds = new Set<string>();
     const desiredConversationIds = new Set<string>();
@@ -463,6 +463,19 @@ export class ConversationManager {
       this.threadByConversation.set(binding.conversationId, binding.threadId);
     }
 
+    const syncSignature = normalizedBindings
+      .map((binding) => `${binding.conversationId}:${binding.threadId}`)
+      .sort()
+      .join("|");
+    const now = Date.now();
+    // Control API can send the same binding snapshot repeatedly in short bursts.
+    // Skip expensive Codex sync work when the snapshot is unchanged.
+    if (syncSignature === this.lastSyncSignature && now - this.lastSyncAt < 10_000) {
+      return;
+    }
+
+    await this.codexClient.start();
+
     const loadedThreadIds = new Set<string>();
     let cursor: string | null = null;
     do {
@@ -490,12 +503,17 @@ export class ConversationManager {
     }
 
     for (const binding of normalizedBindings) {
+      if (loadedThreadIds.has(binding.threadId)) {
+        continue;
+      }
       try {
         await this.codexClient.threadResume({ threadId: binding.threadId });
       } catch {
         // Keep the binding in memory; the server remains source of truth and can refresh it on the next sync cycle.
       }
     }
+    this.lastSyncSignature = syncSignature;
+    this.lastSyncAt = now;
   }
 
   close(): void {
