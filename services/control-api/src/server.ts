@@ -3682,6 +3682,10 @@ export const createServer = async (): Promise<http.Server> => {
     }
     const uniqueAgents = new Set<string>(conversations.map((conversation) => conversation.agent_id));
     for (const agentId of uniqueAgents) {
+      scheduleCodexAutoSync({
+        userId: req.userId!,
+        agentId
+      });
       void pushConversationThreadSyncToAgent({
         userId: req.userId!,
         agentId
@@ -3704,6 +3708,10 @@ export const createServer = async (): Promise<http.Server> => {
     }
 
     wsHub.rememberConversationOwner(conversation.id, req.userId!, conversation.agent_id);
+    scheduleCodexAutoSync({
+      userId: req.userId!,
+      agentId: conversation.agent_id
+    });
     let turns = await repositories.listConversationTurns(conversation.id);
     const forceHydrate = isTruthyQuery(req.query.forceHydrate);
     const needsRepair = turnsNeedRepair(turns);
