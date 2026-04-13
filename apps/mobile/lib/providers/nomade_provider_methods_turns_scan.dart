@@ -835,6 +835,28 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
     }
   }
 
+  Future<void> refreshSelectedConversationFromDesktop() async {
+    final conversation = selectedConversation;
+    if (conversation == null) {
+      return;
+    }
+
+    final conversationId = conversation.id;
+    if (selectedAgent?.isOnline == true) {
+      await importCodexHistory(silent: true);
+    } else {
+      await loadConversations();
+    }
+
+    for (final entry in conversations) {
+      if (entry.id == conversationId) {
+        _selectedConversation = entry;
+        await loadTurns(conversationId);
+        return;
+      }
+    }
+  }
+
   Future<void> refreshAll() async {
     if (!isAuthenticated || accessToken == null) return;
 

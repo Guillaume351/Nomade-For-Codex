@@ -664,15 +664,19 @@ extension _HomeScreenTopBarMethods on _HomeScreenState {
         Expanded(
           child: provider.turns.isEmpty
               ? _buildEmptyState(provider)
-              : Scrollbar(
-                  controller: _scrollController,
-                  child: ListView.builder(
+              : RefreshIndicator(
+                  onRefresh: () => provider.refreshSelectedConversationFromDesktop(),
+                  child: Scrollbar(
                     controller: _scrollController,
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                    itemCount: provider.turns.length,
-                    itemBuilder: (context, index) {
-                      return ChatTurnWidget(turn: provider.turns[index]);
-                    },
+                    child: ListView.builder(
+                      controller: _scrollController,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                      itemCount: provider.turns.length,
+                      itemBuilder: (context, index) {
+                        return ChatTurnWidget(turn: provider.turns[index]);
+                      },
+                    ),
                   ),
                 ),
         ),

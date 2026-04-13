@@ -101,6 +101,16 @@ const codexSandboxModes: CodexSandboxMode[] = ["read-only", "workspace-write", "
 const codexReasoningEfforts: CodexReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
 
 const buildTurnKey = (threadId: string, codexTurnId: string): string => `${threadId}:${codexTurnId}`;
+const normalizeCodexTimestampMs = (value: number): number => {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const normalized = Math.trunc(value);
+  if (normalized <= 0) {
+    return 0;
+  }
+  return normalized < 1_000_000_000_000 ? normalized * 1_000 : normalized;
+};
 
 export class ConversationManager {
   private readonly codexClient: CodexAppServerClient;
@@ -293,7 +303,7 @@ export class ConversationManager {
           title: title.length > 240 ? `${title.substring(0, 240)}...` : title,
           preview,
           cwd: thread.cwd || ".",
-          updatedAt: thread.updatedAt
+          updatedAt: normalizeCodexTimestampMs(thread.updatedAt)
         });
       }
 
@@ -359,7 +369,10 @@ export class ConversationManager {
       title: rawName.length > 0 ? rawName : fallbackTitle,
       preview,
       cwd: typeof thread.cwd === "string" && thread.cwd.length > 0 ? thread.cwd : ".",
-      updatedAt: typeof thread.updatedAt === "number" ? thread.updatedAt : 0,
+      updatedAt:
+        typeof thread.updatedAt === "number"
+          ? normalizeCodexTimestampMs(thread.updatedAt)
+          : 0,
       turns
     };
   }

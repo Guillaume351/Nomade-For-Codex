@@ -1451,6 +1451,18 @@ export const createServer = async (): Promise<http.Server> => {
   const codexAutoSyncCooldownMs = 15_000;
   const codexAutoSyncThreadLimit = 500;
   const codexAutoSyncThreadReadTimeoutMs = 45_000;
+  const normalizeCodexTimestampMs = (value: unknown): number => {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return 0;
+    }
+    const normalized = Math.trunc(value);
+    if (normalized <= 0) {
+      return 0;
+    }
+    // Codex app-server thread.updatedAt is epoch seconds. Normalize to ms before comparing
+    // against DB timestamps (which are ms).
+    return normalized < 1_000_000_000_000 ? normalized * 1_000 : normalized;
+  };
 
   type CodexThreadSyncSummary = {
     threadsScanned: number;
@@ -1610,7 +1622,7 @@ export const createServer = async (): Promise<http.Server> => {
 
       const existingTurnCount = turnCountByConversationId.get(conversationId) ?? 0;
       const conversationUpdatedAtMs = conversationMeta?.updatedAtMs ?? 0;
-      const threadUpdatedAtMs = Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0;
+      const threadUpdatedAtMs = normalizeCodexTimestampMs(thread.updatedAt);
       const threadAppearsNewer = threadUpdatedAtMs > conversationUpdatedAtMs + 1_000;
       const conversationLooksActive =
         conversationMeta?.status === "running" || conversationMeta?.status === "queued";
