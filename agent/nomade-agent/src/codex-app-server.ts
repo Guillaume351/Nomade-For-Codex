@@ -264,6 +264,124 @@ const extractTurnStartModeParams = (value: unknown): {
   return { mode, settings };
 };
 
+const normalizeByteRange = (value: unknown): { start: number; end: number } | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const range = value as Record<string, unknown>;
+  const start = Number(range.start);
+  const end = Number(range.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    return null;
+  }
+  const normalizedStart = Math.trunc(start);
+  const normalizedEnd = Math.trunc(end);
+  if (normalizedStart < 0 || normalizedEnd <= normalizedStart) {
+    return null;
+  }
+  return {
+    start: normalizedStart,
+    end: normalizedEnd
+  };
+};
+
+const normalizeTextElements = (value: unknown): Array<Record<string, unknown>> => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const elements: Array<Record<string, unknown>> = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    const byteRange =
+      normalizeByteRange(record.byteRange) ??
+      normalizeByteRange({
+        start: record.start,
+        end: record.end
+      });
+    if (!byteRange) {
+      continue;
+    }
+    const placeholder = toNormalizedString(record.placeholder) ?? null;
+    elements.push({
+      byteRange,
+      placeholder
+    });
+  }
+  return elements;
+};
+
+const fallbackItemNameFromPath = (path: string): string => {
+  const normalized = path.replace(/\\/g, "/").trim();
+  const segments = normalized.split("/").filter((segment) => segment.length > 0);
+  if (segments.length === 0) {
+    return path;
+  }
+  return segments[segments.length - 1]!;
+};
+
+const normalizeTurnInputItem = (raw: Record<string, unknown>): Record<string, unknown> | null => {
+  const rawType = toNormalizedString(raw.type);
+  if (!rawType) {
+    return null;
+  }
+  const normalizedType = rawType.trim().toLowerCase();
+
+  if (normalizedType === "text") {
+    const text = toNormalizedString(raw.text);
+    if (!text) {
+      return null;
+    }
+    const textElementsSnake = normalizeTextElements(raw.text_elements);
+    const textElementsCamel = normalizeTextElements(raw.textElements);
+    const textElements = textElementsSnake.length > 0 ? textElementsSnake : textElementsCamel;
+    return {
+      type: "text",
+      text,
+      text_elements: textElements
+    };
+  }
+
+  if (normalizedType === "image") {
+    const url = toNormalizedString(raw.url) ?? toNormalizedString(raw.imageUrl) ?? toNormalizedString(raw.image_url);
+    if (!url) {
+      return null;
+    }
+    return {
+      type: "image",
+      url
+    };
+  }
+
+  if (normalizedType === "local_image" || normalizedType === "localimage") {
+    const path = toNormalizedString(raw.path);
+    if (!path) {
+      return null;
+    }
+    return {
+      type: "localImage",
+      path
+    };
+  }
+
+  if (normalizedType === "skill" || normalizedType === "mention") {
+    const path = toNormalizedString(raw.path);
+    if (!path) {
+      return null;
+    }
+    const name = toNormalizedString(raw.name) ?? fallbackItemNameFromPath(path);
+    return {
+      type: normalizedType,
+      path,
+      name
+    };
+  }
+
+  return null;
+};
+
 export const parseCodexCollaborationModeList = (rawModes: unknown): CodexCollaborationModeSummary[] => {
   const items = Array.isArray(rawModes) ? rawModes : [];
   const bySlug = new Map<string, CodexCollaborationModeSummary>();
@@ -508,12 +626,15 @@ export class CodexAppServerClient {
     sandboxMode?: CodexSandboxMode;
     effort?: CodexReasoningEffort;
   }): Promise<string> {
-    const inputItems =
+    const rawInputItems =
       Array.isArray(params.inputItems) && params.inputItems.length > 0
         ? params.inputItems
         : params.prompt
-          ? [{ type: "text", text: params.prompt }]
+          ? [{ type: "text", text: params.prompt, text_elements: [] }]
           : [];
+    const inputItems = rawInputItems
+      .map((item) => normalizeTurnInputItem(item))
+      .filter((item): item is Record<string, unknown> => item !== null);
     if (inputItems.length === 0) {
       throw new Error("turn_start_missing_input");
     }

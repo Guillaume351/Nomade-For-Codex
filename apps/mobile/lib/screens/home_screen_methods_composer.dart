@@ -3,25 +3,28 @@ part of 'home_screen.dart';
 extension _HomeScreenComposerMethods on _HomeScreenState {
   Future<void> _handleSend() async {
     final rawInput = _promptController.text.trim();
-    if (rawInput.isEmpty) {
+    if (rawInput.isEmpty && _pendingAttachments.isEmpty) {
       return;
     }
 
     final provider = context.read<NomadeProvider>();
-    final slashResolution = await _handleComposerSlashCommand(
-      provider: provider,
-      rawInput: rawInput,
-    );
-    if (!mounted) {
-      return;
+    var text = rawInput;
+    if (rawInput.isNotEmpty) {
+      final slashResolution = await _handleComposerSlashCommand(
+        provider: provider,
+        rawInput: rawInput,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (slashResolution.consumeOnly) {
+        _promptController.clear();
+        _setStateSafe(() {});
+        return;
+      }
+      text = slashResolution.promptToSend?.trim() ?? '';
     }
-    if (slashResolution.consumeOnly) {
-      _promptController.clear();
-      _setStateSafe(() {});
-      return;
-    }
-    final text = slashResolution.promptToSend?.trim() ?? '';
-    if (text.isEmpty) {
+    if (text.isEmpty && _pendingAttachments.isEmpty) {
       return;
     }
 
@@ -263,13 +266,43 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
     _setStateSafe(() {});
   }
 
+  KeyEventResult _handleComposerKeyEvent({
+    required KeyEvent event,
+    required bool isRunning,
+  }) {
+    if (isRunning || event is! KeyDownEvent) {
+      return KeyEventResult.ignored;
+    }
+    final isPasteKey = event.logicalKey == LogicalKeyboardKey.keyV;
+    if (!isPasteKey) {
+      return KeyEventResult.ignored;
+    }
+    final keyboard = HardwareKeyboard.instance;
+    final isShortcutPressed = keyboard.isMetaPressed || keyboard.isControlPressed;
+    if (!isShortcutPressed) {
+      return KeyEventResult.ignored;
+    }
+    unawaited(
+      _pasteImageAttachmentFromClipboard(
+        showFailureSnackBar: false,
+      ),
+    );
+    return KeyEventResult.ignored;
+  }
+
   Future<void> _handleComposerAction(
     _ComposerAction action,
     NomadeProvider provider,
   ) async {
     switch (action) {
+      case _ComposerAction.addPhotos:
+        await _pickComposerPhotos();
+        return;
       case _ComposerAction.addFiles:
         await _pickComposerFiles();
+        return;
+      case _ComposerAction.pasteImage:
+        await _pasteImageAttachmentFromClipboard();
         return;
       case _ComposerAction.togglePlanMode:
         final wasPlan = provider.isPlanModeSelected();
@@ -294,7 +327,7 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
   Future<void> _pickComposerFiles() async {
     final result = await FilePicker.platform.pickFiles(
       allowMultiple: true,
-      withData: false,
+      withData: true,
       withReadStream: false,
       type: FileType.any,
     );
@@ -305,15 +338,44 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
     _setStateSafe(() {
       for (final file in result.files) {
         final path = (file.path ?? '').trim();
+        final rawName = file.name.trim();
+        final attachmentName = rawName.isNotEmpty
+            ? rawName
+            : (path.isNotEmpty ? path.replaceAll('\\', '/').split('/').last : 'attachment');
+        final normalizedTarget = path.isNotEmpty ? path : attachmentName;
+        final isImage = _isImageAttachmentPath(normalizedTarget);
+        final bytes = file.bytes;
+
+        if (isImage && bytes != null && bytes.isNotEmpty) {
+          final attachment = _createImageAttachment(
+            bytes: bytes,
+            target: normalizedTarget,
+            name: attachmentName,
+            path: path.isEmpty ? null : path,
+          );
+          final exists = _pendingAttachments.any(
+            (entry) => entry.imageUrl == attachment.imageUrl,
+          );
+          if (exists) {
+            continue;
+          }
+          _pendingAttachments.add(attachment);
+          added += 1;
+          continue;
+        }
+
         if (path.isEmpty) {
           continue;
         }
-        final exists = _pendingAttachments.any((entry) => entry.path == path);
+        final id = 'path:$path';
+        final exists = _pendingAttachments.any((entry) => entry.id == id);
         if (exists) {
           continue;
         }
         _pendingAttachments.add(
           _PendingAttachment(
+            id: id,
+            name: attachmentName,
             path: path,
             type: _attachmentInputType(path),
           ),
@@ -332,19 +394,304 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
     );
   }
 
+  Future<void> _pickComposerPhotos() async {
+    final picker = ImagePicker();
+    List<XFile> picked;
+    try {
+      picked = await picker.pickMultiImage();
+    } catch (_) {
+      picked = const <XFile>[];
+    }
+    if (picked.isEmpty) {
+      try {
+        final single = await picker.pickImage(source: ImageSource.gallery);
+        if (single != null) {
+          picked = [single];
+        }
+      } catch (_) {
+        picked = const <XFile>[];
+      }
+    }
+    if (!mounted || picked.isEmpty) {
+      return;
+    }
+
+    final pending = <_PendingAttachment>[];
+    for (final image in picked) {
+      try {
+        final bytes = await image.readAsBytes();
+        if (bytes.isEmpty) {
+          continue;
+        }
+        final path = image.path.trim();
+        final name = image.name.trim().isNotEmpty
+            ? image.name.trim()
+            : (path.isNotEmpty ? path.replaceAll('\\', '/').split('/').last : 'Photo');
+        final attachment = _createImageAttachment(
+          bytes: bytes,
+          name: name.isEmpty ? 'Photo' : name,
+          path: path.isEmpty ? null : path,
+          target: path.isNotEmpty ? path : name,
+        );
+        pending.add(attachment);
+      } catch (_) {
+        continue;
+      }
+    }
+    if (pending.isEmpty) {
+      return;
+    }
+
+    var added = 0;
+    _setStateSafe(() {
+      for (final attachment in pending) {
+        final duplicate = _pendingAttachments.any(
+          (entry) => entry.imageUrl == attachment.imageUrl,
+        );
+        if (duplicate) {
+          continue;
+        }
+        _pendingAttachments.add(attachment);
+        added += 1;
+      }
+    });
+    if (!mounted || added <= 0) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('$added photo${added > 1 ? "s" : ""} attached'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  _PendingAttachment _createImageAttachment({
+    required List<int> bytes,
+    required String name,
+    required String target,
+    String? path,
+  }) {
+    final imageUrl = _buildImageDataUrl(bytes, target: target);
+    return _PendingAttachment(
+      id: 'image:${imageUrl.hashCode}',
+      type: 'image',
+      name: name,
+      path: path,
+      imageUrl: imageUrl,
+    );
+  }
+
+  Future<void> _pasteImageAttachmentFromClipboard({
+    bool showFailureSnackBar = true,
+  }) async {
+    final binaryAttached = await _tryAttachBinaryImageFromSystemClipboard();
+    if (binaryAttached) {
+      return;
+    }
+
+    final clipboard = await Clipboard.getData(Clipboard.kTextPlain);
+    final raw = clipboard?.text?.trim() ?? '';
+    if (!mounted || raw.isEmpty) {
+      if (showFailureSnackBar) {
+        _showClipboardImageFailureSnackBar();
+      }
+      return;
+    }
+
+    final uri = Uri.tryParse(raw);
+    final isDataImage = raw.startsWith('data:image/');
+    final isRemoteImage = uri != null &&
+        (uri.scheme == 'http' || uri.scheme == 'https') &&
+        _isImageAttachmentPath(uri.path);
+
+    if (isDataImage || isRemoteImage) {
+      final id = 'image:${raw.hashCode}';
+      final exists =
+          _pendingAttachments.any((entry) => entry.imageUrl == raw);
+      if (exists) {
+        return;
+      }
+      _setStateSafe(() {
+        _pendingAttachments.add(
+          _PendingAttachment(
+            id: id,
+            type: 'image',
+            name: isDataImage ? 'Pasted image' : (uri?.pathSegments.last ?? 'Pasted image'),
+            imageUrl: raw,
+          ),
+        );
+      });
+      return;
+    }
+
+    final normalizedPath = uri != null && uri.scheme == 'file'
+        ? uri.toFilePath()
+        : raw;
+    if (_isImageAttachmentPath(normalizedPath)) {
+      final id = 'path:$normalizedPath';
+      final exists =
+          _pendingAttachments.any((entry) => entry.id == id);
+      if (exists) {
+        return;
+      }
+      final name = normalizedPath.replaceAll('\\', '/').split('/').last;
+      _setStateSafe(() {
+        _pendingAttachments.add(
+          _PendingAttachment(
+            id: id,
+            type: 'localImage',
+            name: name.isEmpty ? 'Pasted image' : name,
+            path: normalizedPath,
+          ),
+        );
+      });
+      return;
+    }
+
+    if (showFailureSnackBar) {
+      _showClipboardImageFailureSnackBar();
+    }
+  }
+
+  Future<bool> _tryAttachBinaryImageFromSystemClipboard() async {
+    final clipboard = SystemClipboard.instance;
+    if (clipboard == null) {
+      return false;
+    }
+    try {
+      final reader = await clipboard.read();
+      if (!reader.canProvide(Formats.png)) {
+        return false;
+      }
+
+      final completer = Completer<({List<int> bytes, String? fileName})?>();
+      final progress = reader.getFile(
+        Formats.png,
+        (file) async {
+          try {
+            final bytes = await file.readAll();
+            if (!completer.isCompleted) {
+              completer.complete(
+                bytes.isEmpty ? null : (bytes: bytes, fileName: file.fileName),
+              );
+            }
+          } catch (_) {
+            if (!completer.isCompleted) {
+              completer.complete(null);
+            }
+          }
+        },
+        onError: (_) {
+          if (!completer.isCompleted) {
+            completer.complete(null);
+          }
+        },
+      );
+      if (progress == null) {
+        return false;
+      }
+      final image = await completer.future.timeout(
+        const Duration(seconds: 2),
+        onTimeout: () => null,
+      );
+      if (image == null || image.bytes.isEmpty || !mounted) {
+        return false;
+      }
+      final fileName = (image.fileName ?? '').trim();
+      final target = fileName.isEmpty ? 'pasted-image.png' : fileName;
+      final attachment = _createImageAttachment(
+        bytes: image.bytes,
+        name: fileName.isEmpty ? 'Pasted image' : fileName,
+        target: target,
+      );
+      var added = false;
+      _setStateSafe(() {
+        final exists = _pendingAttachments.any(
+          (entry) => entry.imageUrl == attachment.imageUrl,
+        );
+        if (!exists) {
+          _pendingAttachments.add(attachment);
+          added = true;
+        }
+      });
+      return added;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _showClipboardImageFailureSnackBar() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Clipboard does not contain an image.',
+        ),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
   String _attachmentInputType(String path) {
     final normalized = path.trim().toLowerCase();
     for (final extension in _HomeScreenState._imageExtensions) {
       if (normalized.endsWith(extension)) {
-        return 'local_image';
+        return 'localImage';
       }
     }
     return 'mention';
   }
 
-  void _removePendingAttachment(String path) {
+  bool _isImageAttachmentPath(String target) {
+    final normalized = target.trim().toLowerCase();
+    for (final extension in _HomeScreenState._imageExtensions) {
+      if (normalized.endsWith(extension)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  String _buildImageDataUrl(
+    List<int> bytes, {
+    required String target,
+  }) {
+    final mimeType = _imageMimeType(target);
+    return 'data:$mimeType;base64,${base64Encode(bytes)}';
+  }
+
+  String _imageMimeType(String target) {
+    final normalized = target.trim().toLowerCase();
+    if (normalized.endsWith('.png')) {
+      return 'image/png';
+    }
+    if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
+      return 'image/jpeg';
+    }
+    if (normalized.endsWith('.webp')) {
+      return 'image/webp';
+    }
+    if (normalized.endsWith('.gif')) {
+      return 'image/gif';
+    }
+    if (normalized.endsWith('.bmp')) {
+      return 'image/bmp';
+    }
+    if (normalized.endsWith('.svg')) {
+      return 'image/svg+xml';
+    }
+    if (normalized.endsWith('.heic') || normalized.endsWith('.heif')) {
+      return 'image/heic';
+    }
+    if (normalized.endsWith('.tif') || normalized.endsWith('.tiff')) {
+      return 'image/tiff';
+    }
+    return 'image/png';
+  }
+
+  void _removePendingAttachment(String id) {
     _setStateSafe(() {
-      _pendingAttachments.removeWhere((entry) => entry.path == path);
+      _pendingAttachments.removeWhere((entry) => entry.id == id);
     });
   }
 

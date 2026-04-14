@@ -160,14 +160,38 @@ export type ConversationInputItem =
   | {
       type: "text";
       text: string;
+      text_elements?: Array<{
+        byteRange?: {
+          start: number;
+          end: number;
+        };
+        start?: number;
+        end?: number;
+        placeholder?: string | null;
+      }>;
+      textElements?: Array<{
+        byteRange?: {
+          start: number;
+          end: number;
+        };
+        start?: number;
+        end?: number;
+        placeholder?: string | null;
+      }>;
     }
   | {
       type: "image";
-      imageUrl: string;
+      imageUrl?: string;
+      image_url?: string;
+      url?: string;
       detail?: string;
     }
   | {
       type: "local_image";
+      path: string;
+    }
+  | {
+      type: "localImage";
       path: string;
     }
   | {

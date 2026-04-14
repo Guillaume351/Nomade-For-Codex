@@ -560,7 +560,10 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                   spacing: 8,
                   runSpacing: 8,
                   children: _pendingAttachments.map((attachment) {
-                    final isImage = attachment.type == 'local_image';
+                    final normalizedType = attachment.type.toLowerCase();
+                    final isImage = normalizedType == 'image' ||
+                        normalizedType == 'localimage' ||
+                        normalizedType == 'local_image';
                     return InputChip(
                       avatar: Icon(
                         isImage
@@ -572,10 +575,10 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                         attachment.name,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      tooltip: attachment.path,
+                      tooltip: attachment.tooltip,
                       onDeleted: isRunning
                           ? null
-                          : () => _removePendingAttachment(attachment.path),
+                          : () => _removePendingAttachment(attachment.id),
                     );
                   }).toList(),
                 ),
@@ -630,12 +633,30 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                         _handleComposerAction(action, provider),
                     itemBuilder: (context) => [
                       const PopupMenuItem(
+                        value: _ComposerAction.addPhotos,
+                        child: ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(Icons.photo_library_outlined),
+                          title: Text('Add photos'),
+                        ),
+                      ),
+                      const PopupMenuItem(
                         value: _ComposerAction.addFiles,
                         child: ListTile(
                           dense: true,
                           contentPadding: EdgeInsets.zero,
                           leading: Icon(Icons.attach_file_rounded),
                           title: Text('Add files'),
+                        ),
+                      ),
+                      const PopupMenuItem(
+                        value: _ComposerAction.pasteImage,
+                        child: ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(Icons.content_paste_rounded),
+                          title: Text('Paste image'),
                         ),
                       ),
                       PopupMenuItem(
@@ -674,27 +695,33 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: TextField(
-                      controller: _promptController,
-                      maxLines: 6,
-                      minLines: 1,
-                      enabled: !isRunning,
-                      onChanged: (_) => _setStateSafe(() {}),
-                      onSubmitted: (_) => isRunning ? null : _handleSend(),
-                      decoration: InputDecoration(
-                        hintText: isRunning
-                            ? 'Codex is working on your request...'
-                            : 'Ask Codex to inspect, edit, or run something...',
-                        filled: false,
-                        border: InputBorder.none,
-                        enabledBorder: InputBorder.none,
-                        focusedBorder: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 8,
-                        ),
+                    child: Focus(
+                      onKeyEvent: (node, event) => _handleComposerKeyEvent(
+                        event: event,
+                        isRunning: isRunning,
                       ),
-                      style: theme.textTheme.bodyLarge,
+                      child: TextField(
+                        controller: _promptController,
+                        maxLines: 6,
+                        minLines: 1,
+                        enabled: !isRunning,
+                        onChanged: (_) => _setStateSafe(() {}),
+                        onSubmitted: (_) => isRunning ? null : _handleSend(),
+                        decoration: InputDecoration(
+                          hintText: isRunning
+                              ? 'Codex is working on your request...'
+                              : 'Ask Codex to inspect, edit, or run something...',
+                          filled: false,
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 8,
+                          ),
+                        ),
+                        style: theme.textTheme.bodyLarge,
+                      ),
                     ),
                   ),
                   const SizedBox(width: 8),
