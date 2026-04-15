@@ -2223,6 +2223,103 @@ export const createServer = async (): Promise<http.Server> => {
     res.redirect("/web/account");
   });
 
+  const legalEffectiveDate = "April 15, 2026";
+
+  app.get("/legal/privacy", (_req, res) => {
+    const body = `
+      <h1>Nomade Privacy Policy</h1>
+      <p>Effective date: <strong>${legalEffectiveDate}</strong>.</p>
+      <p>
+        Nomade collects and processes account, device, conversation, and operational data to provide core functionality such as
+        authentication, synchronization, push notifications, diagnostics, and security.
+      </p>
+      <h2>What data we process</h2>
+      <ul>
+        <li>Account identifiers (for example, email address).</li>
+        <li>Session and device identifiers used for authentication and push delivery.</li>
+        <li>Workspace, conversation, and turn content required to provide the service.</li>
+        <li>Operational telemetry and audit logs used for reliability, abuse prevention, and security response.</li>
+      </ul>
+      <h2>How data is used</h2>
+      <ul>
+        <li>To authenticate users and secure access.</li>
+        <li>To operate app features (conversation sync, device pairing, notifications).</li>
+        <li>To detect abuse, investigate incidents, and satisfy legal obligations.</li>
+      </ul>
+      <h2>Data sharing</h2>
+      <p>
+        We do not sell personal data. Data may be shared with infrastructure and service providers that process data on our behalf.
+      </p>
+      <h2>Retention and deletion</h2>
+      <p>
+        You can request account deletion from inside the app or via our web deletion resource.
+        When an account is deleted, associated data is removed unless retention is required by law.
+      </p>
+      <p>
+        Account deletion resource:
+        <a href="/legal/account-deletion">/legal/account-deletion</a>.
+      </p>
+      <h2>Contact</h2>
+      <p>
+        Privacy inquiries: <a href="mailto:privacy@nomade.local">privacy@nomade.local</a>.
+      </p>
+    `;
+    res.type("html").send(htmlPage({ title: "Nomade Privacy Policy", body }));
+  });
+
+  app.get("/legal/terms", (_req, res) => {
+    const body = `
+      <h1>Nomade Terms of Service</h1>
+      <p>Effective date: <strong>${legalEffectiveDate}</strong>.</p>
+      <p>
+        By using Nomade, you agree to use the service lawfully and in accordance with all applicable laws and platform policies.
+      </p>
+      <h2>Accounts</h2>
+      <ul>
+        <li>You are responsible for maintaining the confidentiality of your account credentials.</li>
+        <li>You are responsible for activity performed from your account or connected devices.</li>
+      </ul>
+      <h2>Acceptable use</h2>
+      <ul>
+        <li>Do not use Nomade to violate law, abuse systems, or access data without authorization.</li>
+        <li>Do not attempt to disrupt service operation or bypass platform security controls.</li>
+      </ul>
+      <h2>Suspension and termination</h2>
+      <p>
+        We may limit or suspend access when necessary to enforce these terms, prevent abuse, or comply with legal obligations.
+      </p>
+      <h2>Contact</h2>
+      <p>
+        Terms inquiries: <a href="mailto:support@nomade.local">support@nomade.local</a>.
+      </p>
+    `;
+    res.type("html").send(htmlPage({ title: "Nomade Terms of Service", body }));
+  });
+
+  app.get("/legal/account-deletion", (_req, res) => {
+    const body = `
+      <h1>Account Deletion</h1>
+      <p>
+        You can request account deletion from the Nomade mobile app or from the web account area.
+      </p>
+      <ul>
+        <li>Web path: sign in, then use the delete option in <a href="/web/account">/web/account</a>.</li>
+        <li>In-app path: Sidebar -> Tools &amp; account -> Session -> Delete account &amp; data.</li>
+      </ul>
+      <p>
+        Account deletion removes the account and associated data that Nomade is not legally required to retain.
+      </p>
+      <p>
+        If you have active subscriptions, cancel billing before account deletion.
+      </p>
+      <p>
+        If you need help accessing your account to submit deletion, contact
+        <a href="mailto:privacy@nomade.local">privacy@nomade.local</a>.
+      </p>
+    `;
+    res.type("html").send(htmlPage({ title: "Nomade Account Deletion", body }));
+  });
+
   const normalizeReturnTo = (input: unknown, fallback = "/web/account"): string => {
     if (typeof input === "string" && input.startsWith("/")) {
       return input;
@@ -2676,6 +2773,26 @@ export const createServer = async (): Promise<http.Server> => {
         <a href="/web/devices"><button type="button">Manage devices</button></a>
         <a href="/web/logout"><button type="button">Sign out</button></a>
       </div>
+      <div class="row">
+        <form
+          method="post"
+          action="/web/account/delete"
+          onsubmit="return confirm('Delete account and associated data permanently?');"
+        >
+          <button type="submit" style="background:#b42318;border-color:#b42318;">
+            Delete account and data
+          </button>
+        </form>
+      </div>
+      <p class="muted">If you have active subscriptions, cancel billing before account deletion.</p>
+      <p class="muted">
+        Legal:
+        <a href="/legal/privacy">Privacy Policy</a>
+        ·
+        <a href="/legal/terms">Terms of Service</a>
+        ·
+        <a href="/legal/account-deletion">Account Deletion</a>
+      </p>
       ${
         stripeConfigured
           ? `<div class="row">
@@ -2686,6 +2803,50 @@ export const createServer = async (): Promise<http.Server> => {
       }
     `;
     res.type("html").send(htmlPage({ title: "Account", body }));
+  });
+
+  app.post("/web/account/delete", async (req, res) => {
+    const user = await ensureWebUser(req, res);
+    if (!user) {
+      return;
+    }
+
+    try {
+      await repositories.deleteUserAccount(user.userId);
+      await repositories.writeAuditEvent({
+        userId: null,
+        actorType: "user",
+        actorId: user.userId,
+        action: "account.deleted",
+        metadata: { source: "web" }
+      });
+      const body = `
+        <h1>Account deleted</h1>
+        <p>Your account deletion request has been completed for <code>${encodeHtml(user.email)}</code>.</p>
+        <p>You will be signed out now.</p>
+        <script>
+          fetch("/api/auth/sign-out", { method: "POST" })
+            .finally(() => {
+              window.location.href = "/web/login";
+            });
+        </script>
+      `;
+      res.type("html").send(htmlPage({ title: "Account deleted", body }));
+    } catch (error) {
+      console.error("[web-account-delete] failed", {
+        userId: user.userId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      res
+        .status(500)
+        .type("html")
+        .send(
+          htmlPage({
+            title: "Delete failed",
+            body: "<h1>Delete failed</h1><p>Unable to complete account deletion right now. Please retry later.</p>"
+          })
+        );
+    }
   });
 
   app.get("/web/devices", async (req, res) => {
@@ -3143,6 +3304,43 @@ export const createServer = async (): Promise<http.Server> => {
 
     await repositories.revokeRefreshToken(parsed.data.refreshToken, req.userId!);
     res.json({ ok: true });
+  });
+
+  app.post("/me/account/delete", requireHybridUserAuth, async (req, res) => {
+    const schema = z.object({
+      refreshToken: z.string().min(8),
+      confirmationCode: z.string().trim().toUpperCase()
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+    if (parsed.data.confirmationCode !== "DELETE") {
+      res.status(400).json({ error: "invalid_confirmation_code" });
+      return;
+    }
+
+    const revoked = await repositories.revokeRefreshToken(parsed.data.refreshToken, req.userId!);
+    if (!revoked) {
+      res.status(400).json({ error: "invalid_refresh_token" });
+      return;
+    }
+
+    const deleted = await repositories.deleteUserAccount(req.userId!);
+    if (!deleted) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+
+    await repositories.writeAuditEvent({
+      userId: null,
+      actorType: "user",
+      actorId: req.userId!,
+      action: "account.deleted",
+      metadata: { source: "api" }
+    });
+    res.json({ deleted: true });
   });
 
   app.get("/me", requireHybridUserAuth, async (req, res) => {

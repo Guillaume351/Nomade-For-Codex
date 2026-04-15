@@ -193,6 +193,27 @@ class NomadeApi {
     return _decodeObject(response);
   }
 
+  Future<Map<String, dynamic>> deleteAccount({
+    required String accessToken,
+    required String refreshToken,
+    required String confirmationCode,
+  }) async {
+    final response = await _send(
+      () => http.post(
+        _uri('/me/account/delete'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'refreshToken': refreshToken,
+          'confirmationCode': confirmationCode,
+        }),
+      ),
+    );
+    return _decodeObject(response);
+  }
+
   Future<Map<String, dynamic>> getE2EDevices({
     required String accessToken,
   }) async {

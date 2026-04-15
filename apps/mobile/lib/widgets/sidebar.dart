@@ -9,6 +9,7 @@ import '../models/conversation.dart';
 import '../models/workspace.dart';
 import '../providers/nomade_provider.dart';
 import '../screens/onboarding_screen.dart';
+import 'app_motion.dart';
 import 'e2e_guide_sheet.dart';
 import 'tunnel_manager_sheet.dart';
 
@@ -20,6 +21,7 @@ class Sidebar extends StatefulWidget {
 }
 
 class _SidebarState extends State<Sidebar> {
+  static const _accountDeletionConfirmCode = 'DELETE';
   final TextEditingController _searchController = TextEditingController();
   final Set<String> _expandedWorkspaceIds = <String>{};
   final Set<String> _loadingWorkspaceIds = <String>{};
@@ -105,6 +107,95 @@ class _SidebarState extends State<Sidebar> {
     }
   }
 
+  Uri _publicUrlForApiBase(String apiBaseUrl, String path) {
+    final normalizedPath = path.startsWith('/') ? path : '/$path';
+    final base = Uri.parse(apiBaseUrl);
+    return base.replace(
+      path: normalizedPath,
+      queryParameters: null,
+      fragment: null,
+    );
+  }
+
+  Future<void> _openExternalUrl(
+    BuildContext context,
+    Uri uri, {
+    String? failureMessage,
+  }) async {
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!launched && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            failureMessage ??
+                'Unable to open ${uri.toString()}. Check your browser setup.',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _confirmDeleteAccount(
+    BuildContext context,
+    NomadeProvider provider,
+  ) async {
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Delete account and data?'),
+            content: const Text(
+              'This permanently deletes your account and associated app data that Nomade is not legally required to retain. If you have active subscriptions, cancel billing before deletion. This action cannot be undone.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(dialogContext).colorScheme.error,
+                  foregroundColor: Theme.of(dialogContext).colorScheme.onError,
+                ),
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: const Text('Delete account'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      await provider.deleteAccountAndData(
+        confirmationCode: _accountDeletionConfirmCode,
+      );
+      if (!context.mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Account deletion request completed.')),
+      );
+      Navigator.of(context).pushAndRemoveUntil(
+        buildAppPageRoute(context, const OnboardingScreen()),
+        (route) => false,
+      );
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+      final message = error.toString().trim();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            message.isEmpty ? 'Account deletion failed. Please retry.' : message,
+          ),
+        ),
+      );
+    }
+  }
+
   void _syncWorkspaceCache(NomadeProvider provider) {
     final validWorkspaceIds = provider.workspaces
         .map((workspace) => workspace.id)
@@ -122,7 +213,9 @@ class _SidebarState extends State<Sidebar> {
     );
 
     final selectedWorkspaceId = provider.selectedWorkspace?.id;
-    if (selectedWorkspaceId != null && selectedWorkspaceId.isNotEmpty) {
+    if (selectedWorkspaceId != null &&
+        selectedWorkspaceId.isNotEmpty &&
+        provider.conversationsWorkspaceId == selectedWorkspaceId) {
       _workspaceConversationCache[selectedWorkspaceId] =
           provider.sortConversationsForDisplay(provider.conversations);
     }
@@ -276,10 +369,17 @@ class _SidebarState extends State<Sidebar> {
     }
 
     if (provider.selectedWorkspace?.id == workspaceId) {
-      final sorted =
-          provider.sortConversationsForDisplay(provider.conversations);
-      _workspaceConversationCache[workspaceId] = sorted;
-      return sorted;
+      if (provider.conversationsWorkspaceId == workspaceId) {
+        final sorted =
+            provider.sortConversationsForDisplay(provider.conversations);
+        _workspaceConversationCache[workspaceId] = sorted;
+        return sorted;
+      }
+      final cachedSelected = _workspaceConversationCache[workspaceId];
+      if (cachedSelected != null) {
+        return provider.sortConversationsForDisplay(cachedSelected);
+      }
+      return const <Conversation>[];
     }
 
     final cached = _workspaceConversationCache[workspaceId];
@@ -313,18 +413,36 @@ class _SidebarState extends State<Sidebar> {
 
   List<Workspace> _sortedWorkspaces(NomadeProvider provider) {
     final values = List<Workspace>.from(provider.workspaces, growable: false);
+    final activityByWorkspaceId = <String, DateTime>{
+      for (final workspace in values)
+        workspace.id: _workspaceActivityAt(provider, workspace),
+    };
     values.sort((a, b) {
       switch (provider.listSortMode) {
         case 'oldest':
-          return _workspaceActivityAt(provider, a)
-              .compareTo(_workspaceActivityAt(provider, b));
+          final oldestComparison = activityByWorkspaceId[a.id]!
+              .compareTo(activityByWorkspaceId[b.id]!);
+          if (oldestComparison != 0) {
+            return oldestComparison;
+          }
+          break;
         case 'name':
-          return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+          break;
         case 'latest':
         default:
-          return _workspaceActivityAt(provider, b)
-              .compareTo(_workspaceActivityAt(provider, a));
+          final latestComparison = activityByWorkspaceId[b.id]!
+              .compareTo(activityByWorkspaceId[a.id]!);
+          if (latestComparison != 0) {
+            return latestComparison;
+          }
+          break;
       }
+
+      final byName = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      if (byName != 0) {
+        return byName;
+      }
+      return a.id.compareTo(b.id);
     });
     return values;
   }
@@ -378,6 +496,7 @@ class _SidebarState extends State<Sidebar> {
     required Workspace workspace,
     required bool expanded,
   }) async {
+    HapticFeedback.selectionClick();
     if (!expanded) {
       if (!mounted) {
         return;
@@ -397,13 +516,33 @@ class _SidebarState extends State<Sidebar> {
     }
 
     if (provider.selectedWorkspace?.id != workspace.id) {
-      await provider.onWorkspaceSelected(workspace);
+      if (mounted) {
+        setState(() {
+          _loadingWorkspaceIds.add(workspace.id);
+        });
+      } else {
+        _loadingWorkspaceIds.add(workspace.id);
+      }
+      try {
+        await provider.onWorkspaceSelected(workspace);
+      } finally {
+        if (!mounted) {
+          _loadingWorkspaceIds.remove(workspace.id);
+        } else {
+          setState(() {
+            _loadingWorkspaceIds.remove(workspace.id);
+          });
+        }
+      }
+      return;
     }
-    await _loadWorkspaceConversations(
-      provider,
-      workspaceId: workspace.id,
-      forceRefresh: true,
-    );
+
+    if (!_workspaceConversationCache.containsKey(workspace.id)) {
+      await _loadWorkspaceConversations(
+        provider,
+        workspaceId: workspace.id,
+      );
+    }
   }
 
   Future<void> _openConversation(
@@ -601,14 +740,21 @@ class _SidebarState extends State<Sidebar> {
                       context,
                       'No project or conversation matches your search.',
                     ),
-                  ...visibleWorkspaces.map(
-                    (workspace) => _buildWorkspaceNode(
-                      context,
-                      provider,
-                      workspace: workspace,
-                      normalizedQuery: normalizedQuery,
-                    ),
-                  ),
+                  ...visibleWorkspaces.asMap().entries.map((entry) {
+                    final index = entry.key;
+                    final workspace = entry.value;
+                    final delayMs = (index * 22).clamp(0, 190).toInt();
+                    return FadeSlideIn(
+                      delay: Duration(milliseconds: delayMs),
+                      beginOffset: const Offset(0, 0.015),
+                      child: _buildWorkspaceNode(
+                        context,
+                        provider,
+                        workspace: workspace,
+                        normalizedQuery: normalizedQuery,
+                      ),
+                    );
+                  }),
                   const SizedBox(height: 8),
                   _buildToolsSection(context, provider),
                 ],
@@ -629,7 +775,9 @@ class _SidebarState extends State<Sidebar> {
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-      child: Container(
+      child: AnimatedContainer(
+        duration: AppMotion.medium,
+        curve: AppMotion.standardCurve,
         width: double.infinity,
         padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
         decoration: BoxDecoration(
@@ -724,7 +872,10 @@ class _SidebarState extends State<Sidebar> {
         ? workspaceConversations
         : matchingConversations;
 
-    return Container(
+    return AnimatedContainer(
+      duration: AppMotion.medium,
+      curve: AppMotion.standardCurve,
+      key: ValueKey('workspace-node-${workspace.id}'),
       margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(
         color: selectedWorkspace
@@ -776,25 +927,32 @@ class _SidebarState extends State<Sidebar> {
                 ),
               ),
               if (workspaceIsRunning)
-                Container(
-                  width: 8,
-                  height: 8,
-                  margin: const EdgeInsets.only(left: 6),
-                  decoration: BoxDecoration(
-                    color: scheme.primary,
-                    shape: BoxShape.circle,
+                Padding(
+                  padding: const EdgeInsets.only(left: 6),
+                  child: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: Center(
+                      child: PulseDot(color: scheme.primary, size: 7),
+                    ),
                   ),
                 ),
             ],
           ),
-          subtitle: Text(
-            loading
-                ? 'Loading conversations...'
-                : '${workspaceConversations.length} conversation${workspaceConversations.length > 1 ? "s" : ""}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
+          subtitle: AnimatedSwitcher(
+            duration: AppMotion.medium,
+            child: Text(
+              loading
+                  ? 'Loading conversations...'
+                  : '${workspaceConversations.length} conversation${workspaceConversations.length > 1 ? "s" : ""}',
+              key: ValueKey(
+                '${workspace.id}-${loading ? "loading" : workspaceConversations.length}',
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
             ),
           ),
           children: [
@@ -807,6 +965,7 @@ class _SidebarState extends State<Sidebar> {
                       const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                 ),
                 onPressed: () async {
+                  HapticFeedback.selectionClick();
                   await _createConversationInWorkspace(
                     context,
                     provider,
@@ -835,14 +994,21 @@ class _SidebarState extends State<Sidebar> {
                 ),
               ),
             if (!loading)
-              ...visibleConversations.map(
-                (conversation) => _buildConversationNode(
-                  context,
-                  provider,
-                  workspace: workspace,
-                  conversation: conversation,
-                ),
-              ),
+              ...visibleConversations.asMap().entries.map((entry) {
+                final index = entry.key;
+                final conversation = entry.value;
+                final delayMs = (index * 16).clamp(0, 140).toInt();
+                return FadeSlideIn(
+                  delay: Duration(milliseconds: delayMs),
+                  beginOffset: const Offset(0, 0.01),
+                  child: _buildConversationNode(
+                    context,
+                    provider,
+                    workspace: workspace,
+                    conversation: conversation,
+                  ),
+                );
+              }),
           ],
         ),
       ),
@@ -861,7 +1027,9 @@ class _SidebarState extends State<Sidebar> {
     final isRunning = conversation.status == 'running' ||
         (provider.activeTurnId != null && selected);
 
-    return Container(
+    return AnimatedContainer(
+      duration: AppMotion.medium,
+      curve: AppMotion.standardCurve,
       margin: const EdgeInsets.only(bottom: 6),
       decoration: BoxDecoration(
         color: selected
@@ -897,15 +1065,15 @@ class _SidebarState extends State<Sidebar> {
         ),
         trailing: isRunning
             ? SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: scheme.primary,
+                width: 18,
+                height: 18,
+                child: Center(
+                  child: PulseDot(color: scheme.primary, size: 7),
                 ),
               )
             : null,
         onTap: () async {
+          HapticFeedback.selectionClick();
           await _openConversation(
             context,
             provider,
@@ -1170,7 +1338,86 @@ class _SidebarState extends State<Sidebar> {
           ),
         ],
         const SizedBox(height: 6),
+        _buildSectionHeader(context, 'Legal & privacy'),
+        ListTile(
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          leading: const Icon(Icons.privacy_tip_outlined),
+          title: const Text('Privacy policy'),
+          onTap: () async {
+            await _openExternalUrl(
+              context,
+              _publicUrlForApiBase(provider.api.baseUrl, '/legal/privacy'),
+              failureMessage: 'Unable to open privacy policy.',
+            );
+          },
+        ),
+        ListTile(
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          leading: const Icon(Icons.gavel_outlined),
+          title: const Text('Terms of service'),
+          onTap: () async {
+            await _openExternalUrl(
+              context,
+              _publicUrlForApiBase(provider.api.baseUrl, '/legal/terms'),
+              failureMessage: 'Unable to open terms of service.',
+            );
+          },
+        ),
+        ListTile(
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          leading: const Icon(Icons.language_rounded),
+          title: const Text('Account deletion (web)'),
+          subtitle: const Text(
+            'Outside-app deletion link for store policies',
+            style: TextStyle(fontSize: 11),
+          ),
+          onTap: () async {
+            await _openExternalUrl(
+              context,
+              _publicUrlForApiBase(
+                provider.api.baseUrl,
+                '/legal/account-deletion',
+              ),
+              failureMessage: 'Unable to open account deletion page.',
+            );
+          },
+        ),
+        const SizedBox(height: 6),
         _buildSectionHeader(context, 'Session'),
+        ListTile(
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          leading: Icon(
+            Icons.delete_forever_outlined,
+            color: theme.colorScheme.error,
+          ),
+          title: Text(
+            'Delete account & data',
+            style: TextStyle(color: theme.colorScheme.error),
+          ),
+          subtitle: const Text(
+            'Permanently remove account data',
+            style: TextStyle(fontSize: 11),
+          ),
+          onTap: () async {
+            await _confirmDeleteAccount(context, provider);
+          },
+        ),
         ListTile(
           dense: true,
           visualDensity: VisualDensity.compact,
@@ -1204,6 +1451,7 @@ class _SidebarState extends State<Sidebar> {
           leading: const Icon(Icons.refresh_rounded),
           title: const Text('Refresh data'),
           onTap: () async {
+            HapticFeedback.selectionClick();
             await provider.refreshAll();
           },
         ),
@@ -1227,7 +1475,7 @@ class _SidebarState extends State<Sidebar> {
               return;
             }
             Navigator.of(context).pushAndRemoveUntil(
-              MaterialPageRoute(builder: (_) => const OnboardingScreen()),
+              buildAppPageRoute(context, const OnboardingScreen()),
               (route) => false,
             );
           },
