@@ -1,8 +1,30 @@
 part of 'nomade_provider.dart';
 
 extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
-  Future<void> connectSocket() async {
+  Future<void> connectSocket({
+    bool forceReconnect = false,
+    String source = 'unspecified',
+  }) async {
     if (accessToken == null) return;
+    final selectedConversationId = _selectedConversation?.id;
+    if (!forceReconnect &&
+        realtimeConnected &&
+        socket != null &&
+        socketSub != null) {
+      if (selectedConversationId != null) {
+        final runtime = _runtimeByConversation.putIfAbsent(
+          selectedConversationId,
+          () => ConversationRuntimeTrace(),
+        );
+        runtime.socketConnectSkips += 1;
+        _appendConversationDebugEvent(
+          conversationId: selectedConversationId,
+          type: 'socket.connect.skipped',
+          message: 'source=$source reason=already_connected',
+        );
+      }
+      return;
+    }
     final tokenReady = await ensureFreshToken();
     if (!tokenReady || accessToken == null) {
       await logout();
@@ -11,6 +33,13 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
       return;
     }
     try {
+      if (selectedConversationId != null) {
+        final runtime = _runtimeByConversation.putIfAbsent(
+          selectedConversationId,
+          () => ConversationRuntimeTrace(),
+        );
+        runtime.socketConnectAttempts += 1;
+      }
       await socketSub?.cancel();
       await socket?.sink.close();
       socket = api.openUserSocket(accessToken!);
@@ -20,14 +49,24 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
         onDone: () => _handleSocketDisconnected('Socket closed'),
       );
       realtimeConnected = true;
+      if (status == 'Socket closed' ||
+          status == 'Connection failed' ||
+          status.startsWith('Socket error:')) {
+        status = 'Realtime connected';
+      }
       reconnectAttempts = 0;
       reconnectTimer?.cancel();
       final conversationId = _selectedConversation?.id;
       if (conversationId != null) {
+        final runtime = _runtimeByConversation.putIfAbsent(
+          conversationId,
+          () => ConversationRuntimeTrace(),
+        );
+        runtime.socketConnectSuccess += 1;
         _appendConversationDebugEvent(
           conversationId: conversationId,
           type: 'socket.connected',
-          message: 'Realtime stream opened',
+          message: 'source=$source realtime stream opened',
         );
         if (activeTurnId != null ||
             _hasRunningTurnForConversation(conversationId)) {
@@ -50,6 +89,18 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
         status =
             'Realtime encrypted updates are paused. Complete secure scan to continue.';
         _notifyListenersSafe();
+        return;
+      }
+      if (error.code == 'e2e_replay_detected') {
+        final decoded = _safeDecodeSocketPayload(raw);
+        final conversationId = decoded?['conversationId']?.toString() ?? '';
+        if (conversationId.isNotEmpty) {
+          _appendConversationDebugEvent(
+            conversationId: conversationId,
+            type: 'socket.event.replayed',
+            message: 'Duplicate encrypted event ignored after reconnect',
+          );
+        }
         return;
       }
       if (allowPeerRecovery && error.code == 'e2e_unknown_sender_device') {
@@ -629,8 +680,25 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
       if (turnId != null && diff != null) {
         final index = turns.indexWhere((t) => t.id == turnId);
         if (index != -1) {
-          // In a real app we'd want to update the Turn object in place
-          // but for this UI overhaul we'll rely on the stream buffer or reload
+          final current = turns[index];
+          turns[index] = Turn(
+            id: current.id,
+            conversationId: current.conversationId,
+            userPrompt: current.userPrompt,
+            codexTurnId: current.codexTurnId,
+            status: current.status,
+            diff: diff,
+            error: current.error,
+            createdAt: current.createdAt,
+            updatedAt: DateTime.now(),
+            completedAt: current.completedAt,
+            deliveryPolicy: current.deliveryPolicy,
+            deliveryState: current.deliveryState,
+            deliveryAttempts: current.deliveryAttempts,
+            deliveryError: current.deliveryError,
+            nextDeliveryAt: current.nextDeliveryAt,
+            items: current.items,
+          );
         }
       }
       if (conversationId.isNotEmpty && turnId != null) {
@@ -815,10 +883,16 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
     if (accessToken == null) {
       return;
     }
+    final wasConnected = realtimeConnected;
     realtimeConnected = false;
     status = reason;
     final conversationId = _selectedConversation?.id;
     if (conversationId != null) {
+      final runtime = _runtimeByConversation.putIfAbsent(
+        conversationId,
+        () => ConversationRuntimeTrace(),
+      );
+      runtime.socketDisconnects += 1;
       _appendConversationDebugEvent(
         conversationId: conversationId,
         type: 'socket.disconnected',
@@ -826,6 +900,9 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
       );
     }
     _notifyListenersSafe();
+    if (!wasConnected && reconnectTimer?.isActive == true) {
+      return;
+    }
     _scheduleSocketReconnect();
   }
 
@@ -855,11 +932,27 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
     reconnectTimer?.cancel();
     reconnectAttempts += 1;
     final backoffSec = (1 << (reconnectAttempts - 1)).clamp(1, 20);
+    final conversationId = _selectedConversation?.id;
+    if (conversationId != null) {
+      final runtime = _runtimeByConversation.putIfAbsent(
+        conversationId,
+        () => ConversationRuntimeTrace(),
+      );
+      runtime.socketReconnectScheduled += 1;
+      _appendConversationDebugEvent(
+        conversationId: conversationId,
+        type: 'socket.reconnect.scheduled',
+        message: 'attempt=$reconnectAttempts backoff=${backoffSec}s',
+      );
+    }
     reconnectTimer = Timer(Duration(seconds: backoffSec), () async {
       if (accessToken == null || realtimeConnected) {
         return;
       }
-      await connectSocket();
+      await connectSocket(
+        forceReconnect: true,
+        source: 'auto_reconnect',
+      );
     });
   }
 }

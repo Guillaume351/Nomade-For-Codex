@@ -297,6 +297,46 @@ class NomadeSupportReportBuilder {
     );
     _appendSupportKeyValue(
       lines,
+      'turnsReloadApiCalls',
+      context.runtime?.turnsReloadApiCalls ?? 0,
+    );
+    _appendSupportKeyValue(
+      lines,
+      'turnsReloadThrottled',
+      context.runtime?.turnsReloadThrottled ?? 0,
+    );
+    _appendSupportKeyValue(
+      lines,
+      'turnsReloadSkippedInFlight',
+      context.runtime?.turnsReloadSkippedInFlight ?? 0,
+    );
+    _appendSupportKeyValue(
+      lines,
+      'socketConnectAttempts',
+      context.runtime?.socketConnectAttempts ?? 0,
+    );
+    _appendSupportKeyValue(
+      lines,
+      'socketConnectSuccess',
+      context.runtime?.socketConnectSuccess ?? 0,
+    );
+    _appendSupportKeyValue(
+      lines,
+      'socketConnectSkips',
+      context.runtime?.socketConnectSkips ?? 0,
+    );
+    _appendSupportKeyValue(
+      lines,
+      'socketDisconnects',
+      context.runtime?.socketDisconnects ?? 0,
+    );
+    _appendSupportKeyValue(
+      lines,
+      'socketReconnectScheduled',
+      context.runtime?.socketReconnectScheduled ?? 0,
+    );
+    _appendSupportKeyValue(
+      lines,
       'eventsNotRenderedMethods',
       context.runtime == null || context.runtime!.unsupportedMethods.isEmpty
           ? '-'

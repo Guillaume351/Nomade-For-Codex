@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 
 import '../models/conversation.dart';
+import '../models/turn.dart';
 import '../models/workspace.dart';
 import '../providers/nomade_provider.dart';
 import 'secure_scan_camera_screen.dart';
@@ -16,6 +17,7 @@ import '../widgets/chat_turn_widget.dart';
 import '../widgets/e2e_guide_sheet.dart';
 import '../widgets/home/service_terminal_sheet.dart';
 import '../widgets/home/turn_options_sheet.dart';
+import '../widgets/app_motion.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/tunnel_manager_sheet.dart';
 
@@ -24,6 +26,7 @@ part 'home_screen_methods_topbar.dart';
 part 'home_screen_methods_layout.dart';
 
 enum _TopBarMenuAction {
+  conversationDiff,
   turnOptions,
   copyUsefulLogs,
   toggleDiagnostics,
@@ -168,6 +171,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<_PendingAttachment> _pendingAttachments = <_PendingAttachment>[];
 
   bool _showDiagnostics = false;
+  bool _cancelTurnInProgress = false;
   bool _chatBottomRefreshInProgress = false;
   double _chatBottomOverscrollPx = 0;
   DateTime? _chatBottomRefreshLastAt;
@@ -199,22 +203,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       drawer: isWideLayout ? null : const Sidebar(),
       drawerEnableOpenDragGesture: !isWideLayout,
-      body: DecoratedBox(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              scheme.primary.withValues(
-                alpha: theme.brightness == Brightness.dark ? 0.16 : 0.07,
-              ),
-              theme.scaffoldBackgroundColor,
-              scheme.tertiary.withValues(
-                alpha: theme.brightness == Brightness.dark ? 0.11 : 0.05,
-              ),
-            ],
-          ),
-        ),
+      body: AppAmbientBackground(
         child: SafeArea(
           bottom: false,
           child: Center(
@@ -228,13 +217,22 @@ class _HomeScreenState extends State<HomeScreen> {
                       padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(24),
-                        child: DecoratedBox(
+                        child: AnimatedContainer(
+                          duration: AppMotion.medium,
+                          curve: AppMotion.standardCurve,
                           decoration: BoxDecoration(
-                            color: scheme.surface.withValues(alpha: 0.88),
+                            color: scheme.surface.withValues(alpha: 0.9),
                             border: Border.all(
                               color:
-                                  scheme.outlineVariant.withValues(alpha: 0.66),
+                                  scheme.outlineVariant.withValues(alpha: 0.68),
                             ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.06),
+                                blurRadius: 22,
+                                offset: const Offset(0, 8),
+                              ),
+                            ],
                           ),
                           child: isWideLayout
                               ? Row(

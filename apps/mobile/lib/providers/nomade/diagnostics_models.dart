@@ -26,5 +26,13 @@ class ConversationRuntimeTrace {
   String? turnError;
   int eventsReceived = 0;
   int eventsRendered = 0;
+  int turnsReloadApiCalls = 0;
+  int turnsReloadThrottled = 0;
+  int turnsReloadSkippedInFlight = 0;
+  int socketConnectAttempts = 0;
+  int socketConnectSuccess = 0;
+  int socketConnectSkips = 0;
+  int socketDisconnects = 0;
+  int socketReconnectScheduled = 0;
   final Set<String> unsupportedMethods = <String>{};
 }

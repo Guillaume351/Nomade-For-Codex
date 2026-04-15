@@ -5,6 +5,7 @@ import 'providers/nomade_provider.dart';
 import 'screens/onboarding_screen.dart';
 import 'screens/home_screen.dart';
 import 'theme/app_theme.dart';
+import 'widgets/app_motion.dart';
 
 void main() {
   runApp(
@@ -37,6 +38,9 @@ class NomadeApp extends StatelessWidget {
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,
       themeMode: ThemeMode.system,
+      themeAnimationDuration: AppMotion.medium,
+      themeAnimationCurve: AppMotion.standardCurve,
+      scrollBehavior: const AppScrollBehavior(),
       home: provider.isAuthenticated
           ? const HomeScreen()
           : const OnboardingScreen(),

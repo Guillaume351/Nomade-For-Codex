@@ -1,6 +1,63 @@
 part of 'home_screen.dart';
 
 extension _HomeScreenComposerMethods on _HomeScreenState {
+  Future<void> _confirmAndCancelActiveTurn(NomadeProvider provider) async {
+    if (_cancelTurnInProgress) {
+      return;
+    }
+    final turnId = provider.activeTurnId;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Cancel running turn?'),
+        content: Text(
+          turnId == null || turnId.trim().isEmpty
+              ? 'Codex is currently running a request. Do you want to cancel it?'
+              : 'Codex is currently running turn $turnId.\n\nDo you want to cancel it?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Keep running'),
+          ),
+          FilledButton.tonal(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Cancel turn'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+
+    _setStateSafe(() {
+      _cancelTurnInProgress = true;
+    });
+    try {
+      final interrupted = await provider.interruptActiveTurn();
+      if (!mounted) {
+        return;
+      }
+      final messenger = ScaffoldMessenger.of(context);
+      final message = interrupted
+          ? 'Cancellation requested.'
+          : (provider.status.trim().isNotEmpty
+              ? provider.status.trim()
+              : 'Unable to cancel the running turn.');
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(message),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } finally {
+      _setStateSafe(() {
+        _cancelTurnInProgress = false;
+      });
+    }
+  }
+
   Future<void> _handleSend() async {
     final rawInput = _promptController.text.trim();
     if (rawInput.isEmpty && _pendingAttachments.isEmpty) {
@@ -44,6 +101,7 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
     final extraInputItems = _pendingAttachments
         .map((attachment) => attachment.toInputItem())
         .toList(growable: false);
+    HapticFeedback.lightImpact();
     _promptController.clear();
     _setStateSafe(() {
       _pendingAttachments.clear();
@@ -258,6 +316,7 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
   }
 
   void _applySlashCommand(_ComposerSlashCommand command) {
+    HapticFeedback.selectionClick();
     final nextText = '${command.command} ';
     _promptController.value = TextEditingValue(
       text: nextText,
@@ -278,7 +337,8 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
       return KeyEventResult.ignored;
     }
     final keyboard = HardwareKeyboard.instance;
-    final isShortcutPressed = keyboard.isMetaPressed || keyboard.isControlPressed;
+    final isShortcutPressed =
+        keyboard.isMetaPressed || keyboard.isControlPressed;
     if (!isShortcutPressed) {
       return KeyEventResult.ignored;
     }
@@ -294,6 +354,7 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
     _ComposerAction action,
     NomadeProvider provider,
   ) async {
+    HapticFeedback.selectionClick();
     switch (action) {
       case _ComposerAction.addPhotos:
         await _pickComposerPhotos();
@@ -341,7 +402,9 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
         final rawName = file.name.trim();
         final attachmentName = rawName.isNotEmpty
             ? rawName
-            : (path.isNotEmpty ? path.replaceAll('\\', '/').split('/').last : 'attachment');
+            : (path.isNotEmpty
+                ? path.replaceAll('\\', '/').split('/').last
+                : 'attachment');
         final normalizedTarget = path.isNotEmpty ? path : attachmentName;
         final isImage = _isImageAttachmentPath(normalizedTarget);
         final bytes = file.bytes;
@@ -426,7 +489,9 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
         final path = image.path.trim();
         final name = image.name.trim().isNotEmpty
             ? image.name.trim()
-            : (path.isNotEmpty ? path.replaceAll('\\', '/').split('/').last : 'Photo');
+            : (path.isNotEmpty
+                ? path.replaceAll('\\', '/').split('/').last
+                : 'Photo');
         final attachment = _createImageAttachment(
           bytes: bytes,
           name: name.isEmpty ? 'Photo' : name,
@@ -507,8 +572,7 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
 
     if (isDataImage || isRemoteImage) {
       final id = 'image:${raw.hashCode}';
-      final exists =
-          _pendingAttachments.any((entry) => entry.imageUrl == raw);
+      final exists = _pendingAttachments.any((entry) => entry.imageUrl == raw);
       if (exists) {
         return;
       }
@@ -517,7 +581,9 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
           _PendingAttachment(
             id: id,
             type: 'image',
-            name: isDataImage ? 'Pasted image' : (uri?.pathSegments.last ?? 'Pasted image'),
+            name: isDataImage
+                ? 'Pasted image'
+                : (uri?.pathSegments.last ?? 'Pasted image'),
             imageUrl: raw,
           ),
         );
@@ -525,13 +591,11 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
       return;
     }
 
-    final normalizedPath = uri != null && uri.scheme == 'file'
-        ? uri.toFilePath()
-        : raw;
+    final normalizedPath =
+        uri != null && uri.scheme == 'file' ? uri.toFilePath() : raw;
     if (_isImageAttachmentPath(normalizedPath)) {
       final id = 'path:$normalizedPath';
-      final exists =
-          _pendingAttachments.any((entry) => entry.id == id);
+      final exists = _pendingAttachments.any((entry) => entry.id == id);
       if (exists) {
         return;
       }
@@ -876,8 +940,8 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
       }
       _scrollController.animateTo(
         _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 260),
-        curve: Curves.easeOutCubic,
+        duration: AppMotion.medium,
+        curve: AppMotion.standardCurve,
       );
     });
   }
@@ -886,8 +950,9 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
     final messenger = ScaffoldMessenger.of(context);
 
     final result = await Navigator.of(context).push<SecureScanCameraResult>(
-      MaterialPageRoute(
-        builder: (_) => const SecureScanCameraScreen(
+      buildAppPageRoute(
+        context,
+        const SecureScanCameraScreen(
           title: 'Approve secure scan',
         ),
       ),
@@ -953,6 +1018,9 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
     NomadeProvider provider,
   ) async {
     switch (action) {
+      case _TopBarMenuAction.conversationDiff:
+        _showConversationDiffBottomSheet(provider);
+        return;
       case _TopBarMenuAction.turnOptions:
         _showOptionsBottomSheet(context);
         return;

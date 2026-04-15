@@ -1,6 +1,76 @@
 part of 'nomade_provider.dart';
 
 extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
+  Future<bool> interruptActiveTurn() async {
+    final token = accessToken;
+    final conversation = selectedConversation;
+    if (token == null || conversation == null) {
+      return false;
+    }
+
+    String? targetTurnId = activeTurnId;
+    if (targetTurnId == null || targetTurnId.trim().isEmpty) {
+      for (var index = turns.length - 1; index >= 0; index -= 1) {
+        final turn = turns[index];
+        if (turn.conversationId != conversation.id) {
+          continue;
+        }
+        if (_turnCountsAsRunning(turn)) {
+          targetTurnId = turn.id;
+          break;
+        }
+      }
+    }
+    if (targetTurnId == null || targetTurnId.trim().isEmpty) {
+      status = 'No running turn to cancel.';
+      _notifyListenersSafe();
+      return false;
+    }
+
+    try {
+      await api.interruptTurn(
+        accessToken: token,
+        conversationId: conversation.id,
+        turnId: targetTurnId,
+      );
+      final runtime = _runtimeByConversation.putIfAbsent(
+        conversation.id,
+        () => ConversationRuntimeTrace(),
+      );
+      runtime.turnStatus = 'interrupt_requested';
+      _appendConversationDebugEvent(
+        conversationId: conversation.id,
+        type: 'turn.interrupt.requested',
+        message: 'turn=$targetTurnId',
+      );
+      status = 'Cancellation requested. Waiting for agent confirmation...';
+      unawaited(loadTurns(conversation.id));
+      _notifyListenersSafe();
+      return true;
+    } on ApiException catch (error) {
+      if (await _logoutIfUnauthorized(error)) {
+        return false;
+      }
+      status = 'Cancel failed: ${error.message}';
+      _appendConversationDebugEvent(
+        conversationId: conversation.id,
+        type: 'turn.interrupt.error',
+        message: error.message,
+      );
+      _notifyListenersSafe();
+      return false;
+    } catch (error) {
+      status = 'Cancel failed: $error';
+      _appendConversationDebugEvent(
+        conversationId: conversation.id,
+        type: 'turn.interrupt.error',
+        message: error.toString(),
+      );
+      _notifyListenersSafe();
+      return false;
+    }
+  }
+
   Future<void> sendPrompt(
     String prompt, {
     String? deliveryPolicyOverride,
@@ -48,6 +118,17 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
       }
 
       if (selectedConversation == null) {
+        if (_conversationsWorkspaceId != selectedWorkspace?.id ||
+            conversations.isEmpty) {
+          await loadConversations();
+        }
+      }
+
+      if (selectedConversation == null && conversations.isNotEmpty) {
+        selectedConversation = conversations.first;
+      }
+
+      if (selectedConversation == null) {
         final created = await createConversation(
           title: effectivePrompt.split('\n').first.trim(),
         );
@@ -81,10 +162,9 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
       final modeMaskEffort = NomadeCodexUtils.normalizeReasoningEffort(
         selectedMode['reasoningEffort'] ?? selectedModeMask['reasoning_effort'],
       );
-      final requestedModel =
-          NomadeCodexUtils.normalizeString(selectedModel) ??
-              modeMaskModel ??
-              codexDefaultModel;
+      final requestedModel = NomadeCodexUtils.normalizeString(selectedModel) ??
+          modeMaskModel ??
+          codexDefaultModel;
       final requestedEffort =
           NomadeCodexUtils.normalizeReasoningEffort(selectedEffort) ??
               modeMaskEffort;
@@ -107,9 +187,8 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         _notifyListenersSafe();
         return;
       }
-      // Always refresh the realtime socket before a new turn to avoid stale
-      // half-open mobile websocket sessions that can miss turn events.
-      await connectSocket();
+      // Ensure realtime socket is available before creating the turn.
+      await connectSocket(source: 'turn.send');
 
       _appendConversationDebugEvent(
         conversationId: conversationId,
@@ -168,6 +247,9 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
             'inputItems': inputItems,
           }),
         );
+        // Persist the incremented sequence before sending the turn so an app
+        // suspend/restart cannot replay an older envelope sequence.
+        await _persistE2ERuntime();
       } on E2ERuntimeException catch (error) {
         if (error.code == 'e2e_runtime_unavailable') {
           status =
@@ -183,7 +265,6 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
             cause: error);
         return;
       }
-      unawaited(_persistE2ERuntime());
 
       final turn = await api.createTurn(
         accessToken: accessToken!,
@@ -685,6 +766,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
     _selectedConversation = null;
     workspaces = [];
     conversations = [];
+    _conversationsWorkspaceId = null;
     turns = [];
     services = [];
     tunnels = [];
@@ -703,7 +785,26 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
   }
 
   Future<void> onWorkspaceSelected(Workspace workspace) async {
-    selectedWorkspace = workspace;
+    final previousWorkspaceId = _selectedWorkspace?.id;
+    final nextWorkspaceId = workspace.id;
+    if (previousWorkspaceId != nextWorkspaceId) {
+      _selectedWorkspace = workspace;
+      _selectedConversation = null;
+      conversations = [];
+      _conversationsWorkspaceId = null;
+      turns = [];
+      services = [];
+      tunnels = [];
+      trustedDevMode = false;
+      selectedServiceId = null;
+      _notifyListenersSafe();
+      unawaited(persistSession());
+    } else if (!identical(_selectedWorkspace, workspace)) {
+      _selectedWorkspace = workspace;
+      _notifyListenersSafe();
+      unawaited(persistSession());
+    }
+
     await loadCodexOptions();
     await loadConversations();
     await loadDevSettings();
@@ -764,7 +865,12 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         title: clipped,
       );
       final conversation = Conversation.fromJson(created);
-      conversations = [conversation, ...conversations];
+      if (_conversationsWorkspaceId != conversation.workspaceId) {
+        conversations = [conversation];
+      } else {
+        conversations = [conversation, ...conversations];
+      }
+      _conversationsWorkspaceId = conversation.workspaceId;
       _sortConversationsByActivity();
       _selectedConversation = conversation;
       turns = [];
@@ -773,6 +879,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         type: 'conversation.created',
         message: 'workspace=${conversation.workspaceId}',
       );
+      unawaited(persistSession());
       _notifyListenersSafe();
       return true;
     } catch (e) {
@@ -869,6 +976,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
     for (final entry in conversations) {
       if (entry.id == conversationId) {
         _selectedConversation = entry;
+        unawaited(persistSession());
         await loadTurns(conversationId);
         return;
       }
@@ -887,6 +995,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
     await bootstrapData(
       storedAgentId: selectedAgent?.id,
       storedWorkspaceId: selectedWorkspace?.id,
+      storedConversationId: selectedConversation?.id,
     );
   }
 }

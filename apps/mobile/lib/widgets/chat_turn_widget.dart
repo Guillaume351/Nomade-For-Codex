@@ -9,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/turn.dart';
 import '../models/turn_timeline.dart';
 import '../providers/nomade_provider.dart';
+import 'app_motion.dart';
 
 enum _TimelineSegmentKind {
   agentMessage,
@@ -82,6 +83,9 @@ class _RequestUserInputQuestionData {
 class ChatTurnWidget extends StatelessWidget {
   const ChatTurnWidget({super.key, required this.turn});
 
+  static const double _messageCornerRadius = 20;
+  static const double _iphoneBottomCornerRadius = 18;
+
   final Turn turn;
 
   @override
@@ -91,16 +95,21 @@ class ChatTurnWidget extends StatelessWidget {
     final markdownForCopy = _getMarkdownForCopy(timeline);
     final isUser = turn.userPrompt.isNotEmpty;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (isUser) _buildUserBubble(context, turn.userPrompt),
-        _buildAssistantBubble(
-          context,
-          timeline: timeline,
-          markdownForCopy: markdownForCopy,
-        ),
-      ],
+    return FadeSlideIn(
+      key: ValueKey('turn-${turn.id}'),
+      duration: AppMotion.medium,
+      beginOffset: const Offset(0, 0.018),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (isUser) _buildUserBubble(context, turn.userPrompt),
+          _buildAssistantBubble(
+            context,
+            timeline: timeline,
+            markdownForCopy: markdownForCopy,
+          ),
+        ],
+      ),
     );
   }
 
@@ -240,9 +249,10 @@ class ChatTurnWidget extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
           decoration: BoxDecoration(
             borderRadius: const BorderRadius.only(
-              topLeft: Radius.circular(20),
-              topRight: Radius.circular(20),
-              bottomLeft: Radius.circular(20),
+              topLeft: Radius.circular(_messageCornerRadius),
+              topRight: Radius.circular(_messageCornerRadius),
+              bottomLeft: Radius.circular(_messageCornerRadius),
+              bottomRight: Radius.circular(_iphoneBottomCornerRadius),
             ),
             gradient: LinearGradient(
               begin: Alignment.topLeft,
@@ -260,7 +270,7 @@ class ChatTurnWidget extends StatelessWidget {
               ),
             ],
           ),
-          child: Text(
+          child: SelectableText(
             _normalizeInlineDirectiveText(text),
             style: theme.textTheme.bodyMedium?.copyWith(
               color: Colors.white,
@@ -297,9 +307,10 @@ class ChatTurnWidget extends StatelessWidget {
         decoration: BoxDecoration(
           color: scheme.surface,
           borderRadius: const BorderRadius.only(
-            topLeft: Radius.circular(20),
-            topRight: Radius.circular(20),
-            bottomRight: Radius.circular(20),
+            topLeft: Radius.circular(_messageCornerRadius),
+            topRight: Radius.circular(_messageCornerRadius),
+            bottomLeft: Radius.circular(_iphoneBottomCornerRadius),
+            bottomRight: Radius.circular(_messageCornerRadius),
           ),
           border:
               Border.all(color: scheme.outlineVariant.withValues(alpha: 0.68)),
@@ -451,7 +462,10 @@ class ChatTurnWidget extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 14, color: color),
+          if (status == 'running')
+            PulseDot(color: color, size: 7)
+          else
+            Icon(icon, size: 14, color: color),
           const SizedBox(width: 6),
           Text(
             status,
@@ -1279,6 +1293,7 @@ class ChatTurnWidget extends StatelessWidget {
     final scheme = theme.colorScheme;
     final duration = turn.duration;
     final tokens = turn.totalTokens;
+    final hasDiff = turn.diff.trim().isNotEmpty;
 
     return Row(
       children: [
@@ -1304,6 +1319,14 @@ class ChatTurnWidget extends StatelessWidget {
             ),
           ),
         ],
+        if (hasDiff)
+          IconButton(
+            icon: Icon(Icons.difference_rounded,
+                size: 17, color: scheme.onSurfaceVariant),
+            onPressed: () => _showTurnDiffSheet(context, turn),
+            tooltip: 'View diff',
+            visualDensity: VisualDensity.compact,
+          ),
         const Spacer(),
         IconButton(
           icon: Icon(Icons.copy_rounded,
@@ -1321,6 +1344,77 @@ class ChatTurnWidget extends StatelessWidget {
           visualDensity: VisualDensity.compact,
         ),
       ],
+    );
+  }
+
+  void _showTurnDiffSheet(BuildContext context, Turn turn) {
+    final diff = turn.diff.trim();
+    if (diff.isEmpty) {
+      return;
+    }
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              16,
+              6,
+              16,
+              MediaQuery.of(sheetContext).padding.bottom + 16,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Turn diff',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  turn.userPrompt.trim().isEmpty
+                      ? 'Prompt unavailable'
+                      : turn.userPrompt.trim(),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Container(
+                  width: double.infinity,
+                  constraints: const BoxConstraints(maxHeight: 440),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0E1014),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      diff,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        height: 1.35,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -1439,8 +1533,8 @@ class ChatTurnWidget extends StatelessWidget {
 
   Map<String, String> _parseDirectiveArgs(String argsBody) {
     final values = <String, String>{};
-    for (final match in RegExp(r'([a-zA-Z0-9_]+)\s*=\s*"([^"]*)"')
-        .allMatches(argsBody)) {
+    for (final match
+        in RegExp(r'([a-zA-Z0-9_]+)\s*=\s*"([^"]*)"').allMatches(argsBody)) {
       final key = match.group(1)?.trim();
       final value = match.group(2);
       if (key == null || key.isEmpty || value == null) {
