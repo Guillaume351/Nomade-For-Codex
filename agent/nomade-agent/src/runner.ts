@@ -333,8 +333,13 @@ const enrichConversationEventWithE2E = (
       conversationId,
       turnId: payload.turnId,
       requestId: payload.requestId,
-      method: payload.method,
-      e2eEnvelope: e2eRuntime.encrypt(scope, JSON.stringify({ params: payload.params }))
+      e2eEnvelope: e2eRuntime.encrypt(
+        scope,
+        JSON.stringify({
+          method: payload.method,
+          params: payload.params
+        })
+      )
     };
   }
 
@@ -903,19 +908,30 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
 
   const sessionManager = new SessionManager({
     onOutput: (sessionId, stream, data, cursor) => {
-      const e2eEnvelope =
-        e2eRuntime && data.length > 0 ? e2eRuntime.encrypt(`session:${sessionId}`, data) : undefined;
+      const e2eEnvelope = e2eRuntime
+        ? e2eRuntime.encrypt(
+            `session:${sessionId}`,
+            JSON.stringify({
+              data,
+              stream,
+              cursor
+            })
+          )
+        : undefined;
       if (e2eEnvelope) {
         schedulePersistSeqByScope();
       }
-      sendToControl({
+      const outputPayload: Record<string, unknown> = {
         type: "session.output",
         sessionId,
-        stream,
         data: e2eEnvelope ? "" : data,
-        cursor,
         e2eEnvelope
-      });
+      };
+      if (!e2eEnvelope) {
+        outputPayload.stream = stream;
+        outputPayload.cursor = cursor;
+      }
+      sendToControl(outputPayload);
     },
     onStatus: (sessionId, status, exitCode) => {
       markSessionActive(sessionId, status === "running");

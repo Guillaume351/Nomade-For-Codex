@@ -15,8 +15,6 @@ export interface E2EEnvelope {
 export interface SessionCreateMessage {
   type: "session.create";
   sessionId: string;
-  workspaceId: string;
-  agentId: string;
   e2eCommandEnvelope: E2EEnvelope;
 }
 
@@ -36,8 +34,8 @@ export interface SessionOutputMessage {
   type: "session.output";
   sessionId: string;
   data: string;
-  cursor: number;
-  stream: "stdout" | "stderr";
+  cursor?: number;
+  stream?: "stdout" | "stderr";
   e2eEnvelope?: E2EEnvelope;
 }
 
@@ -304,8 +302,9 @@ export interface ConversationServerRequestMessage {
   threadId: string;
   codexTurnId: string;
   requestId: string;
-  method: string;
-  params: Record<string, unknown>;
+  method?: string;
+  params?: Record<string, unknown>;
+  e2eEnvelope?: E2EEnvelope;
 }
 
 export interface ConversationServerRequestResolvedMessage {
@@ -316,15 +315,16 @@ export interface ConversationServerRequestResolvedMessage {
   codexTurnId: string;
   requestId: string;
   resolvedAt: string;
-  status: "completed" | "declined" | "failed";
+  status?: "completed" | "declined" | "failed";
   result?: unknown;
   error?: string;
+  e2eEnvelope?: E2EEnvelope;
 }
 
 export interface ConversationServerResponseMessage {
   type: "conversation.server.response";
-  conversationId: string;
-  turnId: string;
+  conversationId?: string;
+  turnId?: string;
   threadId?: string;
   codexTurnId?: string;
   requestId: string;

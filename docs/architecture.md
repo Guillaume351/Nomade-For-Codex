@@ -43,8 +43,8 @@
 - Agent tokens: random opaque tokens hashed in Postgres.
 - Tunnel access: random opaque token hashed in Postgres.
 - Turn/session content transport: envelope-only E2E in strict mode (`xchacha20poly1305`), with plaintext fallback paths disabled.
-- Terminal/session/control payload fields encrypted end-to-end: turn prompt + input items + run options, session command payload, terminal input/output, server request approval payloads.
-- Still visible to relay by design: routing metadata needed for delivery (event type, ids, cursor, stream/status).
+- Terminal/session/control fields encrypted end-to-end: turn prompt + input items + run options, session command payload, terminal input/output payload + stream + cursor, server request approval payloads + method names.
+- Still visible to relay by design: minimum routing metadata needed for delivery (event type + stable ids).
 - Dev service session start is disabled in strict E2E mode until encrypted service launch is implemented.
 
 ## Current v1 limits

@@ -37,6 +37,14 @@ interface PendingTunnelWsOpen {
   bridge: TunnelWsBridge;
 }
 
+interface PendingServerResponse {
+  userId: string;
+  agentId: string;
+  conversationId: string;
+  turnId: string;
+  timeout: NodeJS.Timeout;
+}
+
 export interface CodexThreadSummary {
   threadId: string;
   title: string;
@@ -223,6 +231,8 @@ const normalizeString = (value: unknown): string | undefined => {
   return trimmed.length > 0 ? trimmed : undefined;
 };
 
+const pendingServerResponseTtlMs = 10 * 60 * 1000;
+
 const redactEncryptedRealtimePayload = (payload: Record<string, unknown>): Record<string, unknown> => {
   const type = typeof payload.type === "string" ? payload.type : "";
   const e2eEnvelope =
@@ -237,9 +247,7 @@ const redactEncryptedRealtimePayload = (payload: Record<string, unknown>): Recor
     return {
       type,
       sessionId: payload.sessionId,
-      stream: payload.stream,
       data: "",
-      cursor: payload.cursor,
       e2eEnvelope
     };
   }
@@ -269,7 +277,6 @@ const redactEncryptedRealtimePayload = (payload: Record<string, unknown>): Recor
       type,
       conversationId: payload.conversationId,
       turnId: payload.turnId,
-      stream: payload.stream,
       e2eEnvelope
     };
   }
@@ -289,7 +296,7 @@ const redactEncryptedRealtimePayload = (payload: Record<string, unknown>): Recor
       conversationId: payload.conversationId,
       turnId: payload.turnId,
       requestId: payload.requestId,
-      method: payload.method,
+      method: "encrypted",
       e2eEnvelope
     };
   }
@@ -577,6 +584,7 @@ export class WsHub {
   private readonly pendingProxy = new Map<string, PendingProxy>();
   private readonly pendingTunnelWsOpen = new Map<string, PendingTunnelWsOpen>();
   private readonly tunnelWsRoute = new Map<string, { agentId: string; bridge: TunnelWsBridge }>();
+  private readonly pendingServerResponses = new Map<string, PendingServerResponse>();
   private readonly pendingThreadList = new Map<string, PendingThreadList>();
   private readonly pendingThreadRead = new Map<string, PendingThreadRead>();
   private readonly pendingCodexOptions = new Map<string, PendingCodexOptions>();
@@ -600,6 +608,50 @@ export class WsHub {
   ) {
     this.wss = new WebSocketServer({ noServer: true });
     this.server.on("upgrade", (req, socket, head) => this.handleUpgrade(req, socket, head));
+  }
+
+  private pendingServerResponseKey(userId: string, requestId: string): string {
+    return `${userId}:${requestId}`;
+  }
+
+  private clearPendingServerResponse(key: string): PendingServerResponse | undefined {
+    const pending = this.pendingServerResponses.get(key);
+    if (!pending) {
+      return undefined;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingServerResponses.delete(key);
+    return pending;
+  }
+
+  private setPendingServerResponse(params: {
+    userId: string;
+    agentId: string;
+    conversationId: string;
+    turnId: string;
+    requestId: string;
+  }): void {
+    const key = this.pendingServerResponseKey(params.userId, params.requestId);
+    this.clearPendingServerResponse(key);
+    const timeout = setTimeout(() => {
+      this.pendingServerResponses.delete(key);
+    }, pendingServerResponseTtlMs);
+    this.pendingServerResponses.set(key, {
+      userId: params.userId,
+      agentId: params.agentId,
+      conversationId: params.conversationId,
+      turnId: params.turnId,
+      timeout
+    });
+  }
+
+  private clearPendingServerResponsesForAgent(agentId: string): void {
+    for (const [key, pending] of this.pendingServerResponses.entries()) {
+      if (pending.agentId !== agentId) {
+        continue;
+      }
+      this.clearPendingServerResponse(key);
+    }
   }
 
   rememberSessionOwner(sessionId: string, userId: string, agentId?: string): void {
@@ -929,21 +981,7 @@ export class WsHub {
       try {
         const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
         if (msg.type === "conversation.server.response") {
-          const conversationId = String(msg.conversationId ?? "");
-          const turnId = String(msg.turnId ?? "");
           const requestId = String(msg.requestId ?? "");
-          const explicitAgentId = typeof msg.agentId === "string" ? msg.agentId : undefined;
-          const agentId = explicitAgentId ?? this.conversationAgent.get(conversationId);
-          if (!agentId) {
-            ws.send(
-              JSON.stringify({
-                type: "error",
-                code: "conversation_unknown",
-                message: "Unknown conversation routing"
-              })
-            );
-            return;
-          }
           if (!requestId) {
             ws.send(
               JSON.stringify({
@@ -954,9 +992,19 @@ export class WsHub {
             );
             return;
           }
-          if (turnId && conversationId) {
-            this.turnConversation.set(turnId, conversationId);
+          const pendingKey = this.pendingServerResponseKey(userId, requestId);
+          const pending = this.pendingServerResponses.get(pendingKey);
+          if (!pending) {
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                code: "conversation_server_request_unknown",
+                message: "Unknown conversation.server.request routing"
+              })
+            );
+            return;
           }
+          this.turnConversation.set(pending.turnId, pending.conversationId);
           const e2eEnvelope =
             msg.e2eEnvelope && typeof msg.e2eEnvelope === "object"
               ? (msg.e2eEnvelope as Record<string, unknown>)
@@ -971,14 +1019,25 @@ export class WsHub {
             );
             return;
           }
-          this.sendToAgent(agentId, {
+          const delivered = this.sendToAgent(pending.agentId, {
             type: "conversation.server.response",
-            conversationId,
-            turnId,
+            conversationId: pending.conversationId,
+            turnId: pending.turnId,
             requestId,
             e2eEnvelope,
-            agentId
+            agentId: pending.agentId
           });
+          if (delivered) {
+            this.clearPendingServerResponse(pendingKey);
+            return;
+          }
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              code: "agent_offline",
+              message: "Unable to deliver response because the agent is offline"
+            })
+          );
           return;
         }
 
@@ -1071,6 +1130,7 @@ export class WsHub {
       if (existing?.ws === ws) {
         this.agentSockets.delete(agent.agentId);
       }
+      this.clearPendingServerResponsesForAgent(agent.agentId);
 
       for (const [requestId, pending] of this.pendingTunnelWsOpen.entries()) {
         if (pending.agentId !== agent.agentId) {
@@ -1098,7 +1158,8 @@ export class WsHub {
       const cursor = Number(msg.cursor ?? 0);
       const userId = this.sessionOwner.get(sessionId) ?? defaultUserId;
       const payload = redactEncryptedRealtimePayload(msg);
-      if (sessionId) {
+      const hasEnvelope = Boolean(msg.e2eEnvelope && typeof msg.e2eEnvelope === "object");
+      if (sessionId && !hasEnvelope) {
         void this.repositories.updateSessionCursor(sessionId, cursor);
       }
       this.broadcastToUser(userId, payload);
@@ -1534,15 +1595,29 @@ export class WsHub {
     if (type === "conversation.server.request" || type === "conversation.server.request.resolved") {
       const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
+      const requestId = String(msg.requestId ?? "");
+      const turnId = String(msg.turnId ?? "");
+      if (type === "conversation.server.request" && requestId) {
+        this.setPendingServerResponse({
+          userId,
+          agentId,
+          conversationId,
+          turnId,
+          requestId
+        });
+      }
+      if (type === "conversation.server.request.resolved" && requestId) {
+        this.clearPendingServerResponse(this.pendingServerResponseKey(userId, requestId));
+      }
       this.broadcastToUser(userId, redactEncryptedRealtimePayload(msg));
       if (type === "conversation.server.request") {
         void this.hooks.onConversationServerRequest?.({
           agentId,
           userId,
           conversationId,
-          turnId: String(msg.turnId ?? ""),
-          requestId: String(msg.requestId ?? ""),
-          method: String(msg.method ?? "")
+          turnId,
+          requestId,
+          method: String(msg.method ?? "encrypted")
         });
       }
       return;
@@ -1563,6 +1638,11 @@ export class WsHub {
           status,
           error
         });
+        for (const [requestId, pending] of this.pendingServerResponses.entries()) {
+          if (pending.turnId === turnId) {
+            this.clearPendingServerResponse(requestId);
+          }
+        }
       }
       if (conversationId) {
         void this.repositories.updateConversationStatus(

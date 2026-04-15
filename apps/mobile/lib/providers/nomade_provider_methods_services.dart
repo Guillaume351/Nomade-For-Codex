@@ -394,8 +394,6 @@ extension NomadeProviderServiceMethods on NomadeProvider {
       unawaited(_persistE2ERuntime());
       socket!.sink.add(jsonEncode({
         'type': 'conversation.server.response',
-        'conversationId': conversationId,
-        'turnId': turnId,
         'requestId': requestId,
         'e2eEnvelope': envelope,
       }));

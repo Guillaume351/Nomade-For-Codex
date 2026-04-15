@@ -199,10 +199,19 @@ extension NomadeProviderSocketDecodeMethods on NomadeProvider {
       if (sessionId.isEmpty) {
         throw const E2ERuntimeException('e2e_session_scope_missing');
       }
-      event['data'] = _decryptEnvelopeToString(
+      final payload = _decryptEnvelopeToObject(
         scope: 'session:$sessionId',
         envelope: envelope,
       );
+      event['data'] = payload['data']?.toString() ?? '';
+      final stream = payload['stream']?.toString();
+      if (stream != null && stream.isNotEmpty) {
+        event['stream'] = stream;
+      }
+      final cursor = payload['cursor'];
+      if (cursor is num) {
+        event['cursor'] = cursor.toInt();
+      }
       return event;
     }
 
@@ -243,10 +252,15 @@ extension NomadeProviderSocketDecodeMethods on NomadeProvider {
       return event;
     }
     if (type == 'conversation.server.request') {
+      final method = payload['method']?.toString() ?? '';
+      if (method.trim().isEmpty) {
+        throw const E2ERuntimeException('e2e_event_method_missing');
+      }
       final params = payload['params'];
       if (params is! Map) {
         throw const E2ERuntimeException('e2e_event_params_missing');
       }
+      event['method'] = method;
       event['params'] = params.cast<String, dynamic>();
       return event;
     }

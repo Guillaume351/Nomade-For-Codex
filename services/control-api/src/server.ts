@@ -1381,7 +1381,7 @@ export const createServer = async (): Promise<http.Server> => {
         conversationId,
         turnId,
         requestId,
-        message: method
+        message: method === "encrypted" ? "Action required" : method
       }).catch((error) => {
         console.warn("[control-api] action_required notification failed", {
           userId,
@@ -4300,8 +4300,6 @@ export const createServer = async (): Promise<http.Server> => {
     const delivered = wsHub.sendToAgent(parsed.data.agentId, {
       type: "session.create",
       sessionId: session.id,
-      workspaceId: parsed.data.workspaceId,
-      agentId: parsed.data.agentId,
       e2eCommandEnvelope: parsed.data.e2eCommandEnvelope,
     });
 

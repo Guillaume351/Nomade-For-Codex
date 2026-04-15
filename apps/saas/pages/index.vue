@@ -106,14 +106,15 @@ const enCopy = {
       title: "Encrypted by default (Cloud)",
       bullets: [
         "Transport traffic between clients and Nomade endpoints is encrypted with TLS.",
+        "Turn payloads, terminal I/O payloads, and server-approval payloads are protected with strict end-to-end encryption.",
         "Passwords and auth secrets are stored as hashes or encrypted secrets, not plaintext values.",
         "Cloud-managed stored content can be encrypted at rest at the infrastructure layer."
       ]
     },
     {
-      title: "Not encrypted end-to-end by default",
+      title: "Not end-to-end encrypted (metadata/control plane)",
       bullets: [
-        "Operational metadata such as IP, timestamps, plan status, and audit events may remain readable in backend systems.",
+        "Operational metadata such as event types, routing IDs, IPs, timestamps, plan status, and audit events may remain readable in backend systems.",
         "Application logs and analytics fields may include non-content metadata for diagnostics.",
         "In self-hosted mode, at-rest encryption depends on your database, disk, and key-management configuration."
       ]
@@ -232,14 +233,15 @@ const frCopy = {
       title: "Chiffré par défaut (Cloud)",
       bullets: [
         "Le trafic entre les clients et les endpoints Nomade est chiffré via TLS.",
+        "Les charges utiles des tours, des E/S terminal et des validations serveur sont protégées en chiffrement de bout en bout strict.",
         "Les mots de passe et secrets d'authentification sont stockés sous forme de hash ou secrets chiffrés, jamais en clair.",
         "Le contenu stocké côté cloud managé peut être chiffré au repos au niveau infrastructure."
       ]
     },
     {
-      title: "Non chiffré de bout en bout par défaut",
+      title: "Non chiffré de bout en bout (métadonnées/plan de contrôle)",
       bullets: [
-        "Les métadonnées opérationnelles (IP, horodatage, statut d'offre, événements d'audit) peuvent rester lisibles dans les systèmes backend.",
+        "Les métadonnées opérationnelles (types d'événements, identifiants de routage, IP, horodatage, statut d'offre, événements d'audit) peuvent rester lisibles dans les systèmes backend.",
         "Les logs applicatifs et champs d'analytics peuvent contenir des métadonnées non sensibles pour le diagnostic.",
         "En mode auto-hébergé, le chiffrement au repos dépend de votre configuration base de données, disque et gestion des clés."
       ]

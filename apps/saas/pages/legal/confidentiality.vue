@@ -37,16 +37,16 @@ const enCopy = {
       title: "3. Encryption scope (what is encrypted)",
       bullets: [
         "Client-to-service traffic is encrypted in transit using TLS.",
+        "Turn payloads, terminal I/O payloads, and server-approval payloads are protected with strict end-to-end encryption.",
         "Stored credentials and auth secrets are protected as hashes or encrypted secrets.",
         "Cloud-managed storage may be encrypted at rest through infrastructure-layer controls."
       ]
     },
     {
-      title: "4. Encryption limits (what is not encrypted by default)",
+      title: "4. Encryption limits (what is not end-to-end encrypted)",
       bullets: [
-        "Operational metadata (timestamps, IPs, request identifiers, plan status) may remain readable in backend systems.",
+        "Operational metadata (event types, routing identifiers, timestamps, IPs, request identifiers, plan status) may remain readable in backend systems.",
         "Some logs and observability records may contain non-content metadata for diagnostics and incident response.",
-        "End-to-end encryption is not guaranteed by default for all service-side processing paths.",
         "In self-hosted mode, encryption at rest depends on your own database, disk, and key-management setup."
       ]
     },
