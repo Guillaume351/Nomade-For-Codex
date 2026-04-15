@@ -364,11 +364,13 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
       return;
     } else if (type == 'conversation.thread.status.changed') {
       final conversationId = event['conversationId']?.toString() ?? '';
+      final threadId = event['threadId']?.toString().trim() ?? '';
+      final turnId = event['turnId']?.toString().trim() ?? '';
       final rawStatus = event['status'];
       final statusValue = switch (rawStatus) {
         String() => rawStatus.trim().toLowerCase(),
-        Map() =>
-          switch ((rawStatus['type']?.toString().trim().toLowerCase() ?? '')) {
+        Map() => switch (
+              (rawStatus['type']?.toString().trim().toLowerCase() ?? '')) {
             'active' => 'running',
             'idle' => 'completed',
             'systemerror' => 'failed',
@@ -378,8 +380,7 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
       };
       final thread = (event['thread'] as Map?)?.cast<String, dynamic>() ??
           const <String, dynamic>{};
-      final rawThreadName =
-          event['threadName']?.toString().trim() ??
+      final rawThreadName = event['threadName']?.toString().trim() ??
           thread['name']?.toString().trim() ??
           '';
       final nextTitle = rawThreadName.isEmpty
@@ -397,11 +398,50 @@ extension NomadeProviderSocketRuntimeMethods on NomadeProvider {
                       ? 'failed'
                       : null;
       if (conversationId.isNotEmpty) {
+        final runtime = _runtimeByConversation.putIfAbsent(
+          conversationId,
+          () => ConversationRuntimeTrace(),
+        );
+        if (threadId.isNotEmpty) {
+          runtime.threadId = threadId;
+        }
+        if (turnId.isNotEmpty) {
+          runtime.turnId = turnId;
+        }
+        if (nextStatus == 'running') {
+          runtime.turnStatus = 'running';
+          runtime.turnError = null;
+          runtime.completedAt = null;
+        } else if (nextStatus == 'idle' ||
+            nextStatus == 'interrupted' ||
+            nextStatus == 'failed') {
+          runtime.turnStatus = nextStatus == 'idle' ? 'completed' : nextStatus;
+          runtime.completedAt = DateTime.now();
+          if (nextStatus != 'failed') {
+            runtime.turnError = null;
+          }
+        }
+
         _patchConversationLocal(
           conversationId,
           status: nextStatus,
           title: nextTitle,
         );
+
+        final effectiveTurnId =
+            turnId.isNotEmpty ? turnId : (runtime.turnId?.trim() ?? '');
+        if (nextStatus != null && nextStatus != 'running') {
+          if (effectiveTurnId.isNotEmpty) {
+            final timeline = timelineForTurn(effectiveTurnId);
+            timeline.executionCollapsed = true;
+          }
+          if (selectedConversation?.id == conversationId) {
+            if (activeTurnId == null || activeTurnId == effectiveTurnId) {
+              activeTurnId = null;
+            }
+          }
+        }
+
         _appendConversationDebugEvent(
           conversationId: conversationId,
           type: 'thread.status.changed',

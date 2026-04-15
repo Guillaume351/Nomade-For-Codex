@@ -13,9 +13,11 @@ dependencies:
   flutter_markdown: ^0.7.6+2
   flutter_secure_storage: ^9.2.4
   http: ^1.2.2
+  image_picker: ^1.2.1
   mobile_scanner: ^6.0.2
   provider: ^6.1.2
   sodium: ^4.0.1+1
+  super_clipboard: ^0.9.1
   url_launcher: ^6.3.0
   web_socket_channel: ^3.0.1
 

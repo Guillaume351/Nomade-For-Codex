@@ -28,13 +28,13 @@
 	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoads</key>
-		<true/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Nomade uses the camera to scan secure login QR codes.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Nomade uses your photo library so you can attach images to Codex chats.</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

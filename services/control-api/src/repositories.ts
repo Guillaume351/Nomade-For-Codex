@@ -757,6 +757,70 @@ export class Repositories {
     return (result.rowCount ?? 0) > 0;
   }
 
+  async deleteUserAccount(userId: string): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<{ id: string }>(
+        "SELECT id FROM users WHERE id = $1 FOR UPDATE",
+        [userId]
+      );
+      if (!locked.rows[0]) {
+        await client.query("ROLLBACK");
+        return false;
+      }
+
+      await client.query(
+        `UPDATE audit_events
+         SET user_id = NULL
+         WHERE user_id = $1`,
+        [userId]
+      );
+      await client.query(
+        `UPDATE device_scan_flows
+         SET mobile_user_id = NULL,
+             updated_at = NOW()
+         WHERE mobile_user_id = $1`,
+        [userId]
+      );
+      await client.query(
+        `DELETE FROM dev_service_runtime
+         WHERE service_id IN (SELECT id FROM dev_services WHERE user_id = $1)
+            OR session_id IN (SELECT id FROM sessions WHERE user_id = $1)
+            OR tunnel_id IN (SELECT id FROM tunnels WHERE user_id = $1)`,
+        [userId]
+      );
+      await client.query("DELETE FROM conversation_turns WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = $1)", [
+        userId
+      ]);
+      await client.query("DELETE FROM conversations WHERE user_id = $1", [userId]);
+      await client.query("DELETE FROM sessions WHERE user_id = $1", [userId]);
+      await client.query("DELETE FROM tunnels WHERE user_id = $1", [userId]);
+      await client.query("DELETE FROM dev_services WHERE user_id = $1", [userId]);
+      await client.query("DELETE FROM workspaces WHERE user_id = $1", [userId]);
+      await client.query("DELETE FROM agents WHERE user_id = $1", [userId]);
+      await client.query("DELETE FROM pairings WHERE user_id = $1", [userId]);
+      await client.query("DELETE FROM refresh_tokens WHERE user_id = $1", [userId]);
+      await client.query("DELETE FROM device_codes WHERE user_id = $1", [userId]);
+
+      const deleted = await client.query<{ id: string }>(
+        "DELETE FROM users WHERE id = $1 RETURNING id",
+        [userId]
+      );
+      if (!deleted.rows[0]) {
+        await client.query("ROLLBACK");
+        return false;
+      }
+      await client.query("COMMIT");
+      return true;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async getUserById(userId: string): Promise<User | null> {
     const result = await this.pool.query<User>("SELECT id, email FROM users WHERE id = $1", [userId]);
     if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {

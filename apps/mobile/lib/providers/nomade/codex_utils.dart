@@ -305,33 +305,60 @@ class NomadeCodexUtils {
   static Map<String, dynamic>? normalizeOutgoingInputItem(
     Map<String, dynamic> input,
   ) {
-    final type = normalizeString(input['type']);
-    if (type == null) {
+    final typeRaw = normalizeString(input['type']);
+    if (typeRaw == null) {
       return null;
     }
+    final type = typeRaw.toLowerCase();
     switch (type) {
       case 'text':
         final text = normalizeString(input['text']);
         if (text == null) {
           return null;
         }
+        final rawElements = input['text_elements'] ?? input['textElements'];
+        final textElements = rawElements is List
+            ? rawElements
+                .whereType<Map>()
+                .map((entry) => entry.cast<String, dynamic>())
+                .where((entry) {
+                  final byteRange = entry['byteRange'];
+                  final start = entry['start'];
+                  final end = entry['end'];
+                  if (byteRange is Map) {
+                    final cast = byteRange.cast<String, dynamic>();
+                    return cast['start'] is num && cast['end'] is num;
+                  }
+                  return start is num && end is num;
+                })
+                .toList(growable: false)
+            : const <Map<String, dynamic>>[];
         return {
           'type': 'text',
           'text': text,
+          'text_elements': textElements,
         };
       case 'image':
-        final imageUrl =
-            normalizeString(input['imageUrl'] ?? input['image_url']);
+        final imageUrl = normalizeString(
+          input['url'] ?? input['imageUrl'] ?? input['image_url'],
+        );
         if (imageUrl == null) {
           return null;
         }
-        final detail = normalizeString(input['detail']);
         return {
           'type': 'image',
-          'imageUrl': imageUrl,
-          if (detail != null) 'detail': detail,
+          'url': imageUrl,
         };
       case 'local_image':
+      case 'localimage':
+        final path = normalizeString(input['path']);
+        if (path == null) {
+          return null;
+        }
+        return {
+          'type': 'localImage',
+          'path': path,
+        };
       case 'mention':
       case 'skill':
         final path = normalizeString(input['path']);

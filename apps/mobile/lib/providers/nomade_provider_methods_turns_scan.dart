@@ -118,12 +118,14 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
             'cwd=${requestedCwd ?? "-"} sandbox=${requestedSandbox ?? "-"} approval=${requestedApproval ?? "-"} model=${requestedModel ?? "-"} effort=${requestedEffort ?? "-"} delivery=$effectiveDeliveryPolicy collaboration=${modeSlugFromCommand ?? _selectedCollaborationModeSlug ?? "-"} skills=${_selectedSkillPaths.length}',
       );
 
-      final inputItems = <Map<String, dynamic>>[
-        {
+      final inputItems = <Map<String, dynamic>>[];
+      if (effectivePrompt.trim().isNotEmpty) {
+        inputItems.add({
           'type': 'text',
-          'text': effectivePrompt,
-        },
-      ];
+          'text': effectivePrompt.trim(),
+          'text_elements': const <Map<String, dynamic>>[],
+        });
+      }
       for (final skillPath in _selectedSkillPaths) {
         final skill = codexSkills.firstWhere(
           (entry) => entry['path']?.toString() == skillPath,
@@ -144,6 +146,11 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
           const <Map<String, dynamic>>[];
       if (normalizedExtraItems.isNotEmpty) {
         inputItems.addAll(normalizedExtraItems);
+      }
+      if (inputItems.isEmpty) {
+        status = 'Prompt or attachment required.';
+        _notifyListenersSafe();
+        return;
       }
 
       final collaborationMode =

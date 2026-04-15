@@ -261,7 +261,7 @@ class ChatTurnWidget extends StatelessWidget {
             ],
           ),
           child: Text(
-            text,
+            _normalizeInlineDirectiveText(text),
             style: theme.textTheme.bodyMedium?.copyWith(
               color: Colors.white,
               height: 1.4,
@@ -384,10 +384,11 @@ class ChatTurnWidget extends StatelessWidget {
   }
 
   Widget _buildAgentMessageCard(BuildContext context, String markdown) {
+    final normalizedMarkdown = _normalizeInlineDirectiveMarkdown(markdown);
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: MarkdownBody(
-        data: markdown,
+        data: normalizedMarkdown,
         selectable: true,
         onTapLink: (_, href, __) async {
           if (href == null) {
@@ -1368,5 +1369,85 @@ class ChatTurnWidget extends StatelessWidget {
     }
 
     return '';
+  }
+
+  String _normalizeInlineDirectiveText(String value) {
+    return value.replaceAllMapped(
+      RegExp(r'::([a-zA-Z0-9_-]+)\{([^{}]*)\}'),
+      (match) {
+        final rendered = _renderInlineDirective(
+          command: match[1] ?? '',
+          argsBody: match[2] ?? '',
+        );
+        return rendered ?? match[0] ?? '';
+      },
+    );
+  }
+
+  String _normalizeInlineDirectiveMarkdown(String value) {
+    return value.replaceAllMapped(
+      RegExp(r'::([a-zA-Z0-9_-]+)\{([^{}]*)\}'),
+      (match) {
+        final rendered = _renderInlineDirective(
+          command: match[1] ?? '',
+          argsBody: match[2] ?? '',
+        );
+        if (rendered == null) {
+          return match[0] ?? '';
+        }
+        return '`$rendered`';
+      },
+    );
+  }
+
+  String? _renderInlineDirective({
+    required String command,
+    required String argsBody,
+  }) {
+    if (command.trim().isEmpty) {
+      return null;
+    }
+    final args = _parseDirectiveArgs(argsBody);
+    final cwd = args['cwd'];
+    final branch = args['branch'];
+    switch (command.trim().toLowerCase()) {
+      case 'git-stage':
+        return cwd == null ? 'git stage' : 'git stage ($cwd)';
+      case 'git-commit':
+        return cwd == null ? 'git commit' : 'git commit ($cwd)';
+      case 'git-push':
+        if (cwd != null && branch != null) {
+          return 'git push ($cwd, $branch)';
+        }
+        if (cwd != null) {
+          return 'git push ($cwd)';
+        }
+        if (branch != null) {
+          return 'git push ($branch)';
+        }
+        return 'git push';
+      default:
+        if (args.isEmpty) {
+          return command.trim();
+        }
+        final details = args.entries
+            .map((entry) => '${entry.key}=${entry.value}')
+            .join(', ');
+        return '${command.trim()} ($details)';
+    }
+  }
+
+  Map<String, String> _parseDirectiveArgs(String argsBody) {
+    final values = <String, String>{};
+    for (final match in RegExp(r'([a-zA-Z0-9_]+)\s*=\s*"([^"]*)"')
+        .allMatches(argsBody)) {
+      final key = match.group(1)?.trim();
+      final value = match.group(2);
+      if (key == null || key.isEmpty || value == null) {
+        continue;
+      }
+      values[key] = value;
+    }
+    return values;
   }
 }

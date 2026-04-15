@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../providers/nomade_provider.dart';
+import '../widgets/app_motion.dart';
 import 'home_screen.dart';
 import 'secure_scan_camera_screen.dart';
 
@@ -18,6 +19,26 @@ class _LoginScreenState extends State<LoginScreen> {
   String? _userCode;
   String? _verificationUri;
   bool _showCode = false;
+
+  Uri _publicUrlForApiBase(String path) {
+    final normalizedPath = path.startsWith('/') ? path : '/$path';
+    final base = Uri.parse(context.read<NomadeProvider>().api.baseUrl);
+    return base.replace(
+      path: normalizedPath,
+      queryParameters: null,
+      fragment: null,
+    );
+  }
+
+  Future<void> _openPolicyLink(String path, String label) async {
+    final uri = _publicUrlForApiBase(path);
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!launched && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Unable to open $label.')),
+      );
+    }
+  }
 
   Future<void> _handleLogin() async {
     final provider = context.read<NomadeProvider>();
@@ -45,7 +66,7 @@ class _LoginScreenState extends State<LoginScreen> {
       if (mounted && provider.isAuthenticated) {
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (_) => const HomeScreen()),
+          buildAppPageRoute(context, const HomeScreen()),
         );
         return;
       }
@@ -98,9 +119,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _handleScanInApp() async {
     final result = await Navigator.of(context).push<SecureScanCameraResult>(
-      MaterialPageRoute(
-        builder: (_) => const SecureScanCameraScreen(),
-      ),
+      buildAppPageRoute(context, const SecureScanCameraScreen()),
     );
     if (!mounted || result == null || !result.hasData) {
       return;
@@ -116,9 +135,14 @@ class _LoginScreenState extends State<LoginScreen> {
       }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Secure scan captured. Sign in to complete approval.'),
+          content: Text(
+            'Secure scan captured. Opening browser sign-in to finish setup.',
+          ),
         ),
       );
+      if (!_isLoading) {
+        await _handleLogin();
+      }
     } catch (error) {
       if (!mounted) {
         return;
@@ -135,44 +159,51 @@ class _LoginScreenState extends State<LoginScreen> {
     final scheme = theme.colorScheme;
 
     return Scaffold(
-      body: DecoratedBox(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              scheme.primary.withValues(
-                  alpha: theme.brightness == Brightness.dark ? 0.2 : 0.12),
-              theme.scaffoldBackgroundColor,
-            ],
-          ),
-        ),
+      body: AppAmbientBackground(
         child: SafeArea(
           child: Center(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(20),
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 520),
-                child: Container(
-                  padding: const EdgeInsets.fromLTRB(22, 24, 22, 22),
-                  decoration: BoxDecoration(
-                    color: scheme.surface.withValues(alpha: 0.93),
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(
-                        color: scheme.outlineVariant.withValues(alpha: 0.7)),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.08),
-                        blurRadius: 28,
-                        offset: const Offset(0, 12),
+                child: FadeSlideIn(
+                  beginOffset: const Offset(0, 0.025),
+                  child: Container(
+                    padding: const EdgeInsets.fromLTRB(22, 24, 22, 22),
+                    decoration: BoxDecoration(
+                      color: scheme.surface.withValues(alpha: 0.94),
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(
+                        color: scheme.outlineVariant.withValues(alpha: 0.72),
                       ),
-                    ],
-                  ),
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 250),
-                    child: _showCode
-                        ? _buildCodeStep(context)
-                        : _buildStartStep(context),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.1),
+                          blurRadius: 30,
+                          offset: const Offset(0, 14),
+                        ),
+                      ],
+                    ),
+                    child: AnimatedSwitcher(
+                      duration: AppMotion.medium,
+                      switchInCurve: AppMotion.standardCurve,
+                      switchOutCurve: Curves.easeInCubic,
+                      transitionBuilder: (child, animation) {
+                        return FadeTransition(
+                          opacity: animation,
+                          child: SlideTransition(
+                            position: Tween<Offset>(
+                              begin: const Offset(0, 0.03),
+                              end: Offset.zero,
+                            ).animate(animation),
+                            child: child,
+                          ),
+                        );
+                      },
+                      child: _showCode
+                          ? _buildCodeStep(context)
+                          : _buildStartStep(context),
+                    ),
                   ),
                 ),
               ),
@@ -215,10 +246,28 @@ class _LoginScreenState extends State<LoginScreen> {
         ),
         const SizedBox(height: 10),
         Text(
-          'Open your browser to confirm login, then come back here while we complete authorization.',
+          'Sign in via browser to authenticate your account. Secure scan links this phone to end-to-end encrypted conversations.',
           style: theme.textTheme.bodyMedium?.copyWith(
             color: scheme.onSurfaceVariant,
             height: 1.45,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerLow.withValues(alpha: 0.74),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: scheme.outlineVariant.withValues(alpha: 0.62),
+            ),
+          ),
+          child: Text(
+            'Why both steps? Browser login proves account ownership. QR secure scan provisions encryption keys. QR-only sign-in is not available yet.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+              height: 1.35,
+            ),
           ),
         ),
         const SizedBox(height: 12),
@@ -230,7 +279,7 @@ class _LoginScreenState extends State<LoginScreen> {
               borderRadius: BorderRadius.circular(12),
             ),
             child: Text(
-              'A secure scan is pending and will resume automatically after sign-in.',
+              'Secure scan is ready. Sign-in will continue and the approval resumes automatically.',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: scheme.onPrimaryContainer,
                 fontWeight: FontWeight.w600,
@@ -246,13 +295,41 @@ class _LoginScreenState extends State<LoginScreen> {
                   width: 18,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
-              : const Text('Open browser login'),
+              : const Text('Sign in via browser'),
         ),
         const SizedBox(height: 12),
         OutlinedButton.icon(
           onPressed: _isLoading ? null : _handleScanInApp,
           icon: const Icon(Icons.qr_code_scanner_rounded),
-          label: const Text('Scan secure login QR'),
+          label: const Text('Scan secure QR'),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          'By continuing, you can review how Nomade handles personal data.',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: scheme.onSurfaceVariant,
+            height: 1.35,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 6,
+          runSpacing: -2,
+          children: [
+            TextButton(
+              onPressed: () => _openPolicyLink('/legal/privacy', 'privacy policy'),
+              child: const Text('Privacy policy'),
+            ),
+            TextButton(
+              onPressed: () => _openPolicyLink('/legal/terms', 'terms of service'),
+              child: const Text('Terms'),
+            ),
+            TextButton(
+              onPressed: () =>
+                  _openPolicyLink('/legal/account-deletion', 'account deletion'),
+              child: const Text('Delete account'),
+            ),
+          ],
         ),
       ],
     );
@@ -332,6 +409,21 @@ class _LoginScreenState extends State<LoginScreen> {
         ClipRRect(
           borderRadius: BorderRadius.circular(999),
           child: const LinearProgressIndicator(minHeight: 8),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            PulseDot(color: scheme.primary, size: 8),
+            const SizedBox(width: 8),
+            Text(
+              'Waiting for approval',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
         ),
       ],
     );

@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
+import 'package:super_clipboard/super_clipboard.dart';
 
 import '../models/conversation.dart';
 import '../models/workspace.dart';
@@ -31,7 +34,9 @@ enum _TopBarMenuAction {
 }
 
 enum _ComposerAction {
+  addPhotos,
   addFiles,
+  pasteImage,
   togglePlanMode,
 }
 
@@ -49,28 +54,48 @@ class _ComposerSlashCommand {
 
 class _PendingAttachment {
   const _PendingAttachment({
-    required this.path,
+    required this.id,
     required this.type,
+    required this.name,
+    this.path,
+    this.imageUrl,
   });
 
-  final String path;
+  final String id;
   final String type;
+  final String name;
+  final String? path;
+  final String? imageUrl;
 
-  String get name {
-    final normalized = path.replaceAll('\\', '/');
-    final pieces = normalized.split('/');
-    if (pieces.isEmpty) {
-      return path;
+  String get tooltip {
+    if (path != null && path!.trim().isNotEmpty) {
+      return path!;
     }
-    final candidate = pieces.last.trim();
-    return candidate.isEmpty ? path : candidate;
+    if (imageUrl != null && imageUrl!.trim().isNotEmpty) {
+      return 'Inline image attachment';
+    }
+    return name;
   }
 
   Map<String, dynamic> toInputItem() {
+    if (type == 'image' && imageUrl != null && imageUrl!.trim().isNotEmpty) {
+      return {
+        'type': 'image',
+        'url': imageUrl,
+      };
+    }
+    final resolvedPath = path?.trim();
+    if (resolvedPath != null && resolvedPath.isNotEmpty) {
+      return {
+        'type': type,
+        'path': resolvedPath,
+        'name': name,
+      };
+    }
     return {
-      'type': type,
-      'path': path,
-      'name': name,
+      'type': 'text',
+      'text': name,
+      'text_elements': const <Map<String, dynamic>>[],
     };
   }
 }

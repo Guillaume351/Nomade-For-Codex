@@ -1,5 +1,11 @@
 part of 'nomade_provider.dart';
 
+enum _TokenRefreshResult {
+  success,
+  invalidSession,
+  transientFailure,
+}
+
 extension NomadeProviderCoreMethods on NomadeProvider {
   void setSelectedSkillPaths(List<String> paths) {
     final normalized = paths
@@ -430,6 +436,8 @@ extension NomadeProviderCoreMethods on NomadeProvider {
           await _readStorage(NomadeProvider._selectedAgentKey);
       final storedWorkspaceId =
           await _readStorage(NomadeProvider._selectedWorkspaceKey);
+      final storedConversationId =
+          await _readStorage(NomadeProvider._selectedConversationKey);
       _selectedModel = await _readStorage(NomadeProvider._selectedModelKey);
       _selectedApprovalPolicy =
           await _readStorage(NomadeProvider._selectedApprovalPolicyKey) ??
@@ -503,6 +511,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
           await bootstrapData(
             storedAgentId: storedAgentId,
             storedWorkspaceId: storedWorkspaceId,
+            storedConversationId: storedConversationId,
           );
         } else {
           await logout();
@@ -539,6 +548,8 @@ extension NomadeProviderCoreMethods on NomadeProvider {
             value: _selectedAgent?.id),
         _writeStorage(NomadeProvider._selectedWorkspaceKey,
             value: _selectedWorkspace?.id),
+        _writeStorage(NomadeProvider._selectedConversationKey,
+            value: _selectedConversation?.id),
         _writeStorage(NomadeProvider._selectedModelKey, value: _selectedModel),
         _writeStorage(NomadeProvider._selectedApprovalPolicyKey,
             value: _selectedApprovalPolicy),
@@ -597,6 +608,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     agents = [];
     workspaces = [];
     conversations = [];
+    _conversationsWorkspaceId = null;
     turns = [];
     services = [];
     tunnels = [];
@@ -631,6 +643,29 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     _notifyListenersSafe();
   }
 
+  Future<void> deleteAccountAndData({
+    String confirmationCode = 'DELETE',
+  }) async {
+    final token = accessToken;
+    final refresh = refreshToken;
+    if (token == null || refresh == null) {
+      await logout();
+      status = 'Account deleted.';
+      _notifyListenersSafe();
+      return;
+    }
+
+    await api.deleteAccount(
+      accessToken: token,
+      refreshToken: refresh,
+      confirmationCode: confirmationCode,
+    );
+
+    await logout();
+    status = 'Account deleted.';
+    _notifyListenersSafe();
+  }
+
   Future<bool> ensureFreshToken() async {
     if (accessToken == null && refreshToken == null) return false;
 
@@ -642,11 +677,26 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       return true;
     }
 
-    return refreshTokens();
+    final refreshResult = await _refreshTokensWithResult();
+    if (refreshResult == _TokenRefreshResult.success) {
+      return true;
+    }
+    // During Wi-Fi -> cellular handoff, refresh can fail transiently.
+    // Keep the local session and retry via reconnect/backoff instead of logging out.
+    if (refreshResult == _TokenRefreshResult.transientFailure &&
+        accessToken != null) {
+      return true;
+    }
+    return false;
   }
 
   Future<bool> refreshTokens() async {
-    if (refreshToken == null) return false;
+    final result = await _refreshTokensWithResult();
+    return result == _TokenRefreshResult.success;
+  }
+
+  Future<_TokenRefreshResult> _refreshTokensWithResult() async {
+    if (refreshToken == null) return _TokenRefreshResult.invalidSession;
     final inFlight = _refreshTokensInFlight;
     if (inFlight != null) {
       return inFlight;
@@ -657,9 +707,14 @@ extension NomadeProviderCoreMethods on NomadeProvider {
         final payload = await api.refreshAccessToken(refreshToken!);
         _setTokensFromPayload(payload);
         await persistSession();
-        return true;
+        return _TokenRefreshResult.success;
+      } on ApiException catch (error) {
+        if (_isInvalidRefreshTokenError(error)) {
+          return _TokenRefreshResult.invalidSession;
+        }
+        return _TokenRefreshResult.transientFailure;
       } catch (_) {
-        return false;
+        return _TokenRefreshResult.transientFailure;
       } finally {
         _refreshTokensInFlight = null;
       }
@@ -689,14 +744,33 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     return code == 'invalid_token' || code == 'missing_authorization';
   }
 
+  bool _isInvalidRefreshTokenError(Object error) {
+    if (error is! ApiException) {
+      return false;
+    }
+    if (error.statusCode == 401) {
+      return true;
+    }
+    final code = error.errorCode?.trim().toLowerCase();
+    return code == 'invalid_refresh_token' ||
+        code == 'invalid_token' ||
+        code == 'missing_authorization';
+  }
+
   Future<bool> _logoutIfUnauthorized(Object error) async {
     if (!_isUnauthorizedError(error)) {
       return false;
     }
     // Access tokens are short-lived; attempt a silent refresh first so iOS
     // resume flows do not force a full re-login after idle periods.
-    final refreshed = await refreshTokens();
-    if (refreshed) {
+    final refreshResult = await _refreshTokensWithResult();
+    if (refreshResult == _TokenRefreshResult.success) {
+      unawaited(connectSocket());
+      return true;
+    }
+    if (refreshResult == _TokenRefreshResult.transientFailure) {
+      status = 'Session refresh delayed by network change. Reconnecting...';
+      _notifyListenersSafe();
       unawaited(connectSocket());
       return true;
     }
@@ -760,7 +834,9 @@ extension NomadeProviderCoreMethods on NomadeProvider {
   }
 
   Future<void> bootstrapData(
-      {String? storedAgentId, String? storedWorkspaceId}) async {
+      {String? storedAgentId,
+      String? storedWorkspaceId,
+      String? storedConversationId}) async {
     loadingData = true;
     _notifyListenersSafe();
     try {
@@ -780,7 +856,9 @@ extension NomadeProviderCoreMethods on NomadeProvider {
         await loadCodexOptions();
 
         if (selectedWorkspace != null) {
-          await loadConversations();
+          await loadConversations(
+            preferredConversationId: storedConversationId,
+          );
           await loadDevSettings();
           await loadServices();
           await loadTunnels();
@@ -788,6 +866,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       } else {
         workspaces = [];
         conversations = [];
+        _conversationsWorkspaceId = null;
         turns = [];
         services = [];
         tunnels = [];
@@ -814,6 +893,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       {String? storedWorkspaceId}) async {
     if (selectedAgent == null) return;
     try {
+      final previousWorkspaceId = _selectedWorkspace?.id;
       final loaded =
           await api.listWorkspaces(accessToken!, agentId: selectedAgent!.id);
       workspaces = loaded.map((e) => Workspace.fromJson(e)).toList();
@@ -823,10 +903,21 @@ extension NomadeProviderCoreMethods on NomadeProvider {
           (w) => w.id == storedWorkspaceId,
           orElse: () => workspaces.first,
         );
+        if (_selectedWorkspace?.id != previousWorkspaceId) {
+          _selectedConversation = null;
+          conversations = [];
+          _conversationsWorkspaceId = null;
+          turns = [];
+          services = [];
+          tunnels = [];
+          trustedDevMode = false;
+          selectedServiceId = null;
+        }
       } else {
         _selectedWorkspace = null;
         _selectedConversation = null;
         conversations = [];
+        _conversationsWorkspaceId = null;
         turns = [];
         services = [];
         tunnels = [];
@@ -843,27 +934,58 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     }
   }
 
-  Future<void> loadConversations() async {
-    if (selectedWorkspace == null) return;
+  Future<void> loadConversations({String? preferredConversationId}) async {
+    final workspace = selectedWorkspace;
+    final token = accessToken;
+    if (workspace == null || token == null) return;
+    final workspaceId = workspace.id;
+    final requestToken = ++_loadConversationsRequestToken;
     try {
       final loaded = await api.listConversations(
-          accessToken: accessToken!, workspaceId: selectedWorkspace!.id);
+        accessToken: token,
+        workspaceId: workspaceId,
+      );
+      if (requestToken != _loadConversationsRequestToken) {
+        return;
+      }
+      if (selectedWorkspace?.id != workspaceId) {
+        return;
+      }
+
       conversations = loaded.map((e) => Conversation.fromJson(e)).toList();
+      _conversationsWorkspaceId = workspaceId;
       _sortConversationsByActivity();
 
-      // Pick first conversation by default if none selected or not in current list
+      final preferredId = preferredConversationId?.trim() ?? '';
+      Conversation? preferred;
+      if (preferredId.isNotEmpty) {
+        for (final entry in conversations) {
+          if (entry.id == preferredId) {
+            preferred = entry;
+            break;
+          }
+        }
+      }
+
+      // Pick default conversation if current selection is missing.
       if (conversations.isNotEmpty) {
         if (_selectedConversation == null ||
+            _selectedConversation!.workspaceId != workspaceId ||
             !conversations.any((c) => c.id == _selectedConversation!.id)) {
-          _selectedConversation = conversations.first;
+          _selectedConversation = preferred ?? conversations.first;
+          unawaited(persistSession());
           await loadTurns(_selectedConversation!.id);
         }
       } else {
         _selectedConversation = null;
         turns = [];
+        unawaited(persistSession());
       }
       _notifyListenersSafe();
     } catch (e) {
+      if (requestToken != _loadConversationsRequestToken) {
+        return;
+      }
       if (await _logoutIfUnauthorized(e)) {
         return;
       }
@@ -902,9 +1024,33 @@ extension NomadeProviderCoreMethods on NomadeProvider {
   }
 
   Future<void> loadTurns(String conversationId) async {
+    final token = accessToken;
+    if (token == null || conversationId.trim().isEmpty) {
+      return;
+    }
+    final runtime = _runtimeByConversation.putIfAbsent(
+      conversationId,
+      () => ConversationRuntimeTrace(),
+    );
+    if (_loadTurnsInFlightConversationIds.contains(conversationId)) {
+      runtime.turnsReloadSkippedInFlight += 1;
+      return;
+    }
+    final now = DateTime.now();
+    final lastLoadAt = _lastLoadTurnsAtByConversation[conversationId];
+    if (lastLoadAt != null &&
+        now.difference(lastLoadAt) < const Duration(milliseconds: 700)) {
+      runtime.turnsReloadThrottled += 1;
+      return;
+    }
+    _loadTurnsInFlightConversationIds.add(conversationId);
+    _lastLoadTurnsAtByConversation[conversationId] = now;
+    runtime.turnsReloadApiCalls += 1;
+    final requestToken = ++_loadTurnsRequestToken;
+    final expectedWorkspaceId = _selectedWorkspace?.id;
     try {
       var payload = await api.getConversationTurns(
-        accessToken: accessToken!,
+        accessToken: token,
         conversationId: conversationId,
       );
       final hydration = _asStringKeyedMap(payload['hydration']);
@@ -916,7 +1062,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
           message: 'legacy detected and purged; strict resync requested',
         );
         payload = await api.getConversationTurns(
-          accessToken: accessToken!,
+          accessToken: token,
           conversationId: conversationId,
           forceHydrate: true,
         );
@@ -925,8 +1071,9 @@ extension NomadeProviderCoreMethods on NomadeProvider {
           .cast<Map>()
           .map((item) => item.cast<String, dynamic>())
           .toList(growable: false);
+      List<Turn> decodedTurns;
       try {
-        turns = loaded
+        decodedTurns = loaded
             .map((raw) => _decryptTurnForUi(Turn.fromJson(raw)))
             .toList(growable: false);
       } on E2ERuntimeException catch (error) {
@@ -937,15 +1084,27 @@ extension NomadeProviderCoreMethods on NomadeProvider {
         if (!synced) {
           rethrow;
         }
-        turns = loaded
+        decodedTurns = loaded
             .map((raw) => _decryptTurnForUi(Turn.fromJson(raw)))
             .toList(growable: false);
       }
-      for (final turn in turns) {
+      if (requestToken != _loadTurnsRequestToken) {
+        return;
+      }
+      if (_selectedConversation?.id != conversationId) {
+        return;
+      }
+      if (expectedWorkspaceId != null &&
+          _selectedWorkspace?.id != expectedWorkspaceId) {
+        return;
+      }
+
+      turns = decodedTurns;
+      for (final turn in decodedTurns) {
         _hydrateTimelineFromTurn(turn);
       }
       String? runningTurnId;
-      for (final turn in turns) {
+      for (final turn in decodedTurns) {
         if (_turnCountsAsRunning(turn)) {
           runningTurnId = turn.id;
         }
@@ -958,6 +1117,12 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       unawaited(_persistE2ERuntime());
       _notifyListenersSafe();
     } on E2ERuntimeException catch (error) {
+      if (requestToken != _loadTurnsRequestToken) {
+        return;
+      }
+      if (_selectedConversation?.id != conversationId) {
+        return;
+      }
       debugPrint(
         '[mobile-auth] turn hydration failed for $conversationId with code=${error.code}',
       );
@@ -971,11 +1136,16 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       }
       _notifyListenersSafe();
     } catch (e) {
+      if (requestToken != _loadTurnsRequestToken) {
+        return;
+      }
       if (await _logoutIfUnauthorized(e)) {
         return;
       }
       status = 'Error: $e';
       _notifyListenersSafe();
+    } finally {
+      _loadTurnsInFlightConversationIds.remove(conversationId);
     }
   }
 
