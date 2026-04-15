@@ -15,11 +15,7 @@ definePageMeta({
 });
 
 const { locale } = useI18n();
-const { fetchSession, isAuthenticated } = useAuthSession();
-await fetchSession();
-if (isAuthenticated.value) {
-  await navigateTo("/account");
-}
+await useAuthSession().fetchSession();
 
 const enCopy = {
   seoTitle: "Nomade | High-End AI Access Control for Teams",
@@ -53,6 +49,13 @@ const enCopy = {
     openSourceTitle: "Fully free when self-hosted.",
     managedKicker: "Managed cloud mode",
     managedTitle: "Pay only for convenience and operations.",
+    encryptionKicker: "Encryption transparency",
+    encryptionTitle: "Exactly what is encrypted, and what is not.",
+    docsKicker: "Self-hosting docs",
+    docsTitle: "Deploy Nomade yourself with explicit infrastructure guidance.",
+    docsBody:
+      "Use the self-hosting guide for prerequisites, environment variables, reverse proxy/TLS setup, and operational checks.",
+    docsCta: "Read self-hosting docs",
     legalKicker: "Legal and App Store readiness",
     legalTitle: "Publish-ready legal pages, from privacy to usage agreements.",
     legalBody:
@@ -97,6 +100,24 @@ const enCopy = {
     "Hosted control plane, billing automation, and support workflows.",
     "Reduced operational burden for teams that prefer managed infrastructure.",
     "Same product DNA, with premium support and managed reliability."
+  ],
+  encryptionBlocks: [
+    {
+      title: "Encrypted by default (Cloud)",
+      bullets: [
+        "Transport traffic between clients and Nomade endpoints is encrypted with TLS.",
+        "Passwords and auth secrets are stored as hashes or encrypted secrets, not plaintext values.",
+        "Cloud-managed stored content can be encrypted at rest at the infrastructure layer."
+      ]
+    },
+    {
+      title: "Not encrypted end-to-end by default",
+      bullets: [
+        "Operational metadata such as IP, timestamps, plan status, and audit events may remain readable in backend systems.",
+        "Application logs and analytics fields may include non-content metadata for diagnostics.",
+        "In self-hosted mode, at-rest encryption depends on your database, disk, and key-management configuration."
+      ]
+    }
   ],
   legalDocs: [
     {
@@ -154,6 +175,13 @@ const frCopy = {
     openSourceTitle: "Entièrement gratuit en auto-hébergement.",
     managedKicker: "Mode cloud managé",
     managedTitle: "Payez seulement pour la simplicité opérationnelle.",
+    encryptionKicker: "Transparence chiffrement",
+    encryptionTitle: "Ce qui est chiffré, et ce qui ne l'est pas.",
+    docsKicker: "Documentation self-hosting",
+    docsTitle: "Déployez Nomade vous-même avec un guide d'infrastructure explicite.",
+    docsBody:
+      "Utilisez le guide self-hosting pour les prérequis, variables d'environnement, configuration reverse-proxy/TLS et contrôles opérationnels.",
+    docsCta: "Lire la doc self-hosting",
     legalKicker: "Préparation légale et App Store",
     legalTitle: "Pages légales prêtes à publier, de la confidentialité à l'accord d'utilisation.",
     legalBody:
@@ -198,6 +226,24 @@ const frCopy = {
     "Plan de contrôle hébergé, automatisation de la facturation et flux de support.",
     "Moins de charge opérationnelle pour les équipes qui veulent du managé.",
     "Même ADN produit, avec support premium et fiabilité opérée."
+  ],
+  encryptionBlocks: [
+    {
+      title: "Chiffré par défaut (Cloud)",
+      bullets: [
+        "Le trafic entre les clients et les endpoints Nomade est chiffré via TLS.",
+        "Les mots de passe et secrets d'authentification sont stockés sous forme de hash ou secrets chiffrés, jamais en clair.",
+        "Le contenu stocké côté cloud managé peut être chiffré au repos au niveau infrastructure."
+      ]
+    },
+    {
+      title: "Non chiffré de bout en bout par défaut",
+      bullets: [
+        "Les métadonnées opérationnelles (IP, horodatage, statut d'offre, événements d'audit) peuvent rester lisibles dans les systèmes backend.",
+        "Les logs applicatifs et champs d'analytics peuvent contenir des métadonnées non sensibles pour le diagnostic.",
+        "En mode auto-hébergé, le chiffrement au repos dépend de votre configuration base de données, disque et gestion des clés."
+      ]
+    }
   ],
   legalDocs: [
     {
@@ -350,6 +396,44 @@ useSeoMeta({
             </li>
           </ul>
         </article>
+      </div>
+    </section>
+
+    <section class="container py-14 md:py-16">
+      <div class="max-w-3xl">
+        <p class="text-xs font-semibold uppercase tracking-[0.16em] text-primary">{{ copy.sections.encryptionKicker }}</p>
+        <h2 class="mt-3 text-3xl font-semibold tracking-tight md:text-4xl">
+          {{ copy.sections.encryptionTitle }}
+        </h2>
+      </div>
+      <div class="mt-8 grid gap-4 md:grid-cols-2">
+        <article v-for="block in copy.encryptionBlocks" :key="block.title" class="feature-card">
+          <h3 class="text-lg font-semibold tracking-tight text-foreground">{{ block.title }}</h3>
+          <ul class="mt-3 grid gap-2 text-sm leading-relaxed text-muted-foreground">
+            <li v-for="item in block.bullets" :key="item">{{ item }}</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="border-y border-border/80 bg-card/45 py-14 md:py-16">
+      <div class="container grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+        <div>
+          <p class="text-xs font-semibold uppercase tracking-[0.16em] text-primary">{{ copy.sections.docsKicker }}</p>
+          <h2 class="mt-3 text-3xl font-semibold tracking-tight md:text-4xl">{{ copy.sections.docsTitle }}</h2>
+          <p class="mt-4 max-w-2xl text-sm leading-relaxed text-muted-foreground md:text-base">
+            {{ copy.sections.docsBody }}
+          </p>
+        </div>
+        <div class="flex items-center">
+          <NuxtLink
+            to="/docs/self-hosting"
+            class="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-semibold text-primary-foreground no-underline transition hover:opacity-90"
+          >
+            {{ copy.sections.docsCta }}
+            <ArrowRight class="h-4 w-4" />
+          </NuxtLink>
+        </div>
       </div>
     </section>
 

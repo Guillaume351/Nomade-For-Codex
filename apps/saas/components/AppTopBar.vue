@@ -24,18 +24,21 @@ const marketingNavItems = computed<NavItem[]>(() => {
       ? {
           features: "Fonctionnalités",
           openSource: "Open source",
+          docs: "Docs",
           pricing: "Tarifs",
           legal: "Légal"
         }
       : {
           features: "Features",
           openSource: "Open Source",
+          docs: "Docs",
           pricing: "Pricing",
           legal: "Legal"
         };
   return [
     { to: "/#features", label: labels.features },
     { to: "/#open-source", label: labels.openSource },
+    { to: "/docs/self-hosting", label: labels.docs },
     { to: "/pricing", label: labels.pricing },
     { to: "/legal", label: labels.legal }
   ];
@@ -46,7 +49,11 @@ const navItems = computed<NavItem[]>(() =>
 );
 
 const isPublicRoute = computed(() =>
-  route.path === "/" || route.path === "/pricing" || route.path === "/legal" || route.path.startsWith("/legal/")
+  route.path === "/" ||
+  route.path === "/pricing" ||
+  route.path === "/legal" ||
+  route.path.startsWith("/legal/") ||
+  route.path.startsWith("/docs/")
 );
 
 const logoTarget = computed(() => (isAuthenticated.value ? "/account" : "/"));
@@ -57,6 +64,9 @@ const isActive = (to: string): boolean => {
   }
   if (to === "/legal") {
     return route.path === "/legal" || route.path.startsWith("/legal/");
+  }
+  if (to === "/docs/self-hosting") {
+    return route.path.startsWith("/docs/");
   }
   return route.path === to;
 };

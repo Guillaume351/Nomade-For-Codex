@@ -8,6 +8,7 @@ const copy = computed(() =>
         product: "Produit",
         features: "Fonctionnalités",
         openSource: "Open source",
+        selfHostingDocs: "Documentation self-hosting",
         pricing: "Tarifs",
         legal: "Légal",
         privacy: "Politique de confidentialité",
@@ -20,6 +21,7 @@ const copy = computed(() =>
         product: "Product",
         features: "Features",
         openSource: "Open source",
+        selfHostingDocs: "Self-hosting documentation",
         pricing: "Pricing",
         legal: "Legal",
         privacy: "Privacy policy",
@@ -32,7 +34,7 @@ const copy = computed(() =>
 
 <template>
   <footer class="border-t border-border/80 bg-card/60">
-    <div class="container grid gap-8 py-10 md:grid-cols-[1.4fr_1fr_1fr] md:py-12">
+    <div class="container grid gap-8 py-10 md:grid-cols-4 md:py-12">
       <div>
         <p class="text-sm font-semibold tracking-wide text-foreground">Nomade</p>
         <p class="mt-3 max-w-md text-sm text-muted-foreground">
@@ -46,6 +48,13 @@ const copy = computed(() =>
           <li><NuxtLink to="/#features" class="no-underline">{{ copy.features }}</NuxtLink></li>
           <li><NuxtLink to="/#open-source" class="no-underline">{{ copy.openSource }}</NuxtLink></li>
           <li><NuxtLink to="/pricing" class="no-underline">{{ copy.pricing }}</NuxtLink></li>
+        </ul>
+      </div>
+
+      <div>
+        <p class="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Docs</p>
+        <ul class="mt-3 space-y-2 text-sm">
+          <li><NuxtLink to="/docs/self-hosting" class="no-underline">{{ copy.selfHostingDocs }}</NuxtLink></li>
         </ul>
       </div>
 
