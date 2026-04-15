@@ -1,5 +1,11 @@
 # Troubleshooting (Dev)
 
+## Tunnel preview not working / unavailable URL
+- Cause: tunnel feature is currently WIP and not yet reliably available.
+- Fix:
+  1. Expected for now; use conversations/sessions without tunnel flow.
+  2. Follow project updates before relying on external preview URLs.
+
 ## `Import failed: API 409: agent_offline`
 - Cause: selected agent exists in DB but its websocket is not connected.
 - Fix:

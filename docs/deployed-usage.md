@@ -2,6 +2,11 @@
 
 This guide explains how to use Nomade from your machine against a remote deployed server (not `localhost`).
 
+> Status note (April 2026)
+> - Nomade is still in active development.
+> - Remote auth/pairing/conversations/sessions are the primary supported flows.
+> - Preview tunnels are currently work in progress and should be treated as not available.
+
 Auth deployment checklist (env + SMTP + DB migration):
 - [`docs/auth-better-auth-checklist.md`](./auth-better-auth-checklist.md)
 
@@ -120,13 +125,18 @@ nomade-agent login --server-url https://app.example.com --session /path/session.
 nomade-agent pair --server-url https://app.example.com --config /path/config.json
 ```
 
-## 6) Quick troubleshooting
+## 6) Feature availability (current)
+- Supported: login, device linking, daemon lifecycle, workspaces/conversations, Codex turn execution.
+- WIP / not available: preview tunnel reliability for external/public localhost sharing.
+
+## 7) Quick troubleshooting
 - `Control API is not reachable`: verify URL, DNS, TLS certificate, and firewall.
 - `invalid_token`: run `logout`, then `login` again.
 - `device_limit_reached`: remove device from account/devices or upgrade plan from account/billing page (`/account`, legacy `/web/account` still redirects).
 - Agent appears offline: ensure daemon is running (`nomade-agent status`) and machine can reach API/WebSocket.
+- Tunnel errors or unavailable preview URL: expected for now; tunnel stack is still WIP.
 
-## 7) Use from Flutter app (iPhone / iPad) to control the paired machine
+## 8) Use from Flutter app (iPhone / iPad) to control the paired machine
 The mobile app controls an already paired/running agent. Recommended order:
 
 1. On the host machine (the machine you want to control), complete:

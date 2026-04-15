@@ -1,5 +1,9 @@
 # API Contract (v1)
 
+> Status note (April 2026)
+> - Auth, pairing, conversations, and sessions are the actively supported API flows.
+> - Tunnel endpoints exist in the contract but are currently WIP and may be unavailable in running deployments.
+
 ## Canonical SaaS web routes
 - `/login`, `/signup`, `/forgot-password`, `/reset-password`, `/verify-email`
 - `/activate`, `/account`, `/devices`, `/billing`
@@ -48,12 +52,12 @@
 - `POST /conversations/:conversationId/turns/:turnId/retry` (manual deferred retry)
 - `POST /sessions` body `{ workspaceId, agentId, name, command, cwd? }`
 - `GET /sessions?workspaceId=...`
-- `POST /tunnels` body `{ workspaceId, agentId, targetPort, ttlSec? }`
-- `GET /tunnels?workspaceId=...`
+- `POST /tunnels` body `{ workspaceId, agentId, targetPort, ttlSec? }` (WIP, currently not reliably available)
+- `GET /tunnels?workspaceId=...` (WIP, currently not reliably available)
 
 ## Internal endpoint (gateway -> saas backend API)
-- `POST /internal/tunnels/:slug/proxy`
-- `GET /internal/tunnels/:slug/ws` (WebSocket upgrade)
+- `POST /internal/tunnels/:slug/proxy` (WIP)
+- `GET /internal/tunnels/:slug/ws` (WebSocket upgrade, WIP)
 - Requires `x-gateway-secret`.
 - Body: `{ method, path, query?, headers, bodyBase64?, token }`.
 
