@@ -6,7 +6,7 @@ Monorepo for remote control of `codex-cli` and localhost preview tunneling.
 - `apps/saas`: Nuxt fullstack app for `nomade.*` (canonical SaaS UI: login/signup/account/billing/devices/activate) and public API surface.
 - `services/control-api`: backend logic embedded by SaaS runtime for API/device/tunnel contracts.
 - `services/tunnel-gateway`: public preview subdomain gateway that proxies through SaaS backend routes to the agent.
-- `agent/nomade-agent`: host daemon + CLI (`login`, `whoami`, `pair`, `run`) for shell session execution and local HTTP tunnel fetches.
+- `agent/nomade-agent`: host daemon + production CLI (`install`, `start`, `stop`, `status`, `logs`, `login`, `whoami`, `pair`, `run`, `uninstall`) for shell session execution and local HTTP tunnel fetches.
 - `apps/mobile`: Flutter scaffold for login + pairing code generation.
 
 ## Local development
@@ -22,10 +22,10 @@ Fast one-command dev loop:
 6. Start API and gateway:
    - `npm run dev:control`
    - `npm run dev:gateway`
-7. Login, pair and run agent:
-   - `npm --workspace agent/nomade-agent run login -- --server-url http://localhost:8080`
-   - `npm --workspace agent/nomade-agent run pair -- --server-url http://localhost:8080`
-   - `npm run dev:agent:run`
+7. Setup and start local agent daemon:
+   - `npm run dev:agent:setup -- --server-url http://localhost:8080`
+   - `npm run dev:agent:start`
+   - `npm run dev:agent:status`
 
 Detailed local flow: [`QUICKSTART.md`](./QUICKSTART.md)  
 Troubleshooting: [`docs/troubleshooting.md`](./docs/troubleshooting.md)

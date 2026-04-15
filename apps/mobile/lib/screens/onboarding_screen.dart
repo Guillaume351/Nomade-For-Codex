@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../widgets/app_motion.dart';
 import 'login_screen.dart';
 
 class OnboardingScreen extends StatefulWidget {
@@ -47,55 +48,46 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     final isWide = MediaQuery.of(context).size.width >= 700;
 
     return Scaffold(
-      body: DecoratedBox(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              scheme.primary.withValues(
-                  alpha: theme.brightness == Brightness.dark ? 0.22 : 0.12),
-              theme.scaffoldBackgroundColor,
-              scheme.tertiary.withValues(
-                  alpha: theme.brightness == Brightness.dark ? 0.16 : 0.09),
-            ],
-          ),
-        ),
+      body: AppAmbientBackground(
         child: SafeArea(
           child: Column(
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-                child: Row(
-                  children: [
-                    Container(
-                      height: 34,
-                      width: 34,
-                      decoration: BoxDecoration(
-                        color: scheme.primary,
-                        borderRadius: BorderRadius.circular(11),
+              FadeSlideIn(
+                delay: const Duration(milliseconds: 40),
+                beginOffset: const Offset(0, -0.02),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+                  child: Row(
+                    children: [
+                      Container(
+                        height: 34,
+                        width: 34,
+                        decoration: BoxDecoration(
+                          color: scheme.primary,
+                          borderRadius: BorderRadius.circular(11),
+                        ),
+                        alignment: Alignment.center,
+                        child: const Icon(
+                          Icons.auto_awesome_rounded,
+                          size: 18,
+                          color: Colors.white,
+                        ),
                       ),
-                      alignment: Alignment.center,
-                      child: const Icon(
-                        Icons.auto_awesome_rounded,
-                        size: 18,
-                        color: Colors.white,
+                      const SizedBox(width: 10),
+                      Text(
+                        'Nomade for Codex',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 10),
-                    Text(
-                      'Nomade for Codex',
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const Spacer(),
-                    if (_currentPage < _data.length - 1)
-                      TextButton(
-                        onPressed: _goToLogin,
-                        child: const Text('Skip'),
-                      ),
-                  ],
+                      const Spacer(),
+                      if (_currentPage < _data.length - 1)
+                        TextButton(
+                          onPressed: _goToLogin,
+                          child: const Text('Skip'),
+                        ),
+                    ],
+                  ),
                 ),
               ),
               Expanded(
@@ -110,54 +102,70 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   ),
                 ),
               ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 620),
-                  child: Container(
-                    padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
-                    decoration: BoxDecoration(
-                      color: scheme.surface.withValues(alpha: 0.9),
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(
-                          color: scheme.outlineVariant.withValues(alpha: 0.7)),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: List.generate(
-                            _data.length,
-                            (index) => AnimatedContainer(
-                              duration: const Duration(milliseconds: 250),
-                              margin: const EdgeInsets.symmetric(horizontal: 4),
-                              height: 7,
-                              width: _currentPage == index ? 28 : 7,
-                              decoration: BoxDecoration(
-                                color: _currentPage == index
-                                    ? scheme.primary
-                                    : scheme.outlineVariant,
-                                borderRadius: BorderRadius.circular(999),
+              FadeSlideIn(
+                delay: const Duration(milliseconds: 120),
+                beginOffset: const Offset(0, 0.02),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 620),
+                    child: AnimatedContainer(
+                      duration: AppMotion.medium,
+                      curve: AppMotion.standardCurve,
+                      padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+                      decoration: BoxDecoration(
+                        color: scheme.surface.withValues(alpha: 0.9),
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(
+                          color: scheme.outlineVariant.withValues(alpha: 0.72),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.08),
+                            blurRadius: 24,
+                            offset: const Offset(0, 10),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: List.generate(
+                              _data.length,
+                              (index) => AnimatedContainer(
+                                duration: AppMotion.medium,
+                                curve: AppMotion.standardCurve,
+                                margin:
+                                    const EdgeInsets.symmetric(horizontal: 4),
+                                height: 7,
+                                width: _currentPage == index ? 30 : 7,
+                                decoration: BoxDecoration(
+                                  color: _currentPage == index
+                                      ? scheme.primary
+                                      : scheme.outlineVariant,
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                        const SizedBox(height: 20),
-                        FilledButton.icon(
-                          onPressed: _advance,
-                          icon: Icon(
-                            _currentPage == _data.length - 1
-                                ? Icons.rocket_launch_rounded
-                                : Icons.arrow_forward_rounded,
+                          const SizedBox(height: 20),
+                          FilledButton.icon(
+                            onPressed: _advance,
+                            icon: Icon(
+                              _currentPage == _data.length - 1
+                                  ? Icons.rocket_launch_rounded
+                                  : Icons.arrow_forward_rounded,
+                            ),
+                            label: Text(
+                              _currentPage == _data.length - 1
+                                  ? 'Get started'
+                                  : 'Continue',
+                            ),
                           ),
-                          label: Text(
-                            _currentPage == _data.length - 1
-                                ? 'Get started'
-                                : 'Continue',
-                          ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -172,8 +180,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   void _advance() {
     if (_currentPage < _data.length - 1) {
       _pageController.nextPage(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOutCubic,
+        duration: AppMotion.medium,
+        curve: AppMotion.standardCurve,
       );
       return;
     }
@@ -183,7 +191,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   void _goToLogin() {
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(builder: (_) => const LoginScreen()),
+      buildAppPageRoute(context, const LoginScreen()),
     );
   }
 }
@@ -219,60 +227,64 @@ class _OnboardingPage extends StatelessWidget {
         constraints: BoxConstraints(maxWidth: isWide ? 760 : 540),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 18, 20, 8),
-          child: Container(
-            padding: EdgeInsets.symmetric(
-              horizontal: isWide ? 42 : 24,
-              vertical: isWide ? 36 : 26,
-            ),
-            decoration: BoxDecoration(
-              color: scheme.surface.withValues(alpha: 0.86),
-              borderRadius: BorderRadius.circular(26),
-              border: Border.all(
-                  color: scheme.outlineVariant.withValues(alpha: 0.66)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.06),
-                  blurRadius: 24,
-                  offset: const Offset(0, 10),
+          child: FadeSlideIn(
+            key: ValueKey(data.title),
+            child: Container(
+              padding: EdgeInsets.symmetric(
+                horizontal: isWide ? 42 : 24,
+                vertical: isWide ? 36 : 26,
+              ),
+              decoration: BoxDecoration(
+                color: scheme.surface.withValues(alpha: 0.9),
+                borderRadius: BorderRadius.circular(26),
+                border: Border.all(
+                  color: scheme.outlineVariant.withValues(alpha: 0.68),
                 ),
-              ],
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(
-                  height: isWide ? 90 : 80,
-                  width: isWide ? 90 : 80,
-                  decoration: BoxDecoration(
-                    color: scheme.primary.withValues(alpha: 0.14),
-                    shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.09),
+                    blurRadius: 28,
+                    offset: const Offset(0, 12),
                   ),
-                  alignment: Alignment.center,
-                  child: Icon(
-                    data.icon,
-                    size: isWide ? 42 : 36,
-                    color: scheme.primary,
+                ],
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    height: isWide ? 90 : 80,
+                    width: isWide ? 90 : 80,
+                    decoration: BoxDecoration(
+                      color: scheme.primary.withValues(alpha: 0.14),
+                      shape: BoxShape.circle,
+                    ),
+                    alignment: Alignment.center,
+                    child: Icon(
+                      data.icon,
+                      size: isWide ? 42 : 36,
+                      color: scheme.primary,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 28),
-                Text(
-                  data.title,
-                  style: theme.textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -0.4,
+                  const SizedBox(height: 28),
+                  Text(
+                    data.title,
+                    style: theme.textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.4,
+                    ),
+                    textAlign: TextAlign.center,
                   ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 14),
-                Text(
-                  data.description,
-                  style: theme.textTheme.bodyLarge?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                    height: 1.5,
+                  const SizedBox(height: 14),
+                  Text(
+                    data.description,
+                    style: theme.textTheme.bodyLarge?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      height: 1.5,
+                    ),
+                    textAlign: TextAlign.center,
                   ),
-                  textAlign: TextAlign.center,
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),

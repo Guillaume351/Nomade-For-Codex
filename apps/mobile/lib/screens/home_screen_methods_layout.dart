@@ -20,6 +20,7 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
     required Workspace workspace,
     required bool expanded,
   }) {
+    HapticFeedback.selectionClick();
     _setStateSafe(() {
       if (expanded) {
         _expandedWorkspaceIds
@@ -31,7 +32,7 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
     });
 
     if (expanded && provider.selectedWorkspace?.id != workspace.id) {
-      provider.onWorkspaceSelected(workspace);
+      unawaited(provider.onWorkspaceSelected(workspace));
     }
   }
 
@@ -119,10 +120,16 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                   )
                 : ListView(
                     padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
-                    children: sortedWorkspaces
-                        .map((workspace) =>
-                            _buildWorkspaceNode(provider, workspace))
-                        .toList(),
+                    children: sortedWorkspaces.asMap().entries.map((entry) {
+                      final index = entry.key;
+                      final workspace = entry.value;
+                      final delayMs = (index * 22).clamp(0, 190).toInt();
+                      return FadeSlideIn(
+                        delay: Duration(milliseconds: delayMs),
+                        beginOffset: const Offset(0, 0.015),
+                        child: _buildWorkspaceNode(provider, workspace),
+                      );
+                    }).toList(),
                   ),
           ),
         ],
@@ -144,7 +151,9 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
       conversations: workspaceConversations,
     );
 
-    return Container(
+    return AnimatedContainer(
+      duration: AppMotion.medium,
+      curve: AppMotion.standardCurve,
       margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(
         color: selectedWorkspace
@@ -192,13 +201,11 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
               ),
               if (workspaceIsRunning)
                 Container(
-                  width: 8,
-                  height: 8,
+                  width: 18,
+                  height: 18,
                   margin: const EdgeInsets.only(left: 6),
-                  decoration: BoxDecoration(
-                    color: scheme.primary,
-                    shape: BoxShape.circle,
-                  ),
+                  alignment: Alignment.center,
+                  child: PulseDot(color: scheme.primary, size: 7),
                 ),
             ],
           ),
@@ -220,6 +227,7 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                   padding: const EdgeInsets.only(top: 2),
                   child: OutlinedButton.icon(
                     onPressed: () async {
+                      HapticFeedback.selectionClick();
                       await provider.onWorkspaceSelected(workspace);
                     },
                     icon: const Icon(Icons.open_in_new_rounded, size: 16),
@@ -232,6 +240,7 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                 alignment: Alignment.centerLeft,
                 child: FilledButton.tonalIcon(
                   onPressed: () async {
+                    HapticFeedback.selectionClick();
                     await provider.createConversation();
                   },
                   icon: const Icon(Icons.add_comment_outlined, size: 16),
@@ -256,8 +265,16 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                   ),
                 )
               else
-                ...workspaceConversations.map((conversation) =>
-                    _buildConversationNode(provider, conversation)),
+                ...workspaceConversations.asMap().entries.map((entry) {
+                  final index = entry.key;
+                  final conversation = entry.value;
+                  final delayMs = (index * 16).clamp(0, 140).toInt();
+                  return FadeSlideIn(
+                    delay: Duration(milliseconds: delayMs),
+                    beginOffset: const Offset(0, 0.01),
+                    child: _buildConversationNode(provider, conversation),
+                  );
+                }),
             ],
           ],
         ),
@@ -315,7 +332,9 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
     final selected = provider.selectedConversation?.id == conversation.id;
     final isRunning = _conversationIsRunning(provider, conversation);
 
-    return Container(
+    return AnimatedContainer(
+      duration: AppMotion.medium,
+      curve: AppMotion.standardCurve,
       margin: const EdgeInsets.only(bottom: 6),
       decoration: BoxDecoration(
         color: selected
@@ -356,15 +375,15 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
         ),
         trailing: isRunning
             ? SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: scheme.primary,
+                width: 18,
+                height: 18,
+                child: Center(
+                  child: PulseDot(color: scheme.primary, size: 7),
                 ),
               )
             : null,
         onTap: () async {
+          HapticFeedback.selectionClick();
           provider.selectedConversation = conversation;
           await provider.loadTurns(conversation.id);
         },
@@ -527,6 +546,7 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
 
   Widget _buildInputArea(NomadeProvider provider) {
     final isRunning = provider.activeTurnId != null;
+    final isCanceling = _cancelTurnInProgress;
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final slashSuggestions = _filteredSlashCommands(provider);
@@ -534,7 +554,9 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
-      child: Container(
+      child: AnimatedContainer(
+        duration: AppMotion.medium,
+        curve: AppMotion.standardCurve,
         padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
         decoration: BoxDecoration(
           color: scheme.surface,
@@ -584,45 +606,55 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                 ),
                 const SizedBox(height: 8),
               ],
-              if (slashSuggestions.isNotEmpty) ...[
-                Container(
-                  constraints: const BoxConstraints(maxHeight: 220),
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerLow.withValues(alpha: 0.65),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: scheme.outlineVariant.withValues(alpha: 0.56),
-                    ),
-                  ),
-                  child: ListView(
-                    shrinkWrap: true,
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    children: slashSuggestions.map((command) {
-                      return ListTile(
-                        dense: true,
-                        visualDensity: VisualDensity.compact,
-                        title: Text(
-                          command.command,
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            fontWeight: FontWeight.w700,
+              AnimatedSize(
+                duration: AppMotion.medium,
+                curve: AppMotion.standardCurve,
+                child: slashSuggestions.isEmpty
+                    ? const SizedBox.shrink()
+                    : Column(
+                        children: [
+                          Container(
+                            constraints: const BoxConstraints(maxHeight: 220),
+                            decoration: BoxDecoration(
+                              color: scheme.surfaceContainerLow
+                                  .withValues(alpha: 0.65),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: scheme.outlineVariant
+                                    .withValues(alpha: 0.56),
+                              ),
+                            ),
+                            child: ListView(
+                              shrinkWrap: true,
+                              padding: const EdgeInsets.symmetric(vertical: 6),
+                              children: slashSuggestions.map((command) {
+                                return ListTile(
+                                  dense: true,
+                                  visualDensity: VisualDensity.compact,
+                                  title: Text(
+                                    command.command,
+                                    style: theme.textTheme.bodyMedium?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  subtitle: Text(
+                                    command.inlineHelp == null
+                                        ? command.description
+                                        : '${command.description} • ${command.inlineHelp}',
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  onTap: isRunning
+                                      ? null
+                                      : () => _applySlashCommand(command),
+                                );
+                              }).toList(),
+                            ),
                           ),
-                        ),
-                        subtitle: Text(
-                          command.inlineHelp == null
-                              ? command.description
-                              : '${command.description} • ${command.inlineHelp}',
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        onTap: isRunning
-                            ? null
-                            : () => _applySlashCommand(command),
-                      );
-                    }).toList(),
-                  ),
-                ),
-                const SizedBox(height: 8),
-              ],
+                          const SizedBox(height: 8),
+                        ],
+                      ),
+              ),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
@@ -725,8 +757,26 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                     ),
                   ),
                   const SizedBox(width: 8),
+                  if (isRunning) ...[
+                    IconButton.filledTonal(
+                      tooltip: 'Cancel running turn',
+                      onPressed: isCanceling
+                          ? null
+                          : () => _confirmAndCancelActiveTurn(provider),
+                      icon: isCanceling
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : const Icon(Icons.stop_rounded),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
                   IconButton.filled(
-                    tooltip: 'Send prompt',
+                    tooltip: isRunning ? 'Turn is running' : 'Send prompt',
                     onPressed: isRunning ? null : _handleSend,
                     icon: isRunning
                         ? const SizedBox(
@@ -741,26 +791,34 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                   ),
                 ],
               ),
-              if (isPlanMode) ...[
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Icon(
-                      Icons.checklist_rtl_rounded,
-                      size: 16,
-                      color: scheme.primary,
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      'Plan mode enabled',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: scheme.primary,
-                        fontWeight: FontWeight.w600,
+              AnimatedSwitcher(
+                duration: AppMotion.medium,
+                switchInCurve: AppMotion.standardCurve,
+                switchOutCurve: Curves.easeInCubic,
+                child: !isPlanMode
+                    ? const SizedBox.shrink()
+                    : Padding(
+                        key: const ValueKey('plan-mode-row'),
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.checklist_rtl_rounded,
+                              size: 16,
+                              color: scheme.primary,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Plan mode enabled',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: scheme.primary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              ],
+              ),
             ],
           ),
         ),

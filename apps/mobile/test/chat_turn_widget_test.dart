@@ -139,4 +139,30 @@ void main() {
       }
     });
   });
+
+  testWidgets('user prompt bubble text is selectable', (tester) async {
+    final provider = _SpyNomadeProvider();
+    final turn = Turn(
+      id: 'turn-3',
+      conversationId: 'conv-3',
+      userPrompt: 'Message utilisateur sélectionnable',
+      status: 'running',
+      createdAt: DateTime.parse('2026-04-12T16:20:00Z'),
+      updatedAt: DateTime.parse('2026-04-12T16:20:01Z'),
+    );
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider<NomadeProvider>.value(
+        value: provider,
+        child: MaterialApp(
+          home: Scaffold(
+            body: ChatTurnWidget(turn: turn),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Message utilisateur sélectionnable'), findsOneWidget);
+    expect(find.byType(SelectableText), findsOneWidget);
+  });
 }

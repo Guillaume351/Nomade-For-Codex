@@ -41,6 +41,7 @@ class NomadeProvider with ChangeNotifier {
   static const _accessTokenExpiryKey = 'nomade.access_token_expiry_iso';
   static const _selectedAgentKey = 'nomade.selected_agent_id';
   static const _selectedWorkspaceKey = 'nomade.selected_workspace_id';
+  static const _selectedConversationKey = 'nomade.selected_conversation_id';
   static const _selectedModelKey = 'nomade.selected_model';
   static const _selectedApprovalPolicyKey = 'nomade.selected_approval_policy';
   static const _selectedSandboxModeKey = 'nomade.selected_sandbox_mode';
@@ -86,11 +87,12 @@ class NomadeProvider with ChangeNotifier {
   bool pushProviderReady = false;
   String? pushRegistrationError;
   String? _registeredPushToken;
-  Future<bool>? _refreshTokensInFlight;
+  Future<_TokenRefreshResult>? _refreshTokensInFlight;
 
   List<Agent> agents = [];
   List<Workspace> workspaces = [];
   List<Conversation> conversations = [];
+  String? _conversationsWorkspaceId;
   List<Turn> turns = [];
   List<DevService> services = [];
   List<TunnelPreview> tunnels = [];
@@ -177,6 +179,8 @@ class NomadeProvider with ChangeNotifier {
     }
     return null;
   }
+
+  String? get conversationsWorkspaceId => _conversationsWorkspaceId;
 
   ConversationRuntimeTrace? runtimeTraceForConversation(String conversationId) {
     if (conversationId.isEmpty) {
@@ -283,6 +287,8 @@ class NomadeProvider with ChangeNotifier {
   }
 
   String? activeTurnId;
+  int _loadConversationsRequestToken = 0;
+  int _loadTurnsRequestToken = 0;
 
   // Codex Options
   List<Map<String, dynamic>> codexModels = [];
@@ -384,6 +390,9 @@ class NomadeProvider with ChangeNotifier {
   int reconnectAttempts = 0;
   bool realtimeConnected = false;
   bool _realtimeSyncRefreshInProgress = false;
+  final Set<String> _loadTurnsInFlightConversationIds = <String>{};
+  final Map<String, DateTime> _lastLoadTurnsAtByConversation =
+      <String, DateTime>{};
 
   bool secureStorageAvailable = true;
 

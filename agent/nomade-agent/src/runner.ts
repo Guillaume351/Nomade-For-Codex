@@ -472,6 +472,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
   const tunnelManager = new TunnelManager();
   let e2eRuntime: ReturnType<typeof createE2ERuntime> = null;
   let sessionForPersistence: UserSessionConfig | null = null;
+  let sessionValidatedAtStartup = false;
   let e2eDebug:
     | {
         epoch: number;
@@ -484,13 +485,19 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
     let session = await ensureSession({
       serverUrl: normalizedControlHttpUrl,
       sessionPath
-    }).catch(async () => {
-      try {
-        return await readUserSession(sessionPath);
-      } catch {
-        return null;
-      }
-    });
+    })
+      .then((value) => {
+        sessionValidatedAtStartup = true;
+        return value;
+      })
+      .catch(async () => {
+        sessionValidatedAtStartup = false;
+        try {
+          return await readUserSession(sessionPath);
+        } catch {
+          return null;
+        }
+      });
     if (session && session.controlHttpUrl.replace(/\/$/, "") === normalizedControlHttpUrl) {
       sessionForPersistence = session;
       e2eRuntime = createE2ERuntime(session.e2e);
@@ -519,6 +526,8 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
   const keepAwakeManager = new KeepAwakeManager(keepAwakeMode);
   const activeSessionIds = new Set<string>();
   const activeTurnIds = new Set<string>();
+  const seenTurnStartIds = new Set<string>();
+  const seenTurnStartOrder: string[] = [];
 
   const recomputeKeepAwakeState = (): void => {
     keepAwakeManager.setActive(activeSessionIds.size > 0 || activeTurnIds.size > 0);
@@ -548,6 +557,25 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
     recomputeKeepAwakeState();
   };
 
+  const rememberTurnStartId = (turnId: string): boolean => {
+    if (!turnId) {
+      return false;
+    }
+    if (seenTurnStartIds.has(turnId)) {
+      return false;
+    }
+    seenTurnStartIds.add(turnId);
+    seenTurnStartOrder.push(turnId);
+    // Keep a bounded memory footprint while preserving de-dup over reconnect bursts.
+    if (seenTurnStartOrder.length > 2_048) {
+      const oldest = seenTurnStartOrder.shift();
+      if (oldest) {
+        seenTurnStartIds.delete(oldest);
+      }
+    }
+    return true;
+  };
+
   let activeWs: WebSocket | null = null;
   const sendToControl = (payload: Record<string, unknown>): boolean => {
     const ws = activeWs;
@@ -571,6 +599,25 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
 
   let peerSyncInFlight: Promise<boolean> | null = null;
   let lastPeerSyncAt = 0;
+  const persistSessionE2EState = async (
+    nextE2E: NonNullable<UserSessionConfig["e2e"]>
+  ): Promise<boolean> => {
+    const latest = await readUserSession(sessionPath).catch(() => null);
+    if (!latest) {
+      sessionForPersistence = null;
+      return false;
+    }
+    if (latest.controlHttpUrl.replace(/\/$/, "") !== normalizedControlHttpUrl) {
+      return false;
+    }
+    const nextSession: UserSessionConfig = {
+      ...latest,
+      e2e: nextE2E
+    };
+    await writeUserSession(sessionPath, nextSession);
+    sessionForPersistence = nextSession;
+    return true;
+  };
   const fetchE2EPeerDevices = async (session: UserSessionConfig): Promise<E2EPeerDevice[]> => {
     const response = await fetch(`${session.controlHttpUrl.replace(/\/$/, "")}/me/e2e/devices`, {
       headers: {
@@ -632,15 +679,10 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       }
       return { changed: false };
     }
-    const nextSession: UserSessionConfig = {
-      ...currentSession,
-      e2e: {
-        ...currentE2E,
-        peers: nextPeers
-      }
-    };
-    sessionForPersistence = nextSession;
-    await writeUserSession(sessionPath, nextSession);
+    await persistSessionE2EState({
+      ...currentE2E,
+      peers: nextPeers
+    });
     if (e2eDebug) {
       e2eDebug.peers = Object.keys(nextPeers).length;
     }
@@ -695,7 +737,17 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           sessionForPersistence = refreshed;
           return await attemptSync(refreshed);
         } catch (refreshError) {
-          console.warn("[agent] e2e peer sync refresh failed", refreshError);
+          const refreshMessage =
+            refreshError instanceof Error ? refreshError.message : String(refreshError ?? "");
+          if (refreshMessage.includes("refresh_failed:invalid_refresh_token")) {
+            console.warn(
+              "[agent] e2e peer sync skipped: refresh token is invalid. Run `nomade-agent login --server-url " +
+                normalizedControlHttpUrl +
+                "`."
+            );
+          } else {
+            console.warn("[agent] e2e peer sync refresh failed", refreshError);
+          }
           return false;
         }
       }
@@ -707,7 +759,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       peerSyncInFlight = null;
     }
   };
-  if (sessionForPersistence?.e2e && e2eRuntime) {
+  if (sessionForPersistence?.e2e && e2eRuntime && sessionValidatedAtStartup) {
     await syncE2EPeers({ force: true });
   }
   const sameSeqByScope = (
@@ -743,14 +795,10 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       if (sameSeqByScope(sessionForPersistence.e2e.seqByScope, nextSeqByScope)) {
         return;
       }
-      sessionForPersistence = {
-        ...sessionForPersistence,
-        e2e: {
-          ...sessionForPersistence.e2e,
-          seqByScope: nextSeqByScope
-        }
-      };
-      await writeUserSession(sessionPath, sessionForPersistence);
+      await persistSessionE2EState({
+        ...sessionForPersistence.e2e,
+        seqByScope: nextSeqByScope
+      });
     } catch (error) {
       console.error("[agent] failed to persist e2e seq state", error);
     } finally {
@@ -783,6 +831,14 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
     failTurn?: boolean;
   }): void => {
     const code = normalizeE2EDecryptErrorCode(params.error);
+    const scope =
+      params.conversationId && params.conversationId.trim().length > 0
+        ? `conversation:${params.conversationId}`
+        : "";
+    const lastSeenSeq =
+      e2eRuntime && scope && params.envelope?.senderDeviceId
+          ? e2eRuntime.getLastSeenSeq(scope, params.envelope.senderDeviceId)
+          : null;
     const details = {
       context: params.context,
       code,
@@ -792,6 +848,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       envelopeSender: params.envelope?.senderDeviceId ?? "",
       envelopeEpoch: params.envelope?.epoch ?? "",
       envelopeSeq: params.envelope?.seq ?? "",
+      envelopeLastSeenSeq: lastSeenSeq ?? "",
       e2e: e2eDebug
     };
     console.error("[agent] e2e decrypt failed", details, params.error);
@@ -937,6 +994,21 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       if (type === "conversation.turn.start") {
         const conversationId = String(msg.conversationId ?? "");
         const turnId = String(msg.turnId ?? "");
+        if (!conversationId || !turnId) {
+          console.warn("[agent] invalid conversation.turn.start payload", {
+            conversationId,
+            turnId
+          });
+          return;
+        }
+        if (!rememberTurnStartId(turnId)) {
+          console.warn("[agent] duplicate conversation.turn.start ignored", {
+            conversationId,
+            turnId,
+            threadId: String(msg.threadId ?? "")
+          });
+          return;
+        }
         let prompt = msg.prompt ? String(msg.prompt) : undefined;
         let inputItems = Array.isArray(msg.inputItems)
           ? msg.inputItems.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))

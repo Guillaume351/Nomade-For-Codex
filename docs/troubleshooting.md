@@ -4,7 +4,7 @@
 - Cause: selected agent exists in DB but its websocket is not connected.
 - Fix:
   1. Pair if needed: `npm run dev:agent:pair -- --server-url http://localhost:8080 --pairing-code <PAIRING_CODE>`
-  2. Run daemon: `npm run dev:agent:run`
+  2. Run daemon: `npm run dev:agent:start`
   3. In mobile app, ensure active agent is marked `Online`.
 
 ## `Control API is not reachable at http://localhost:8080`

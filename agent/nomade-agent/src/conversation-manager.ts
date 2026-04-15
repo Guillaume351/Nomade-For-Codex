@@ -124,6 +124,7 @@ export class ConversationManager {
   private readonly activeTurnByThread = new Map<string, TurnContext>();
   private readonly terminalTurnIds = new Set<string>();
   private readonly pendingServerRequests = new Map<string, PendingServerRequest>();
+  private closing = false;
   private lastSyncSignature = "";
   private lastSyncAt = 0;
   private syncAuthBackoffUntil = 0;
@@ -132,7 +133,8 @@ export class ConversationManager {
   constructor(private readonly emit: (payload: Record<string, unknown>) => void) {
     this.codexClient = new CodexAppServerClient(
       (notification) => this.onNotification(notification),
-      (request) => this.onServerRequest(request)
+      (request) => this.onServerRequest(request),
+      (reason) => this.onCodexClientExit(reason)
     );
   }
 
@@ -551,6 +553,7 @@ export class ConversationManager {
   }
 
   close(): void {
+    this.closing = true;
     for (const [requestId, pending] of this.pendingServerRequests.entries()) {
       pending.reject(new Error(`server_request_cancelled:${requestId}`));
     }
@@ -954,6 +957,38 @@ export class ConversationManager {
     const active = this.activeTurnByThread.get(params.threadId);
     if (active && active.turnId === params.context.turnId) {
       this.activeTurnByThread.delete(params.threadId);
+    }
+  }
+
+  private onCodexClientExit(reason: string): void {
+    if (this.closing) {
+      return;
+    }
+    const failures: Array<{
+      context: TurnContext;
+      threadId: string;
+      codexTurnId: string;
+    }> = [];
+    for (const [threadId, context] of this.activeTurnByThread.entries()) {
+      const mapping = this.codexByTurn.get(context.turnId);
+      failures.push({
+        context,
+        threadId,
+        codexTurnId: mapping?.codexTurnId ?? ""
+      });
+    }
+    if (failures.length === 0) {
+      return;
+    }
+    const normalizedReason = reason.trim().length > 0 ? reason : "codex_app_server_exited";
+    for (const failure of failures) {
+      this.emitTurnCompleted({
+        context: failure.context,
+        threadId: failure.threadId,
+        codexTurnId: failure.codexTurnId,
+        status: "failed",
+        error: normalizedReason
+      });
     }
   }
 
