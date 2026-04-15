@@ -32,14 +32,15 @@ npm run dev:up
 npm run dev:logs
 ```
 
-## 3. Login and pair agent
+## 3. Setup and start agent
 ```bash
-# login (opens activation URL and prints code + QR link)
-npm --workspace agent/nomade-agent run login -- --server-url http://localhost:8080
+# one guided flow: login (if needed) + pair (if needed)
+npm run dev:agent:setup -- --server-url http://localhost:8080
 
-# pair (auto-requests pairing code from your account session)
-npm --workspace agent/nomade-agent run pair -- --server-url http://localhost:8080
-npm run dev:agent:run
+# daemon lifecycle
+npm run dev:agent:start
+npm run dev:agent:status
+npm run dev:agent:logs
 ```
 
 In local dev, auth emails are logged by default (`AUTH_EMAIL_MODE=log`). Use Mailpit by setting `AUTH_EMAIL_MODE=smtp`, `AUTH_SMTP_HOST=mailpit`, `AUTH_SMTP_PORT=1025`.
@@ -64,6 +65,6 @@ npm run dev:down
 ```
 
 ## Troubleshooting
-- `Import failed: API 409: agent_offline`: pair succeeded but agent daemon is not running. Start it with `npm run dev:agent:run`.
+- `Import failed: API 409: agent_offline`: pair succeeded but agent daemon is not running. Start it with `npm run dev:agent:start`.
 - Turns show only `completed` without message body: open the conversation again (auto hydration/repair runs), or use `Retry hydrate` in the app.
 - `API 401: invalid_token`: session expired; app should auto-refresh. If needed, logout/login again.
