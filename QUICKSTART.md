@@ -1,5 +1,9 @@
 # Quickstart (local)
 
+> Status note (April 2026)
+> - Preview tunnels are currently work in progress and not yet available for reliable use.
+> - This quickstart focuses on the flows that work now: auth, pairing, conversations, and remote sessions.
+
 ## Fast path (one command)
 ```bash
 npm run dev:full
@@ -68,3 +72,4 @@ npm run dev:down
 - `Import failed: API 409: agent_offline`: pair succeeded but agent daemon is not running. Start it with `npm run dev:agent:start`.
 - Turns show only `completed` without message body: open the conversation again (auto hydration/repair runs), or use `Retry hydrate` in the app.
 - `API 401: invalid_token`: session expired; app should auto-refresh. If needed, logout/login again.
+- Tunnel creation/proxy errors: expected for now, tunnel feature is still WIP.

@@ -1,11 +1,15 @@
 # Architecture (v1)
 
+> Status note (April 2026)
+> - Production focus is currently on auth, pairing, conversations, and remote session control.
+> - The tunnel path is still under active development and is not yet considered available/reliable.
+
 ## Components
 - `services/control-api`:
   - Device code auth and refresh tokens
   - Web activation/account UI, Better Auth (`/api/auth/*`) and Stripe webhook handling
   - Agent pairing and registration
-  - Workspaces, sessions, tunnels metadata in Postgres
+  - Workspaces and sessions metadata in Postgres (tunnel metadata path is WIP)
   - Conversations + turns + items metadata in Postgres
   - WebSocket broker between mobile users and host agents
   - Internal tunnel proxy RPC endpoint for gateway
@@ -13,11 +17,12 @@
   - User-space daemon process
   - Managed shell sessions for remote command execution
   - Local Codex App Server bridge (`thread/start`, `turn/start`, `turn/interrupt`)
-  - Localhost HTTP request execution for tunnels
+  - Localhost HTTP request execution for tunnels (WIP path)
 - `services/tunnel-gateway`:
   - Public entrypoint for preview URLs (`<slug>.<preview-domain>`)
   - Validates tunnel access token
   - Forwards each HTTP request to control-api internal proxy
+  - Current status: WIP / not yet reliably available
 - `apps/mobile`:
   - Flutter scaffold for device code login and agent pairing code generation
 
@@ -30,7 +35,7 @@
 4. Agent opens WS connection to `/ws?agent_token=...`.
 5. Mobile creates conversations/sessions/tunnels via REST; control-api pushes commands to agent WS.
 6. Agent streams output/status/Codex turn events over WS.
-7. Tunnel gateway forwards HTTP preview requests through control-api WS RPC to the agent.
+7. Planned flow (WIP): tunnel gateway forwards HTTP preview requests through control-api WS RPC to the agent.
 
 ## Security defaults
 - Access tokens: JWT, short-lived.
