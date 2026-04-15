@@ -247,6 +247,39 @@ describe("ConversationManager app-server mapping", () => {
     manager.close();
   });
 
+  it("fails active turns when codex app-server exits unexpectedly", () => {
+    const emitted: Array<Record<string, unknown>> = [];
+    const manager = new ConversationManager((payload) => emitted.push(payload));
+    const anyManager = manager as unknown as Record<string, unknown>;
+
+    (anyManager["bindTurn"] as (
+      threadId: string,
+      codexTurnId: string,
+      context: { conversationId: string; turnId: string }
+    ) => void)("thread-exit", "codex-turn-exit", {
+      conversationId: "conversation-exit",
+      turnId: "turn-exit"
+    });
+
+    (anyManager["onCodexClientExit"] as (reason: string) => void)(
+      "codex app-server exited (code=1 signal=null)"
+    );
+
+    expect(emitted).toContainEqual(
+      expect.objectContaining({
+        type: "conversation.turn.completed",
+        conversationId: "conversation-exit",
+        turnId: "turn-exit",
+        threadId: "thread-exit",
+        codexTurnId: "codex-turn-exit",
+        status: "failed",
+        error: "codex app-server exited (code=1 signal=null)"
+      })
+    );
+
+    manager.close();
+  });
+
   it("normalizes inline directive placeholders in imported user prompts", () => {
     const manager = new ConversationManager(() => undefined);
     const anyManager = manager as unknown as Record<string, unknown>;

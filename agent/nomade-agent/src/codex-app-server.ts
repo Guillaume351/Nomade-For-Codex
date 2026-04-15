@@ -498,7 +498,8 @@ export class CodexAppServerClient {
     private readonly onNotification: (notification: AppServerNotification) => void,
     private readonly onServerRequest?: (
       request: AppServerServerRequest
-    ) => Promise<AppServerServerRequestResolution>
+    ) => Promise<AppServerServerRequestResolution>,
+    private readonly onProcessExit?: (reason: string) => void
   ) {}
 
   async start(): Promise<void> {
@@ -550,6 +551,7 @@ export class CodexAppServerClient {
       this.threadStartLock.clear();
       this.resolvedModelByCwdKey.clear();
       this.child = null;
+      this.onProcessExit?.(reason);
     });
 
     try {

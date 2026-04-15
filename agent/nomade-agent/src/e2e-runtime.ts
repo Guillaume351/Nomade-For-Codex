@@ -60,7 +60,7 @@ export class E2ERuntime {
     const key = `${scope}:${envelope.senderDeviceId}`;
     const lastSeenSeq = this.lastSeenSeqBySenderScope.get(key) ?? -1;
     if (envelope.seq <= lastSeenSeq) {
-      throw new Error("e2e_replay_detected");
+      throw new Error(`e2e_replay_detected:last_seen=${lastSeenSeq}:incoming=${envelope.seq}`);
     }
 
     const senderSignPublicKey = this.resolveSignPublicKey(envelope.senderDeviceId);
@@ -72,6 +72,12 @@ export class E2ERuntime {
     });
     this.lastSeenSeqBySenderScope.set(key, envelope.seq);
     return plaintext;
+  }
+
+  getLastSeenSeq(scope: string, senderDeviceId: string): number | null {
+    const key = `${scope}:${senderDeviceId}`;
+    const value = this.lastSeenSeqBySenderScope.get(key);
+    return typeof value === "number" ? value : null;
   }
 
   exportSeqByScope(): Record<string, number> {
