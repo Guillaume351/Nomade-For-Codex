@@ -4399,8 +4399,11 @@ export const createServer = async (): Promise<http.Server> => {
       e2eCommandEnvelope: e2eEnvelopeSchema.optional(),
       cwd: z.string().optional(),
       env: z.record(z.string()).optional()
-    }).refine((value) => Boolean(value.command?.trim() || value.e2eCommandEnvelope), {
-      message: "command or e2eCommandEnvelope is required",
+    }).refine((value) => Boolean(value.e2eCommandEnvelope), {
+      message: "e2eCommandEnvelope is required",
+      path: ["e2eCommandEnvelope"]
+    }).refine((value) => !value.command?.trim(), {
+      message: "plaintext command is not allowed; use e2eCommandEnvelope",
       path: ["command"]
     });
     const parsed = schema.safeParse(req.body);
@@ -4422,7 +4425,7 @@ export const createServer = async (): Promise<http.Server> => {
       sessionId: session.id,
       workspaceId: parsed.data.workspaceId,
       agentId: parsed.data.agentId,
-      command: parsed.data.command ?? "",
+      command: "",
       e2eCommandEnvelope: parsed.data.e2eCommandEnvelope,
       cwd: parsed.data.cwd,
       env: parsed.data.env

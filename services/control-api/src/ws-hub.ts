@@ -223,6 +223,90 @@ const normalizeString = (value: unknown): string | undefined => {
   return trimmed.length > 0 ? trimmed : undefined;
 };
 
+const redactEncryptedRealtimePayload = (payload: Record<string, unknown>): Record<string, unknown> => {
+  const type = typeof payload.type === "string" ? payload.type : "";
+  const e2eEnvelope =
+    payload.e2eEnvelope && typeof payload.e2eEnvelope === "object"
+      ? (payload.e2eEnvelope as Record<string, unknown>)
+      : null;
+  if (!e2eEnvelope) {
+    return payload;
+  }
+
+  if (type === "session.output") {
+    return {
+      type,
+      sessionId: payload.sessionId,
+      stream: payload.stream,
+      data: "",
+      cursor: payload.cursor,
+      e2eEnvelope
+    };
+  }
+
+  if (type === "conversation.turn.diff.updated") {
+    return {
+      type,
+      conversationId: payload.conversationId,
+      turnId: payload.turnId,
+      e2eEnvelope
+    };
+  }
+
+  if (type === "conversation.item.started" || type === "conversation.item.completed") {
+    return {
+      type,
+      conversationId: payload.conversationId,
+      turnId: payload.turnId,
+      itemId: payload.itemId,
+      itemType: payload.itemType,
+      e2eEnvelope
+    };
+  }
+
+  if (type === "conversation.item.delta") {
+    return {
+      type,
+      conversationId: payload.conversationId,
+      turnId: payload.turnId,
+      stream: payload.stream,
+      e2eEnvelope
+    };
+  }
+
+  if (type === "conversation.turn.plan.updated") {
+    return {
+      type,
+      conversationId: payload.conversationId,
+      turnId: payload.turnId,
+      e2eEnvelope
+    };
+  }
+
+  if (type === "conversation.server.request") {
+    return {
+      type,
+      conversationId: payload.conversationId,
+      turnId: payload.turnId,
+      requestId: payload.requestId,
+      method: payload.method,
+      e2eEnvelope
+    };
+  }
+
+  if (type === "conversation.server.request.resolved") {
+    return {
+      type,
+      conversationId: payload.conversationId,
+      turnId: payload.turnId,
+      requestId: payload.requestId,
+      e2eEnvelope
+    };
+  }
+
+  return payload;
+};
+
 const normalizeConversationThreadStatus = (
   value: unknown
 ): "running" | "completed" | "interrupted" | "failed" | "" => {
@@ -960,10 +1044,11 @@ export class WsHub {
       const sessionId = String(msg.sessionId ?? "");
       const cursor = Number(msg.cursor ?? 0);
       const userId = this.sessionOwner.get(sessionId) ?? defaultUserId;
+      const payload = redactEncryptedRealtimePayload(msg);
       if (sessionId) {
         void this.repositories.updateSessionCursor(sessionId, cursor);
       }
-      this.broadcastToUser(userId, msg);
+      this.broadcastToUser(userId, payload);
       return;
     }
 
@@ -1233,7 +1318,7 @@ export class WsHub {
       if (turnId) {
         void this.repositories.updateConversationTurnDiff(turnId, diff);
       }
-      this.broadcastToUser(userId, msg);
+      this.broadcastToUser(userId, redactEncryptedRealtimePayload(msg));
       return;
     }
 
@@ -1268,7 +1353,7 @@ export class WsHub {
             });
           });
       }
-      this.broadcastToUser(userId, msg);
+      this.broadcastToUser(userId, redactEncryptedRealtimePayload(msg));
       return;
     }
 
@@ -1303,21 +1388,21 @@ export class WsHub {
             });
           });
       }
-      this.broadcastToUser(userId, msg);
+      this.broadcastToUser(userId, redactEncryptedRealtimePayload(msg));
       return;
     }
 
     if (type === "conversation.item.delta") {
       const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
-      this.broadcastToUser(userId, msg);
+      this.broadcastToUser(userId, redactEncryptedRealtimePayload(msg));
       return;
     }
 
     if (type === "conversation.turn.plan.updated") {
       const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
-      this.broadcastToUser(userId, msg);
+      this.broadcastToUser(userId, redactEncryptedRealtimePayload(msg));
       return;
     }
 
@@ -1396,7 +1481,7 @@ export class WsHub {
     if (type === "conversation.server.request" || type === "conversation.server.request.resolved") {
       const conversationId = String(msg.conversationId ?? this.turnConversation.get(String(msg.turnId ?? "")) ?? "");
       const userId = this.conversationOwner.get(conversationId) ?? defaultUserId;
-      this.broadcastToUser(userId, msg);
+      this.broadcastToUser(userId, redactEncryptedRealtimePayload(msg));
       if (type === "conversation.server.request") {
         void this.hooks.onConversationServerRequest?.({
           agentId,

@@ -287,21 +287,30 @@ const enrichConversationEventWithE2E = (
 
   if (type === "conversation.turn.diff.updated" && typeof payload.diff === "string" && payload.diff.length > 0) {
     return {
-      ...payload,
+      type,
+      conversationId,
+      turnId: payload.turnId,
       e2eEnvelope: e2eRuntime.encrypt(scope, JSON.stringify({ diff: payload.diff }))
     };
   }
 
   if ((type === "conversation.item.started" || type === "conversation.item.completed") && payload.item) {
     return {
-      ...payload,
+      type,
+      conversationId,
+      turnId: payload.turnId,
+      itemId: payload.itemId,
+      itemType: payload.itemType,
       e2eEnvelope: e2eRuntime.encrypt(scope, JSON.stringify({ item: payload.item }))
     };
   }
 
   if (type === "conversation.item.delta" && typeof payload.delta === "string") {
     return {
-      ...payload,
+      type,
+      conversationId,
+      turnId: payload.turnId,
+      stream: payload.stream,
       e2eEnvelope: e2eRuntime.encrypt(
         scope,
         JSON.stringify({ delta: payload.delta, stream: typeof payload.stream === "string" ? payload.stream : undefined })
@@ -311,21 +320,30 @@ const enrichConversationEventWithE2E = (
 
   if (type === "conversation.turn.plan.updated" && payload.plan) {
     return {
-      ...payload,
+      type,
+      conversationId,
+      turnId: payload.turnId,
       e2eEnvelope: e2eRuntime.encrypt(scope, JSON.stringify({ plan: payload.plan }))
     };
   }
 
   if (type === "conversation.server.request" && payload.params) {
     return {
-      ...payload,
+      type,
+      conversationId,
+      turnId: payload.turnId,
+      requestId: payload.requestId,
+      method: payload.method,
       e2eEnvelope: e2eRuntime.encrypt(scope, JSON.stringify({ params: payload.params }))
     };
   }
 
   if (type === "conversation.server.request.resolved") {
     return {
-      ...payload,
+      type,
+      conversationId,
+      turnId: payload.turnId,
+      requestId: payload.requestId,
       e2eEnvelope: e2eRuntime.encrypt(
         scope,
         JSON.stringify({
@@ -894,7 +912,7 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         type: "session.output",
         sessionId,
         stream,
-        data,
+        data: e2eEnvelope ? "" : data,
         cursor,
         e2eEnvelope
       });
