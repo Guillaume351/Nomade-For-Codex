@@ -146,35 +146,8 @@ export class DevServiceManager {
     };
   }
 
-  async startService(userId: string, serviceId: string): Promise<ServiceStateView | null> {
-    const service = await this.repositories.findDevServiceById(userId, serviceId);
-    if (!service) {
-      return null;
-    }
-
-    const workspace = await this.repositories.findWorkspaceById(userId, service.workspace_id);
-    if (!workspace) {
-      return null;
-    }
-
-    const allServices = await this.repositories.listDevServices(userId, service.workspace_id);
-    const servicesByName = new Map<string, DevServiceRecord>();
-    for (const item of allServices) {
-      servicesByName.set(item.name, item);
-    }
-
-    const chain = this.resolveDependencyOrder(service, servicesByName);
-    const context: StartContext = {
-      userId,
-      workspacePath: workspace.path,
-      servicesByName
-    };
-
-    for (const item of chain) {
-      await this.startSingleService(item, context);
-    }
-
-    return this.getServiceState(userId, serviceId);
+  async startService(_userId: string, _serviceId: string): Promise<ServiceStateView | null> {
+    throw new Error("service_start_disabled_in_strict_e2e_mode");
   }
 
   async stopService(userId: string, serviceId: string): Promise<ServiceStateView | null> {
@@ -287,93 +260,7 @@ export class DevServiceManager {
   }
 
   private async startSingleService(service: DevServiceRecord, context: StartContext): Promise<void> {
-    const currentState = await this.getServiceState(context.userId, service.id);
-    if (currentState && (currentState.state === "starting" || currentState.state === "healthy")) {
-      return;
-    }
-
-    const settings = await this.repositories.getWorkspaceDevSettings(context.userId, service.workspace_id);
-    const tokenRequired = !(settings?.trusted_dev_mode ?? false);
-
-    let tunnel: TunnelRecord | null = null;
-    if (service.auto_tunnel) {
-      tunnel = await this.repositories.findOpenTunnelByService(service.id);
-      if (!tunnel) {
-        const created = await this.repositories.createTunnel({
-          userId: context.userId,
-          workspaceId: service.workspace_id,
-          agentId: service.agent_id,
-          serviceId: service.id,
-          targetPort: service.port,
-          tokenRequired
-        });
-        tunnel = created.tunnel;
-        if (tokenRequired) {
-          this.issuedTunnelTokens.set(tunnel.id, created.accessToken);
-        }
-      }
-
-      this.wsHub.rememberTunnelOwner(tunnel.id, context.userId);
-      const delivered = this.wsHub.sendToAgent(service.agent_id, {
-        type: "tunnel.open",
-        tunnelId: tunnel.id,
-        slug: tunnel.slug,
-        targetPort: service.port
-      });
-      if (!delivered) {
-        await this.repositories.updateTunnelStatus(tunnel.id, "error");
-        throw new Error("agent_offline");
-      }
-    }
-
-    const env = await this.resolveServiceEnv(service, context, tokenRequired);
-
-    const session = await this.repositories.createSession({
-      userId: context.userId,
-      workspaceId: service.workspace_id,
-      agentId: service.agent_id,
-      name: `service:${service.name}`
-    });
-
-    this.wsHub.rememberSessionOwner(session.id, context.userId, service.agent_id);
-    const delivered = this.wsHub.sendToAgent(service.agent_id, {
-      type: "session.create",
-      sessionId: session.id,
-      workspaceId: service.workspace_id,
-      agentId: service.agent_id,
-      command: service.command,
-      cwd: service.cwd ?? context.workspacePath,
-      env
-    });
-
-    if (!delivered) {
-      await this.repositories.updateSessionStatus(session.id, "failed");
-      await this.repositories.upsertServiceRuntime({
-        serviceId: service.id,
-        sessionId: session.id,
-        tunnelId: tunnel?.id ?? null,
-        status: "crashed",
-        lastError: "agent_offline"
-      });
-      throw new Error("agent_offline");
-    }
-
-    await this.repositories.upsertServiceRuntime({
-      serviceId: service.id,
-      sessionId: session.id,
-      tunnelId: tunnel?.id ?? null,
-      status: tunnel ? "starting" : "running",
-      lastError: null
-    });
-
-    if (tunnel) {
-      this.wsHub.publishTunnelStatus(tunnel.id, {
-        status: "starting",
-        detail: `Service ${service.name} is starting`,
-        probeStatus: "unknown"
-      });
-      this.startProbe(service, session.id, tunnel.id);
-    }
+    throw new Error("service_start_disabled_in_strict_e2e_mode");
   }
 
   private async resolveServiceEnv(

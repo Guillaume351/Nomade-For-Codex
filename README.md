@@ -5,6 +5,8 @@ Nomade is an open-source remote companion for Codex: pair a machine running `cod
 ## Project status (April 2026)
 - Active development, not production-ready.
 - Core flows are usable: login, device pairing, conversation sync, and remote shell sessions.
+- Strict E2E transport is enforced for turns, terminal input/output, and server request approvals (plaintext fallback paths disabled).
+- Dev service start is disabled in strict E2E mode until an encrypted launch design is implemented.
 - Preview tunnels are currently **work in progress** and should be treated as **not available** for real usage.
 - Interfaces and APIs can still change between releases.
 

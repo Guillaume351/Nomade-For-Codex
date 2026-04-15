@@ -42,7 +42,10 @@
 - Refresh tokens: random opaque tokens hashed in Postgres.
 - Agent tokens: random opaque tokens hashed in Postgres.
 - Tunnel access: random opaque token hashed in Postgres.
-- Telemetry: no command/payload persistence in this v1 scaffold.
+- Turn/session content transport: envelope-only E2E in strict mode (`xchacha20poly1305`), with plaintext fallback paths disabled.
+- Terminal/session/control payload fields encrypted end-to-end: turn prompt + input items + run options, session command payload, terminal input/output, server request approval payloads.
+- Still visible to relay by design: routing metadata needed for delivery (event type, ids, cursor, stream/status).
+- Dev service session start is disabled in strict E2E mode until encrypted service launch is implemented.
 
 ## Current v1 limits
 - Session runtime uses shell child processes (interactive but not full PTY emulation).

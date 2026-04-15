@@ -938,34 +938,63 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
       const msg = JSON.parse(rawText) as Record<string, unknown>;
       const type = String(msg.type ?? "");
       if (type === "session.create") {
-        const envRaw = msg.env;
-        const env =
-          envRaw && typeof envRaw === "object"
-            ? Object.fromEntries(
-                Object.entries(envRaw as Record<string, unknown>).map(([key, value]) => [key, String(value ?? "")])
-              )
-            : undefined;
         const sessionId = String(msg.sessionId ?? "");
-        let command = String(msg.command ?? "");
         const e2eCommandEnvelope = parseEnvelope(msg.e2eCommandEnvelope);
-        if (e2eCommandEnvelope && e2eRuntime) {
-          await syncE2EPeers({ requiredDeviceId: e2eCommandEnvelope.senderDeviceId });
-          try {
-            command = e2eRuntime.decrypt(`session:${sessionId}`, e2eCommandEnvelope);
-          } catch (error) {
-            reportE2EDecryptFailure({
-              context: "session.create",
-              error,
-              envelope: e2eCommandEnvelope
+        if (!e2eRuntime || !e2eCommandEnvelope) {
+          sendToControl({
+            type: "error",
+            code: "e2e_command_envelope_required",
+            message: "session.create requires e2eCommandEnvelope"
+          });
+          if (sessionId) {
+            sendToControl({
+              type: "session.status",
+              sessionId,
+              status: "failed"
             });
-            return;
           }
+          return;
+        }
+        let command = "";
+        let cwd: string | undefined;
+        let env: Record<string, string> | undefined;
+        await syncE2EPeers({ requiredDeviceId: e2eCommandEnvelope.senderDeviceId });
+        try {
+          const decrypted = e2eRuntime.decrypt(`session:${sessionId}`, e2eCommandEnvelope);
+          const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            throw new Error("e2e_invalid_session_create_payload");
+          }
+          if (typeof parsed.command !== "string" || parsed.command.trim().length === 0) {
+            throw new Error("e2e_invalid_session_create_payload");
+          }
+          command = parsed.command;
+          cwd = typeof parsed.cwd === "string" && parsed.cwd.trim().length > 0 ? parsed.cwd.trim() : undefined;
+          if (parsed.env && typeof parsed.env === "object" && !Array.isArray(parsed.env)) {
+            env = Object.fromEntries(
+              Object.entries(parsed.env as Record<string, unknown>).map(([key, value]) => [key, String(value ?? "")])
+            );
+          }
+        } catch (error) {
+          reportE2EDecryptFailure({
+            context: "session.create",
+            error,
+            envelope: e2eCommandEnvelope
+          });
+          if (sessionId) {
+            sendToControl({
+              type: "session.status",
+              sessionId,
+              status: "failed"
+            });
+          }
+          return;
         }
         markSessionActive(sessionId, true);
         sessionManager.createSession({
           sessionId,
           command,
-          cwd: msg.cwd ? String(msg.cwd) : undefined,
+          cwd,
           env
         });
         return;
@@ -973,20 +1002,26 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
 
       if (type === "session.input") {
         const sessionId = String(msg.sessionId);
-        let data = String(msg.data ?? "");
         const e2eEnvelope = parseEnvelope(msg.e2eEnvelope);
-        if (e2eEnvelope && e2eRuntime) {
-          await syncE2EPeers({ requiredDeviceId: e2eEnvelope.senderDeviceId });
-          try {
-            data = e2eRuntime.decrypt(`session:${sessionId}`, e2eEnvelope);
-          } catch (error) {
-            reportE2EDecryptFailure({
-              context: "session.input",
-              error,
-              envelope: e2eEnvelope
-            });
-            return;
-          }
+        if (!e2eRuntime || !e2eEnvelope) {
+          sendToControl({
+            type: "error",
+            code: "e2e_session_input_envelope_required",
+            message: "session.input requires e2eEnvelope"
+          });
+          return;
+        }
+        let data = "";
+        await syncE2EPeers({ requiredDeviceId: e2eEnvelope.senderDeviceId });
+        try {
+          data = e2eRuntime.decrypt(`session:${sessionId}`, e2eEnvelope);
+        } catch (error) {
+          reportE2EDecryptFailure({
+            context: "session.input",
+            error,
+            envelope: e2eEnvelope
+          });
+          return;
         }
         sessionManager.input(sessionId, data);
         return;
@@ -1027,42 +1062,72 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           });
           return;
         }
-        let prompt = msg.prompt ? String(msg.prompt) : undefined;
-        let inputItems = Array.isArray(msg.inputItems)
-          ? msg.inputItems.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
-          : undefined;
         const e2ePromptEnvelope = parseEnvelope(msg.e2ePromptEnvelope);
-        if (e2ePromptEnvelope && e2eRuntime && conversationId) {
-          let decrypted = "";
-          await syncE2EPeers({ requiredDeviceId: e2ePromptEnvelope.senderDeviceId });
-          try {
-            decrypted = e2eRuntime.decrypt(`conversation:${conversationId}`, e2ePromptEnvelope);
-          } catch (error) {
-            reportE2EDecryptFailure({
-              context: "conversation.turn.start",
-              error,
-              envelope: e2ePromptEnvelope,
-              conversationId,
-              turnId,
-              failTurn: true
-            });
-            return;
+        if (!e2eRuntime || !e2ePromptEnvelope || !conversationId) {
+          sendToControl({
+            type: "error",
+            code: "e2e_prompt_envelope_required",
+            message: "conversation.turn.start requires e2ePromptEnvelope"
+          });
+          sendToControl({
+            type: "conversation.turn.completed",
+            conversationId,
+            turnId,
+            threadId: "",
+            codexTurnId: "",
+            status: "failed",
+            error: "e2e_prompt_envelope_required"
+          });
+          return;
+        }
+        let prompt: string | undefined;
+        let inputItems: Array<Record<string, unknown>> | undefined;
+        let collaborationMode: Record<string, unknown> | undefined;
+        let model: string | undefined;
+        let cwd: string | undefined;
+        let approvalPolicy: "untrusted" | "on-failure" | "on-request" | "never" | undefined;
+        let sandboxMode: "read-only" | "workspace-write" | "danger-full-access" | undefined;
+        let effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | undefined;
+        await syncE2EPeers({ requiredDeviceId: e2ePromptEnvelope.senderDeviceId });
+        try {
+          const decrypted = e2eRuntime.decrypt(`conversation:${conversationId}`, e2ePromptEnvelope);
+          const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            throw new Error("e2e_invalid_turn_start_payload");
           }
-          try {
-            const parsed = JSON.parse(decrypted) as Record<string, unknown>;
-            if (typeof parsed.prompt === "string" && parsed.prompt.trim().length > 0) {
-              prompt = parsed.prompt;
-            }
-            if (Array.isArray(parsed.inputItems)) {
-              inputItems = parsed.inputItems.filter(
-                (item): item is Record<string, unknown> => Boolean(item && typeof item === "object")
-              );
-            }
-          } catch {
-            if (decrypted.trim().length > 0) {
-              prompt = decrypted;
-            }
+          if (typeof parsed.prompt === "string" && parsed.prompt.trim().length > 0) {
+            prompt = parsed.prompt;
           }
+          if (Array.isArray(parsed.inputItems)) {
+            inputItems = parsed.inputItems.filter(
+              (item): item is Record<string, unknown> => Boolean(item && typeof item === "object")
+            );
+          }
+          collaborationMode =
+            parsed.collaborationMode && typeof parsed.collaborationMode === "object" && !Array.isArray(parsed.collaborationMode)
+              ? (parsed.collaborationMode as Record<string, unknown>)
+              : undefined;
+          model = typeof parsed.model === "string" && parsed.model.trim().length > 0 ? parsed.model.trim() : undefined;
+          cwd = typeof parsed.cwd === "string" && parsed.cwd.trim().length > 0 ? parsed.cwd.trim() : undefined;
+          if (parsed.approvalPolicy === "untrusted" || parsed.approvalPolicy === "on-failure" || parsed.approvalPolicy === "on-request" || parsed.approvalPolicy === "never") {
+            approvalPolicy = parsed.approvalPolicy;
+          }
+          if (parsed.sandboxMode === "read-only" || parsed.sandboxMode === "workspace-write" || parsed.sandboxMode === "danger-full-access") {
+            sandboxMode = parsed.sandboxMode;
+          }
+          if (parsed.effort === "none" || parsed.effort === "minimal" || parsed.effort === "low" || parsed.effort === "medium" || parsed.effort === "high" || parsed.effort === "xhigh") {
+            effort = parsed.effort;
+          }
+        } catch (error) {
+          reportE2EDecryptFailure({
+            context: "conversation.turn.start",
+            error,
+            envelope: e2ePromptEnvelope,
+            conversationId,
+            turnId,
+            failTurn: true
+          });
+          return;
         }
         markTurnActive(turnId, true);
         await conversationManager.startTurn({
@@ -1071,21 +1136,12 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           threadId: msg.threadId ? String(msg.threadId) : undefined,
           prompt,
           inputItems,
-          collaborationMode:
-            msg.collaborationMode && typeof msg.collaborationMode === "object"
-              ? (msg.collaborationMode as Record<string, unknown>)
-              : undefined,
-          model: msg.model ? String(msg.model) : undefined,
-          cwd: msg.cwd ? String(msg.cwd) : undefined,
-          approvalPolicy: msg.approvalPolicy
-            ? (String(msg.approvalPolicy) as "untrusted" | "on-failure" | "on-request" | "never")
-            : undefined,
-          sandboxMode: msg.sandboxMode
-            ? (String(msg.sandboxMode) as "read-only" | "workspace-write" | "danger-full-access")
-            : undefined,
-          effort: msg.effort
-            ? (String(msg.effort) as "none" | "minimal" | "low" | "medium" | "high" | "xhigh")
-            : undefined
+          collaborationMode,
+          model,
+          cwd,
+          approvalPolicy,
+          sandboxMode,
+          effort
         });
         return;
       }
@@ -1096,37 +1152,36 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
           return;
         }
         const conversationId = String(msg.conversationId ?? "");
-        let error = typeof msg.error === "string" ? msg.error : undefined;
-        let result = msg.result;
         const e2eEnvelope = parseEnvelope(msg.e2eEnvelope);
-        if (e2eEnvelope && e2eRuntime && conversationId) {
-          let decrypted = "";
-          await syncE2EPeers({ requiredDeviceId: e2eEnvelope.senderDeviceId });
-          try {
-            decrypted = e2eRuntime.decrypt(`conversation:${conversationId}`, e2eEnvelope);
-          } catch (decryptError) {
-            reportE2EDecryptFailure({
-              context: "conversation.server.response",
-              error: decryptError,
-              envelope: e2eEnvelope,
-              conversationId,
-              turnId: typeof msg.turnId === "string" ? msg.turnId : undefined,
-              requestId
-            });
-            conversationManager.resolveServerRequest({
-              requestId,
-              error: normalizeE2EDecryptErrorCode(decryptError)
-            });
-            return;
-          }
-          try {
-            const parsed = JSON.parse(decrypted) as Record<string, unknown>;
-            error = typeof parsed.error === "string" ? parsed.error : undefined;
-            result = parsed.result;
-          } catch {
-            error = "invalid_e2e_server_response";
-            result = undefined;
-          }
+        if (!e2eEnvelope || !e2eRuntime || !conversationId) {
+          conversationManager.resolveServerRequest({
+            requestId,
+            error: "e2e_server_response_envelope_required"
+          });
+          return;
+        }
+        let error: string | undefined;
+        let result: unknown;
+        await syncE2EPeers({ requiredDeviceId: e2eEnvelope.senderDeviceId });
+        try {
+          const decrypted = e2eRuntime.decrypt(`conversation:${conversationId}`, e2eEnvelope);
+          const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+          error = typeof parsed.error === "string" ? parsed.error : undefined;
+          result = parsed.result;
+        } catch (decryptError) {
+          reportE2EDecryptFailure({
+            context: "conversation.server.response",
+            error: decryptError,
+            envelope: e2eEnvelope,
+            conversationId,
+            turnId: typeof msg.turnId === "string" ? msg.turnId : undefined,
+            requestId
+          });
+          conversationManager.resolveServerRequest({
+            requestId,
+            error: normalizeE2EDecryptErrorCode(decryptError)
+          });
+          return;
         }
         conversationManager.resolveServerRequest({
           requestId,

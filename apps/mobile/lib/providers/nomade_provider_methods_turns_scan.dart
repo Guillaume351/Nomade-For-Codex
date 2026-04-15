@@ -240,12 +240,25 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
 
       Map<String, dynamic> e2ePromptEnvelope;
       try {
+        final encryptedTurnStartPayload = <String, dynamic>{
+          'prompt': effectivePrompt,
+          'inputItems': inputItems,
+          if (collaborationMode != null && collaborationMode.isNotEmpty)
+            'collaborationMode': collaborationMode,
+          if (requestedModel != null && requestedModel.trim().isNotEmpty)
+            'model': requestedModel.trim(),
+          if (requestedCwd != null && requestedCwd.trim().isNotEmpty)
+            'cwd': requestedCwd.trim(),
+          if (requestedApproval != null && requestedApproval.trim().isNotEmpty)
+            'approvalPolicy': requestedApproval.trim(),
+          if (requestedSandbox != null && requestedSandbox.trim().isNotEmpty)
+            'sandboxMode': requestedSandbox.trim(),
+          if (requestedEffort != null && requestedEffort.trim().isNotEmpty)
+            'effort': requestedEffort.trim(),
+        };
         e2ePromptEnvelope = e2eRuntime.encryptEnvelope(
           scope: 'conversation:$conversationId',
-          plaintext: jsonEncode({
-            'prompt': effectivePrompt,
-            'inputItems': inputItems,
-          }),
+          plaintext: jsonEncode(encryptedTurnStartPayload),
         );
         // Persist the incremented sequence before sending the turn so an app
         // suspend/restart cannot replay an older envelope sequence.
@@ -270,12 +283,6 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         accessToken: accessToken!,
         conversationId: conversationId,
         e2ePromptEnvelope: e2ePromptEnvelope,
-        collaborationMode: collaborationMode,
-        model: requestedModel,
-        cwd: requestedCwd,
-        approvalPolicy: requestedApproval,
-        sandboxMode: requestedSandbox,
-        effort: requestedEffort,
         deliveryPolicy: effectiveDeliveryPolicy,
       );
 

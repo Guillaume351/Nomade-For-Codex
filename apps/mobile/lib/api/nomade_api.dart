@@ -482,53 +482,18 @@ class NomadeApi {
   Future<Map<String, dynamic>> createTurn({
     required String accessToken,
     required String conversationId,
-    String? prompt,
     Map<String, dynamic>? e2ePromptEnvelope,
-    List<Map<String, dynamic>>? inputItems,
-    Map<String, dynamic>? collaborationMode,
-    String? model,
-    String? cwd,
-    String? approvalPolicy,
-    String? sandboxMode,
-    String? effort,
     String? deliveryPolicy,
   }) async {
     final body = <String, dynamic>{};
-    final trimmedPrompt = prompt?.trim() ?? '';
-    if (trimmedPrompt.isNotEmpty) {
-      body['prompt'] = trimmedPrompt;
-    }
     if (e2ePromptEnvelope != null && e2ePromptEnvelope.isNotEmpty) {
       body['e2ePromptEnvelope'] = e2ePromptEnvelope;
-    }
-    if (inputItems != null && inputItems.isNotEmpty) {
-      body['inputItems'] = inputItems;
-    }
-    if (collaborationMode != null && collaborationMode.isNotEmpty) {
-      body['collaborationMode'] = collaborationMode;
-    }
-    if (model != null && model.trim().isNotEmpty) {
-      body['model'] = model.trim();
-    }
-    if (cwd != null && cwd.trim().isNotEmpty) {
-      body['cwd'] = cwd.trim();
-    }
-    if (approvalPolicy != null && approvalPolicy.trim().isNotEmpty) {
-      body['approvalPolicy'] = approvalPolicy.trim();
-    }
-    if (sandboxMode != null && sandboxMode.trim().isNotEmpty) {
-      body['sandboxMode'] = sandboxMode.trim();
-    }
-    if (effort != null && effort.trim().isNotEmpty) {
-      body['effort'] = effort.trim();
     }
     if (deliveryPolicy != null && deliveryPolicy.trim().isNotEmpty) {
       body['deliveryPolicy'] = deliveryPolicy.trim();
     }
-    if (!body.containsKey('prompt') &&
-        !body.containsKey('inputItems') &&
-        !body.containsKey('e2ePromptEnvelope')) {
-      throw ApiException('prompt/inputItems or e2ePromptEnvelope is required');
+    if (!body.containsKey('e2ePromptEnvelope')) {
+      throw ApiException('e2ePromptEnvelope is required');
     }
 
     final response = await _send(

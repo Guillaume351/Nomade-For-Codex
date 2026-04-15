@@ -17,17 +17,14 @@ export interface SessionCreateMessage {
   sessionId: string;
   workspaceId: string;
   agentId: string;
-  command: string;
-  e2eCommandEnvelope?: E2EEnvelope;
-  cwd?: string;
-  env?: Record<string, string>;
+  e2eCommandEnvelope: E2EEnvelope;
 }
 
 export interface SessionInputMessage {
   type: "session.input";
   sessionId: string;
   data: string;
-  e2eEnvelope?: E2EEnvelope;
+  e2eEnvelope: E2EEnvelope;
 }
 
 export interface SessionTerminateMessage {
@@ -145,15 +142,7 @@ export interface ConversationTurnStartMessage {
   conversationId: string;
   turnId: string;
   threadId?: string;
-  prompt?: string;
-  e2ePromptEnvelope?: E2EEnvelope;
-  inputItems?: ConversationInputItem[];
-  collaborationMode?: Record<string, unknown>;
-  model?: string;
-  cwd?: string;
-  approvalPolicy?: "untrusted" | "on-failure" | "on-request" | "never";
-  sandboxMode?: "read-only" | "workspace-write" | "danger-full-access";
-  effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  e2ePromptEnvelope: E2EEnvelope;
 }
 
 export type ConversationInputItem =
@@ -339,9 +328,7 @@ export interface ConversationServerResponseMessage {
   threadId?: string;
   codexTurnId?: string;
   requestId: string;
-  result?: unknown;
-  error?: string;
-  e2eEnvelope?: E2EEnvelope;
+  e2eEnvelope: E2EEnvelope;
 }
 
 export interface ConversationTurnCompletedMessage {

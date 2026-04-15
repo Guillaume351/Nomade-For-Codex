@@ -931,6 +931,7 @@ export class WsHub {
         if (msg.type === "conversation.server.response") {
           const conversationId = String(msg.conversationId ?? "");
           const turnId = String(msg.turnId ?? "");
+          const requestId = String(msg.requestId ?? "");
           const explicitAgentId = typeof msg.agentId === "string" ? msg.agentId : undefined;
           const agentId = explicitAgentId ?? this.conversationAgent.get(conversationId);
           if (!agentId) {
@@ -943,24 +944,52 @@ export class WsHub {
             );
             return;
           }
+          if (!requestId) {
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                code: "request_id_required",
+                message: "conversation.server.response requires requestId"
+              })
+            );
+            return;
+          }
           if (turnId && conversationId) {
             this.turnConversation.set(turnId, conversationId);
           }
+          const e2eEnvelope =
+            msg.e2eEnvelope && typeof msg.e2eEnvelope === "object"
+              ? (msg.e2eEnvelope as Record<string, unknown>)
+              : null;
+          if (!e2eEnvelope) {
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                code: "e2e_envelope_required",
+                message: "conversation.server.response requires e2eEnvelope"
+              })
+            );
+            return;
+          }
           this.sendToAgent(agentId, {
-            ...msg,
+            type: "conversation.server.response",
+            conversationId,
+            turnId,
+            requestId,
+            e2eEnvelope,
             agentId
           });
           return;
         }
 
         if (msg.type === "session.create") {
-          const agentId = String(msg.agentId ?? "");
-          const sessionId = String(msg.sessionId ?? "");
-          if (!agentId || !sessionId) {
-            return;
-          }
-          this.sessionAgent.set(sessionId, agentId);
-          this.sendToAgent(agentId, msg);
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              code: "session_create_via_ws_disabled",
+              message: "Create sessions through POST /sessions with e2eCommandEnvelope"
+            })
+          );
           return;
         }
 
@@ -970,6 +999,30 @@ export class WsHub {
           const agentId = explicitAgentId ?? this.sessionAgent.get(sessionId);
           if (!agentId) {
             ws.send(JSON.stringify({ type: "error", code: "session_unknown", message: "Unknown session routing" }));
+            return;
+          }
+          if (msg.type === "session.input") {
+            const e2eEnvelope =
+              msg.e2eEnvelope && typeof msg.e2eEnvelope === "object"
+                ? (msg.e2eEnvelope as Record<string, unknown>)
+                : null;
+            if (!e2eEnvelope) {
+              ws.send(
+                JSON.stringify({
+                  type: "error",
+                  code: "e2e_envelope_required",
+                  message: "session.input requires e2eEnvelope"
+                })
+              );
+              return;
+            }
+            this.sendToAgent(agentId, {
+              type: "session.input",
+              sessionId,
+              data: "",
+              e2eEnvelope,
+              agentId
+            });
             return;
           }
           this.sendToAgent(agentId, {

@@ -1318,42 +1318,12 @@ export const createServer = async (): Promise<http.Server> => {
         continue;
       }
 
-      const requestOptions =
-        queued.requestOptions && typeof queued.requestOptions === "object" ? queued.requestOptions : {};
-      const collaborationModeRaw = requestOptions.collaborationMode;
-      const collaborationMode =
-        collaborationModeRaw && typeof collaborationModeRaw === "object" && !Array.isArray(collaborationModeRaw)
-          ? (collaborationModeRaw as Record<string, unknown>)
-          : undefined;
-      const cwd = typeof requestOptions.cwd === "string" && requestOptions.cwd.trim().length > 0
-        ? requestOptions.cwd.trim()
-        : queued.workspacePath ?? undefined;
-      const model = await resolveModelForTurnStart({
-        agentId,
-        cwd,
-        model: typeof requestOptions.model === "string" ? requestOptions.model : undefined,
-        collaborationMode
-      });
-      const approvalPolicy = typeof requestOptions.approvalPolicy === "string"
-        ? requestOptions.approvalPolicy
-        : undefined;
-      const sandboxMode = typeof requestOptions.sandboxMode === "string"
-        ? requestOptions.sandboxMode
-        : undefined;
-      const effort = typeof requestOptions.effort === "string" ? requestOptions.effort : undefined;
-
       const delivered = wsHub.sendToAgent(agentId, {
         type: "conversation.turn.start",
         conversationId: queued.conversationId,
         turnId: queued.turnId,
         threadId: queued.codexThreadId ?? undefined,
-        e2ePromptEnvelope: parsedPrompt,
-        collaborationMode,
-        model,
-        cwd,
-        approvalPolicy,
-        sandboxMode,
-        effort
+        e2ePromptEnvelope: parsedPrompt
       });
 
       if (!delivered) {
@@ -3959,7 +3929,12 @@ export const createServer = async (): Promise<http.Server> => {
       res.json(state);
     } catch (error) {
       const message = error instanceof Error ? error.message : "service_start_failed";
-      const status = message === "agent_offline" ? 503 : 502;
+      const status =
+        message === "agent_offline"
+          ? 503
+          : message === "service_start_disabled_in_strict_e2e_mode"
+            ? 409
+            : 502;
       res.status(status).json({ error: message });
     }
   });
@@ -4137,9 +4112,6 @@ export const createServer = async (): Promise<http.Server> => {
   });
 
   app.post("/conversations/:conversationId/turns", requireHybridUserAuth, async (req, res) => {
-    const approvalPolicySchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
-    const sandboxModeSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
-    const reasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
     const deliveryPolicySchema = z.enum(["immediate", "defer_if_offline"]);
     const e2eEnvelopeSchema = z.object({
       v: z.literal(1),
@@ -4152,65 +4124,11 @@ export const createServer = async (): Promise<http.Server> => {
       ciphertext: z.string().min(1),
       sig: z.string().min(20)
     });
-    const textElementSchema = z.object({
-      byteRange: z
-        .object({
-          start: z.number().int().nonnegative(),
-          end: z.number().int().nonnegative()
-        })
-        .optional(),
-      start: z.number().int().nonnegative().optional(),
-      end: z.number().int().nonnegative().optional(),
-      placeholder: z.string().nullable().optional()
-    });
-    const inputItemSchema = z.union([
-      z.object({
-        type: z.literal("text"),
-        text: z.string().min(1),
-        text_elements: z.array(textElementSchema).optional(),
-        textElements: z.array(textElementSchema).optional()
-      }),
-      z.object({
-        type: z.literal("image"),
-        imageUrl: z.string().min(1).optional(),
-        image_url: z.string().min(1).optional(),
-        url: z.string().min(1).optional(),
-        detail: z.string().min(1).optional()
-      }).refine((item) => Boolean(item.imageUrl || item.image_url || item.url), {
-        message: "image input requires one of imageUrl, image_url, or url"
-      }),
-      z.object({
-        type: z.literal("local_image"),
-        path: z.string().min(1)
-      }),
-      z.object({
-        type: z.literal("localImage"),
-        path: z.string().min(1)
-      }),
-      z.object({
-        type: z.literal("skill"),
-        path: z.string().min(1),
-        name: z.string().min(1).optional()
-      }),
-      z.object({
-        type: z.literal("mention"),
-        path: z.string().min(1),
-        name: z.string().min(1).optional()
-      })
-    ]);
 
     const schema = z.object({
-      prompt: z.string().min(1).optional(),
-      inputItems: z.array(inputItemSchema).optional(),
       e2ePromptEnvelope: e2eEnvelopeSchema,
-      collaborationMode: z.record(z.unknown()).optional(),
-      model: z.string().min(1).max(120).optional(),
-      cwd: z.string().min(1).optional(),
-      approvalPolicy: approvalPolicySchema.optional(),
-      sandboxMode: sandboxModeSchema.optional(),
-      effort: reasoningEffortSchema.optional(),
       deliveryPolicy: deliveryPolicySchema.optional()
-    });
+    }).strict();
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
@@ -4223,26 +4141,6 @@ export const createServer = async (): Promise<http.Server> => {
       return;
     }
 
-    const workspace = await repositories.findWorkspaceById(req.userId!, conversation.workspace_id);
-    const normalizedPrompt = parsed.data.prompt?.trim() ?? "";
-    const collaborationMode =
-      parsed.data.collaborationMode && typeof parsed.data.collaborationMode === "object"
-        ? (parsed.data.collaborationMode as Record<string, unknown>)
-        : undefined;
-    const resolvedModel = await resolveModelForTurnStart({
-      agentId: conversation.agent_id,
-      cwd: parsed.data.cwd ?? workspace?.path ?? undefined,
-      model: parsed.data.model,
-      collaborationMode
-    });
-    if (!resolvedModel) {
-      res.status(503).json({
-        error: "model_unavailable",
-        message:
-          "Unable to resolve a Codex model for this turn. Select a model in Turn options or refresh Codex options."
-      });
-      return;
-    }
     const deliveryPolicy: TurnDeliveryPolicy = parsed.data.deliveryPolicy ?? "immediate";
     if (deliveryPolicy === "defer_if_offline") {
       const enabled = await ensureEntitlementFeature({
@@ -4259,14 +4157,7 @@ export const createServer = async (): Promise<http.Server> => {
       conversationId: conversation.id,
       prompt: userPrompt,
       deliveryPolicy,
-      requestOptions: {
-        collaborationMode,
-        model: resolvedModel,
-        cwd: parsed.data.cwd ?? workspace?.path ?? null,
-        approvalPolicy: parsed.data.approvalPolicy,
-        sandboxMode: parsed.data.sandboxMode,
-        effort: parsed.data.effort
-      }
+      requestOptions: {}
     });
 
     wsHub.rememberConversationOwner(conversation.id, req.userId!, conversation.agent_id);
@@ -4277,15 +4168,7 @@ export const createServer = async (): Promise<http.Server> => {
       conversationId: conversation.id,
       turnId: turn.id,
       threadId: conversation.codex_thread_id ?? undefined,
-      prompt: normalizedPrompt.length > 0 ? normalizedPrompt : undefined,
-      inputItems: parsed.data.inputItems,
-      e2ePromptEnvelope: parsed.data.e2ePromptEnvelope,
-      collaborationMode,
-      model: resolvedModel,
-      cwd: parsed.data.cwd ?? workspace?.path,
-      approvalPolicy: parsed.data.approvalPolicy,
-      sandboxMode: parsed.data.sandboxMode,
-      effort: parsed.data.effort
+      e2ePromptEnvelope: parsed.data.e2ePromptEnvelope
     });
 
     if (!delivered) {
@@ -4395,16 +4278,10 @@ export const createServer = async (): Promise<http.Server> => {
       workspaceId: z.string().min(6),
       agentId: z.string().min(6),
       name: z.string().min(1).max(120),
-      command: z.string().min(1).optional(),
-      e2eCommandEnvelope: e2eEnvelopeSchema.optional(),
-      cwd: z.string().optional(),
-      env: z.record(z.string()).optional()
-    }).refine((value) => Boolean(value.e2eCommandEnvelope), {
+      e2eCommandEnvelope: e2eEnvelopeSchema
+    }).strict().refine((value) => Boolean(value.e2eCommandEnvelope), {
       message: "e2eCommandEnvelope is required",
       path: ["e2eCommandEnvelope"]
-    }).refine((value) => !value.command?.trim(), {
-      message: "plaintext command is not allowed; use e2eCommandEnvelope",
-      path: ["command"]
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -4425,10 +4302,7 @@ export const createServer = async (): Promise<http.Server> => {
       sessionId: session.id,
       workspaceId: parsed.data.workspaceId,
       agentId: parsed.data.agentId,
-      command: "",
       e2eCommandEnvelope: parsed.data.e2eCommandEnvelope,
-      cwd: parsed.data.cwd,
-      env: parsed.data.env
     });
 
     if (!delivered) {
