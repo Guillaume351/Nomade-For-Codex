@@ -29,9 +29,10 @@ class AppScrollBehavior extends MaterialScrollBehavior {
   ScrollPhysics getScrollPhysics(BuildContext context) {
     final platform = getPlatform(context);
     if (platform == TargetPlatform.iOS || platform == TargetPlatform.macOS) {
-      return const BouncingScrollPhysics(
-        parent: AlwaysScrollableScrollPhysics(),
-      );
+      // Do not force every nested Scrollable (e.g. SelectableText inside
+      // markdown) to be scrollable. This avoids "each text block scrolls"
+      // behavior in chat turns while keeping iOS/macOS bounce physics.
+      return const BouncingScrollPhysics();
     }
     return const ClampingScrollPhysics();
   }
