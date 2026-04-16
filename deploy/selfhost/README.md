@@ -4,8 +4,14 @@
 ```bash
 export JWT_SECRET="$(openssl rand -hex 32)"
 export INTERNAL_GATEWAY_SECRET="$(openssl rand -hex 32)"
+export BILLING_MODE=self_host
+export FREE_MAX_AGENTS=1000
 docker compose -f deploy/selfhost/docker-compose.yml up --build
 ```
+
+Notes:
+- `BILLING_MODE=self_host` disables Nomade cloud subscription gating on this instance.
+- `FREE_MAX_AGENTS` controls how many paired agents free accounts can register on this self-hosted instance.
 
 Auth rollout checklist (SMTP + Better Auth + DB migration):
 - `docs/auth-better-auth-checklist.md`

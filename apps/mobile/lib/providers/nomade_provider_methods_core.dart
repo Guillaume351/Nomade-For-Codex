@@ -7,6 +7,28 @@ enum _TokenRefreshResult {
 }
 
 extension NomadeProviderCoreMethods on NomadeProvider {
+  Future<void> setApiBaseUrl(
+    String rawBaseUrl, {
+    bool clearSession = true,
+  }) async {
+    final normalized = NomadeProvider.normalizeApiBaseUrl(rawBaseUrl);
+    final current = api.baseUrl.replaceAll(RegExp(r'/$'), '');
+    if (normalized == current) {
+      return;
+    }
+
+    if (clearSession && (accessToken != null || refreshToken != null)) {
+      await logout();
+    }
+
+    _api = NomadeApi(baseUrl: normalized);
+    await _writeStorage(NomadeProvider._apiBaseUrlKey, value: normalized);
+    status = clearSession
+        ? 'Server endpoint updated. Sign in again to continue.'
+        : 'Server endpoint updated.';
+    _notifyListenersSafe();
+  }
+
   void setSelectedSkillPaths(List<String> paths) {
     final normalized = paths
         .map((entry) => entry.trim())
@@ -427,6 +449,15 @@ extension NomadeProviderCoreMethods on NomadeProvider {
 
   Future<void> restoreSession() async {
     try {
+      final storedApiBaseUrl = await _readStorage(NomadeProvider._apiBaseUrlKey);
+      if (storedApiBaseUrl != null && storedApiBaseUrl.trim().isNotEmpty) {
+        try {
+          _api = NomadeApi(
+            baseUrl: NomadeProvider.normalizeApiBaseUrl(storedApiBaseUrl),
+          );
+        } catch (_) {}
+      }
+
       accessToken = await _readStorage(NomadeProvider._accessTokenKey);
       refreshToken = await _readStorage(NomadeProvider._refreshTokenKey);
       final expiry = await _readStorage(NomadeProvider._accessTokenExpiryKey);
@@ -531,6 +562,10 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     try {
       if (accessToken == null) {
         await _storage.deleteAll();
+        await _writeStorage(
+          NomadeProvider._apiBaseUrlKey,
+          value: api.baseUrl,
+        );
         _e2eRuntime = null;
         _pendingScanPayload = null;
         _pendingScanShortCode = null;
@@ -596,6 +631,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     refreshToken = null;
     accessTokenExpiresAt = null;
     planCode = null;
+    entitlementSource = null;
     currentAgents = null;
     maxAgents = null;
     deviceLimitReached = null;
@@ -640,6 +676,10 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     realtimeConnected = false;
 
     await _storage.deleteAll();
+    await _writeStorage(
+      NomadeProvider._apiBaseUrlKey,
+      value: api.baseUrl,
+    );
     _notifyListenersSafe();
   }
 
@@ -789,6 +829,8 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       planCode = payload['planCode']?.toString() ??
           payload['plan_code']?.toString() ??
           planCode;
+      entitlementSource =
+          payload['source']?.toString() ?? entitlementSource;
       currentAgents =
           _asInt(payload['currentAgents'] ?? payload['current_agents']) ??
               currentAgents;

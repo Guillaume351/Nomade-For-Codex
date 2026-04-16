@@ -10,37 +10,38 @@ const { locale } = useI18n();
 const enCopy = {
   seoTitle: "Nomade Pricing | Free Self-Hosted and Managed Cloud Plans",
   seoDescription:
-    "Compare Nomade plans: fully free and open-source for self-hosted deployments, plus paid managed cloud for convenience.",
+    "Compare Nomade plans: self-hosted with no Nomade subscription, cloud free tier with 1 paired device, and paid managed cloud upgrades.",
   heroBadge: "Pricing",
-  heroTitle: "One product. Two operating modes.",
+  heroTitle: "Self-host free. Cloud starts free.",
   heroSubtitle:
-    "Nomade is fully free if you self-host. Pay only when you choose managed cloud operations and premium support.",
+    "Self-host has no Nomade subscription fee. Nomade Cloud includes a free tier with 1 paired device per account, then paid upgrades for more capacity and support.",
   plans: {
     selfHosted: {
-      kicker: "Self-hosted",
+      kicker: "Self-hosted (Open source)",
       price: "Free",
-      subtitle: "No software license fee",
+      subtitle: "No Nomade subscription required",
       bullets: [
         "Run on your infra with full control.",
-        "Open-source core with no gated features.",
-        "Ideal for teams with DevOps capacity."
+        "Use your own endpoint in the app.",
+        "Limits are controlled by your server settings (for example FREE_MAX_AGENTS)."
       ],
-      cta: "Start free"
+      cta: "Read self-host docs"
     },
     cloudPro: {
-      kicker: "Cloud Pro",
-      price: "Paid plan",
-      subtitle: "Managed reliability + support",
+      kicker: "Nomade Cloud",
+      price: "Free tier + paid upgrade",
+      subtitle: "Cloud Free: 1 paired device/account",
       bullets: [
+        "Start at no cost on Nomade-managed infrastructure.",
+        "Free tier includes 1 paired device per account.",
         "Hosted control plane managed by Nomade.",
-        "Operational maintenance and billing workflows included.",
-        "Priority support and faster production rollout."
+        "Upgrade when you need more devices and priority support."
       ],
       cta: "Upgrade to Cloud Pro"
     }
   },
   comparisonTitle: "Plan comparison",
-  comparisonSubtitle: "Same core product. Different operational ownership and support level.",
+  comparisonSubtitle: "Same core product. Different ownership of infrastructure, limits, and support.",
   tableHeaders: {
     capability: "Capability",
     selfHosted: "Self-hosted (Free)",
@@ -48,8 +49,10 @@ const enCopy = {
   },
   rows: [
     { capability: "License cost", selfHosted: "Free", cloudPro: "Paid subscription" },
+    { capability: "Cloud free tier", selfHosted: "Not applicable", cloudPro: "1 paired device per account" },
     { capability: "Open-source core", selfHosted: "Included", cloudPro: "Included" },
     { capability: "Deployment model", selfHosted: "Your infrastructure", cloudPro: "Nomade managed cloud" },
+    { capability: "Subscription required", selfHosted: "No", cloudPro: "Only above cloud free tier" },
     { capability: "Billing and invoicing", selfHosted: "Self-managed", cloudPro: "Included" },
     { capability: "Operational maintenance", selfHosted: "Self-managed", cloudPro: "Managed by Nomade" },
     { capability: "Priority support", selfHosted: "Community / self-service", cloudPro: "Included" },
@@ -65,37 +68,38 @@ const enCopy = {
 const frCopy = {
   seoTitle: "Tarifs Nomade | Auto-hébergé gratuit et cloud managé",
   seoDescription:
-    "Comparez les offres Nomade : entièrement gratuit et open source en auto-hébergement, ou plan cloud payant managé.",
+    "Comparez les offres Nomade : auto-hébergement sans abonnement Nomade, cloud gratuit avec 1 appareil appairé, puis upgrade cloud payante.",
   heroBadge: "Tarifs",
-  heroTitle: "Un produit. Deux modes d'exploitation.",
+  heroTitle: "Self-host gratuit. Cloud gratuit au départ.",
   heroSubtitle:
-    "Nomade est entièrement gratuit en auto-hébergement. Vous payez uniquement si vous choisissez le cloud managé et le support premium.",
+    "L'auto-hébergement n'impose aucun abonnement Nomade. Le cloud Nomade inclut une offre gratuite avec 1 appareil appairé par compte, puis des upgrades payantes pour plus de capacité et de support.",
   plans: {
     selfHosted: {
-      kicker: "Auto-hébergé",
+      kicker: "Auto-hébergé (Open source)",
       price: "Gratuit",
-      subtitle: "Aucun coût de licence logicielle",
+      subtitle: "Aucun abonnement Nomade requis",
       bullets: [
         "Déploiement sur votre infrastructure avec contrôle total.",
-        "Noyau open source sans fonctionnalités bloquées.",
-        "Idéal pour les équipes avec capacité DevOps."
+        "Utilisez votre propre endpoint dans l'app.",
+        "Les limites sont pilotées par votre configuration serveur (ex: FREE_MAX_AGENTS)."
       ],
-      cta: "Commencer gratuitement"
+      cta: "Lire la doc self-host"
     },
     cloudPro: {
-      kicker: "Cloud Pro",
-      price: "Plan payant",
-      subtitle: "Fiabilité managée + support",
+      kicker: "Nomade Cloud",
+      price: "Offre gratuite + upgrade payante",
+      subtitle: "Cloud gratuit : 1 appareil appairé/compte",
       bullets: [
+        "Commencez sans coût sur l'infra managée Nomade.",
+        "L'offre gratuite inclut 1 appareil appairé par compte.",
         "Plan de contrôle hébergé et opéré par Nomade.",
-        "Maintenance opérationnelle et facturation incluses.",
-        "Support prioritaire et mise en production accélérée."
+        "Upgrade quand vous avez besoin de plus d'appareils et d'un support prioritaire."
       ],
       cta: "Passer à Cloud Pro"
     }
   },
   comparisonTitle: "Comparaison des offres",
-  comparisonSubtitle: "Même noyau produit. Différence sur l'exploitation et le niveau de support.",
+  comparisonSubtitle: "Même noyau produit. Différence sur l'infrastructure, les limites et le support.",
   tableHeaders: {
     capability: "Capacité",
     selfHosted: "Auto-hébergé (Gratuit)",
@@ -103,8 +107,10 @@ const frCopy = {
   },
   rows: [
     { capability: "Coût de licence", selfHosted: "Gratuit", cloudPro: "Abonnement payant" },
+    { capability: "Offre cloud gratuite", selfHosted: "Non applicable", cloudPro: "1 appareil appairé par compte" },
     { capability: "Noyau open source", selfHosted: "Inclus", cloudPro: "Inclus" },
     { capability: "Modèle de déploiement", selfHosted: "Votre infrastructure", cloudPro: "Cloud Nomade managé" },
+    { capability: "Abonnement requis", selfHosted: "Non", cloudPro: "Uniquement au-dessus de l'offre cloud gratuite" },
     { capability: "Facturation et paiement", selfHosted: "Auto-géré", cloudPro: "Inclus" },
     { capability: "Maintenance opérationnelle", selfHosted: "Auto-géré", cloudPro: "Pris en charge par Nomade" },
     { capability: "Support prioritaire", selfHosted: "Communauté / self-service", cloudPro: "Inclus" },
@@ -157,7 +163,7 @@ useSeoMeta({
             </li>
           </ul>
           <NuxtLink
-            to="/signup"
+            to="/docs/self-hosting"
             class="mt-7 inline-flex h-11 items-center justify-center rounded-xl border border-border bg-card/90 px-5 text-sm font-semibold text-foreground no-underline transition hover:border-primary/50 hover:text-primary"
           >
             {{ copy.plans.selfHosted.cta }}

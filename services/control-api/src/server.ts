@@ -439,7 +439,10 @@ export const createServer = async (): Promise<http.Server> => {
   const pool = createPool(config.databaseUrl);
   await ensureSchema(pool);
 
-  const repositories = new Repositories(pool);
+  const repositories = new Repositories(pool, {
+    defaultFreeMaxAgents: config.freeMaxAgents,
+    billingMode: config.billingMode
+  });
   const auth = new AuthService(config, repositories);
   const betterAuthRuntime = createBetterAuthRuntime({ config, pool });
   const betterAuthHandler = toNodeHandler(betterAuthRuntime.auth);

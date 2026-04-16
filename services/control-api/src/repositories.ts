@@ -283,22 +283,58 @@ export interface DevServiceRuntimeRecord {
   updated_at: Date;
 }
 
+interface RepositoryOptions {
+  defaultFreeMaxAgents?: number;
+  billingMode?: "cloud" | "self_host";
+}
+
 export class Repositories {
-  constructor(private readonly pool: Pool) {}
+  private readonly defaultFreeMaxAgents: number;
+  private readonly billingMode: "cloud" | "self_host";
+
+  constructor(
+    private readonly pool: Pool,
+    options?: RepositoryOptions
+  ) {
+    this.defaultFreeMaxAgents = Math.max(1, options?.defaultFreeMaxAgents ?? 1);
+    this.billingMode = options?.billingMode ?? "cloud";
+  }
 
   async ensureUserBillingDefaults(userId: string): Promise<void> {
+    const defaultPlanCode = this.billingMode === "self_host" ? "self_host" : "free";
+    const defaultSource = this.billingMode === "self_host" ? "self_host" : "free";
     await this.pool.query(
       `INSERT INTO subscriptions (user_id, plan_code, status)
-       VALUES ($1, 'free', 'active')
+       VALUES ($1, $2, 'active')
        ON CONFLICT (user_id) DO NOTHING`,
-      [userId]
+      [userId, defaultPlanCode]
     );
     await this.pool.query(
       `INSERT INTO device_entitlements (user_id, max_agents, source)
-       VALUES ($1, 1, 'free')
+       VALUES ($1, $2, $3)
        ON CONFLICT (user_id) DO NOTHING`,
-      [userId]
+      [userId, this.defaultFreeMaxAgents, defaultSource]
     );
+    if (this.billingMode === "self_host") {
+      await this.pool.query(
+        `UPDATE subscriptions
+         SET plan_code = 'self_host',
+             status = 'active',
+             updated_at = NOW()
+         WHERE user_id = $1
+           AND (plan_code <> 'self_host' OR status <> 'active')`,
+        [userId]
+      );
+      await this.pool.query(
+        `UPDATE device_entitlements
+         SET max_agents = GREATEST(max_agents, $2),
+             source = 'self_host',
+             updated_at = NOW()
+         WHERE user_id = $1
+           AND (source <> 'self_host' OR max_agents < $2)`,
+        [userId, this.defaultFreeMaxAgents]
+      );
+    }
   }
 
   async findOrCreateUserByEmail(email: string): Promise<User> {
@@ -1124,25 +1160,28 @@ export class Repositories {
 
     const row = result.rows[0];
     if (!row) {
+      const selfHost = this.billingMode === "self_host";
       return {
         userId,
-        planCode: "free",
+        planCode: selfHost ? "self_host" : "free",
         subscriptionStatus: "active",
-        maxAgents: 1,
+        maxAgents: this.defaultFreeMaxAgents,
         currentAgents: 0,
         limitReached: false,
-        source: "free",
+        source: selfHost ? "self_host" : "free",
         features: {
-          tunnels: false,
-          pushNotifications: false,
-          deferredTurns: false
+          tunnels: selfHost,
+          pushNotifications: selfHost,
+          deferredTurns: selfHost
         }
       };
     }
 
     const maxAgents = Math.max(1, Number(row.max_agents));
     const currentAgents = Math.max(0, Number(row.current_agents));
-    const paidFeaturesEnabled = row.plan_code !== "free" && row.subscription_status === "active";
+    const paidFeaturesEnabled =
+      this.billingMode === "self_host" ||
+      (row.plan_code !== "free" && row.subscription_status === "active");
     return {
       userId,
       planCode: row.plan_code,

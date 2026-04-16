@@ -20,6 +20,7 @@
 ## User endpoints (Bearer access token)
 - `GET /me`
 - `GET /me/entitlements` -> `{ planCode, maxAgents, currentAgents, limitReached, features: { tunnels, pushNotifications, deferredTurns }, ... }`
+  - `planCode` may be `self_host` when server runs with `BILLING_MODE=self_host`.
 - `GET /me/push/registrations`
 - `POST /me/push/register` body `{ deviceId, provider: "fcm", platform: "ios"|"android", token }`
 - `POST /me/push/unregister` body `{ provider?, token? | deviceId? }`
@@ -27,6 +28,7 @@
 - `POST /billing/portal-session` -> `{ id, url }` (Stripe Customer Portal)
 - `POST /agents/pair`
   - returns `403 { error: "device_limit_reached", ... }` when free plan quota is reached
+  - in `BILLING_MODE=self_host`, quota depends on server-side `FREE_MAX_AGENTS` (not client settings)
 - `GET /agents` (sorted online first; each item includes `display_name`, `is_online`, `last_seen_at`, `created_at`)
   - response includes `entitlements`
 - `POST /agents/:agentId/codex/import` body `{ limit? }`

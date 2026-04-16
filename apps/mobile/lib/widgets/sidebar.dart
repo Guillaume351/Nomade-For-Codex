@@ -135,6 +135,119 @@ class _SidebarState extends State<Sidebar> {
     }
   }
 
+  Future<void> _editApiEndpoint(
+    BuildContext context,
+    NomadeProvider provider,
+  ) async {
+    final controller = TextEditingController(text: provider.apiBaseUrl);
+    String? validationError;
+    final normalized = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) => AlertDialog(
+            title: const Text('Set server endpoint'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: controller,
+                  keyboardType: TextInputType.url,
+                  autofocus: true,
+                  decoration: InputDecoration(
+                    labelText: 'API base URL',
+                    hintText: 'https://app.example.com',
+                    errorText: validationError,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Use your self-host endpoint to run without Nomade cloud subscription limits.',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final raw = controller.text.trim();
+                  try {
+                    final next = NomadeProvider.normalizeApiBaseUrl(raw);
+                    Navigator.of(dialogContext).pop(next);
+                  } on FormatException catch (error) {
+                    setDialogState(() {
+                      validationError = error.message;
+                    });
+                  }
+                },
+                child: const Text('Apply'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    controller.dispose();
+
+    if (normalized == null || !context.mounted) {
+      return;
+    }
+
+    final current = provider.apiBaseUrl.replaceAll(RegExp(r'/$'), '');
+    if (normalized == current) {
+      return;
+    }
+
+    var shouldProceed = true;
+    if (provider.isAuthenticated) {
+      shouldProceed = await showDialog<bool>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              title: const Text('Switch endpoint and sign out?'),
+              content: const Text(
+                'Changing server endpoint signs you out to protect session tokens. Continue?',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                  child: const Text('Continue'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+    }
+    if (!shouldProceed) {
+      return;
+    }
+
+    await provider.setApiBaseUrl(
+      normalized,
+      clearSession: provider.isAuthenticated,
+    );
+    if (!context.mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Server endpoint set to ${provider.apiBaseUrl}')),
+    );
+    if (!provider.isAuthenticated) {
+      Navigator.of(context).pushAndRemoveUntil(
+        buildAppPageRoute(context, const OnboardingScreen()),
+        (route) => false,
+      );
+    }
+  }
+
   Future<void> _confirmDeleteAccount(
     BuildContext context,
     NomadeProvider provider,
@@ -1087,6 +1200,15 @@ class _SidebarState extends State<Sidebar> {
 
   Widget _buildToolsSection(BuildContext context, NomadeProvider provider) {
     final theme = Theme.of(context);
+    final isSelfHost = provider.entitlementSource == 'self_host' ||
+        provider.planCode == 'self_host';
+    final hasQuota = provider.currentAgents != null && provider.maxAgents != null;
+    final quotaLabel = hasQuota
+        ? '${provider.currentAgents}/${provider.maxAgents} paired devices'
+        : 'Quota unavailable';
+    final planLabel = provider.planCode == null || provider.planCode!.isEmpty
+        ? 'unknown'
+        : provider.planCode!;
 
     return ExpansionTile(
       tilePadding: const EdgeInsets.symmetric(horizontal: 8),
@@ -1098,6 +1220,53 @@ class _SidebarState extends State<Sidebar> {
         style: theme.textTheme.bodySmall,
       ),
       children: [
+        _buildSectionHeader(context, 'Connection'),
+        ListTile(
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          leading: const Icon(Icons.cloud_outlined),
+          title: const Text('Server endpoint'),
+          subtitle: Text(
+            provider.apiBaseUrl,
+            style: const TextStyle(fontSize: 11),
+          ),
+          onTap: () async {
+            await _editApiEndpoint(context, provider);
+          },
+        ),
+        const SizedBox(height: 6),
+        _buildSectionHeader(context, 'Plan & limits'),
+        _buildInfoLine(
+          context,
+          'Plan: $planLabel • $quotaLabel',
+        ),
+        _buildInfoLine(
+          context,
+          isSelfHost
+              ? 'Self-host mode on this endpoint: no Nomade subscription required. Limits are controlled by this server.'
+              : 'Nomade Cloud free tier: 1 paired device per account. Upgrade if you need more devices.',
+        ),
+        if (!isSelfHost)
+          ListTile(
+            dense: true,
+            visualDensity: VisualDensity.compact,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            leading: const Icon(Icons.sell_outlined),
+            title: const Text('View pricing'),
+            onTap: () async {
+              await _openExternalUrl(
+                context,
+                _publicUrlForApiBase(provider.api.baseUrl, '/pricing'),
+                failureMessage: 'Unable to open pricing.',
+              );
+            },
+          ),
+        const SizedBox(height: 6),
         _buildSectionHeader(context, 'Agents'),
         if (provider.agents.isEmpty)
           _buildInfoLine(

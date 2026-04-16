@@ -29,6 +29,7 @@ describe("auth primitives", () => {
         smtpFrom: "Nomade <test@example.com>",
         stripeEnabled: false,
         revenueCatProductPlanMap: {},
+        billingMode: "cloud",
         pushEnabled: false
       },
       {

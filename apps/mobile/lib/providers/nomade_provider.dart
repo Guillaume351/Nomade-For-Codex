@@ -31,14 +31,18 @@ part 'nomade_provider_methods_socket_runtime.dart';
 part 'nomade_provider_methods_turns_scan.dart';
 
 class NomadeProvider with ChangeNotifier {
-  NomadeProvider({required String baseUrl}) : api = NomadeApi(baseUrl: baseUrl);
+  NomadeProvider({required String baseUrl})
+      : _api = NomadeApi(baseUrl: normalizeApiBaseUrl(baseUrl));
 
-  final NomadeApi api;
+  NomadeApi _api;
+  NomadeApi get api => _api;
+  String get apiBaseUrl => _api.baseUrl;
   final _storage = const FlutterSecureStorage();
 
   static const _accessTokenKey = 'nomade.access_token';
   static const _refreshTokenKey = 'nomade.refresh_token';
   static const _accessTokenExpiryKey = 'nomade.access_token_expiry_iso';
+  static const _apiBaseUrlKey = 'nomade.api_base_url';
   static const _selectedAgentKey = 'nomade.selected_agent_id';
   static const _selectedWorkspaceKey = 'nomade.selected_workspace_id';
   static const _selectedConversationKey = 'nomade.selected_conversation_id';
@@ -69,11 +73,35 @@ class NomadeProvider with ChangeNotifier {
     encryptedSharedPreferences: true,
   );
 
+  static String normalizeApiBaseUrl(String rawValue) {
+    final trimmed = rawValue.trim();
+    if (trimmed.isEmpty) {
+      throw const FormatException('Endpoint cannot be empty.');
+    }
+    final parsed = Uri.tryParse(trimmed);
+    if (parsed == null ||
+        (parsed.scheme != 'http' && parsed.scheme != 'https') ||
+        parsed.host.trim().isEmpty) {
+      throw const FormatException(
+        'Endpoint must be a valid http(s) URL, for example https://app.example.com.',
+      );
+    }
+    final normalized = parsed
+        .replace(
+          path: '',
+          queryParameters: null,
+          fragment: null,
+        )
+        .toString();
+    return normalized.replaceAll(RegExp(r'/$'), '');
+  }
+
   String status = 'Idle';
   String? accessToken;
   String? refreshToken;
   DateTime? accessTokenExpiresAt;
   String? planCode;
+  String? entitlementSource;
   String? deviceCode;
   String? userCode;
   int? currentAgents;

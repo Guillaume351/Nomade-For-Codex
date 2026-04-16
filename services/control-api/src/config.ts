@@ -1,4 +1,5 @@
 export type AuthEmailMode = "log" | "smtp";
+export type BillingMode = "cloud" | "self_host";
 
 export interface Config {
   port: number;
@@ -35,6 +36,7 @@ export interface Config {
   stripeProPriceId?: string;
   revenueCatWebhookAuth?: string;
   revenueCatProductPlanMap: Record<string, string>;
+  billingMode: BillingMode;
   pushEnabled: boolean;
   firebaseProjectId?: string;
   firebaseClientEmail?: string;
@@ -99,6 +101,14 @@ const parseAuthEmailMode = (raw: string): AuthEmailMode => {
     return normalized;
   }
   throw new Error(`Invalid AUTH_EMAIL_MODE: ${raw}. Expected \"log\" or \"smtp\".`);
+};
+
+const parseBillingMode = (raw: string | undefined): BillingMode => {
+  const normalized = (raw ?? "cloud").trim().toLowerCase();
+  if (normalized === "cloud" || normalized === "self_host") {
+    return normalized;
+  }
+  throw new Error(`Invalid BILLING_MODE: ${raw}. Expected \"cloud\" or \"self_host\".`);
 };
 
 const parseJsonObjectRecord = (
@@ -168,6 +178,7 @@ export const loadConfig = (): Config => {
     "REVENUECAT_PRODUCT_PLAN_MAP",
     process.env.REVENUECAT_PRODUCT_PLAN_MAP
   );
+  const billingMode = parseBillingMode(process.env.BILLING_MODE);
   const firebaseProjectId = readOptional("FIREBASE_PROJECT_ID");
   const firebaseClientEmail = readOptional("FIREBASE_CLIENT_EMAIL");
   const firebasePrivateKeyRaw = readOptional("FIREBASE_PRIVATE_KEY");
@@ -220,6 +231,7 @@ export const loadConfig = (): Config => {
     stripeProPriceId,
     revenueCatWebhookAuth,
     revenueCatProductPlanMap,
+    billingMode,
     pushEnabled,
     firebaseProjectId,
     firebaseClientEmail,

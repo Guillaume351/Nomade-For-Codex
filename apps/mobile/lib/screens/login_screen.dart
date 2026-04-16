@@ -40,6 +40,78 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  Future<void> _editServerEndpoint() async {
+    final provider = context.read<NomadeProvider>();
+    final controller = TextEditingController(text: provider.apiBaseUrl);
+    String? validationError;
+    final normalized = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) => AlertDialog(
+            title: const Text('Set server endpoint'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: controller,
+                  keyboardType: TextInputType.url,
+                  autofocus: true,
+                  decoration: InputDecoration(
+                    labelText: 'API base URL',
+                    hintText: 'https://app.example.com',
+                    errorText: validationError,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Use your self-host endpoint to avoid Nomade cloud subscription limits.',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final raw = controller.text.trim();
+                  try {
+                    final next = NomadeProvider.normalizeApiBaseUrl(raw);
+                    Navigator.of(dialogContext).pop(next);
+                  } on FormatException catch (error) {
+                    setDialogState(() {
+                      validationError = error.message;
+                    });
+                  }
+                },
+                child: const Text('Apply'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    controller.dispose();
+    if (normalized == null || !mounted) {
+      return;
+    }
+    final current = provider.apiBaseUrl.replaceAll(RegExp(r'/$'), '');
+    if (normalized == current) {
+      return;
+    }
+    await provider.setApiBaseUrl(normalized, clearSession: false);
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Server endpoint set to ${provider.apiBaseUrl}')),
+    );
+  }
+
   Future<void> _handleLogin() async {
     final provider = context.read<NomadeProvider>();
     setState(() => _isLoading = true);
@@ -147,8 +219,54 @@ class _LoginScreenState extends State<LoginScreen> {
       if (!mounted) {
         return;
       }
+      final rawMessage = error.toString();
+      final mismatchMarker = 'scan_server_mismatch:';
+      final mismatchIndex = rawMessage.indexOf(mismatchMarker);
+      if (mismatchIndex >= 0) {
+        final suggested = rawMessage
+            .substring(mismatchIndex + mismatchMarker.length)
+            .trim()
+            .replaceAll(RegExp(r'^Exception:\s*'), '');
+        if (suggested.isNotEmpty) {
+          final shouldSwitch = await showDialog<bool>(
+                context: context,
+                builder: (dialogContext) => AlertDialog(
+                  title: const Text('Use scanned server endpoint?'),
+                  content: Text(
+                    'This secure QR targets:\n$suggested\n\nSwitch endpoint now?',
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(false),
+                      child: const Text('Cancel'),
+                    ),
+                    FilledButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(true),
+                      child: const Text('Switch'),
+                    ),
+                  ],
+                ),
+              ) ??
+              false;
+          if (!mounted) {
+            return;
+          }
+          if (shouldSwitch) {
+            await context
+                .read<NomadeProvider>()
+                .setApiBaseUrl(suggested, clearSession: false);
+            if (!mounted) {
+              return;
+            }
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Server endpoint set to $suggested')),
+            );
+          }
+          return;
+        }
+      }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Invalid secure scan: $error')),
+        SnackBar(content: Text('Invalid secure scan: $rawMessage')),
       );
     }
   }
@@ -221,6 +339,8 @@ class _LoginScreenState extends State<LoginScreen> {
     final hasPendingScan =
         (provider.pendingScanPayload?.trim().isNotEmpty ?? false) ||
             (provider.pendingScanShortCode?.trim().isNotEmpty ?? false);
+    final isSelfHost = provider.entitlementSource == 'self_host' ||
+        provider.planCode == 'self_host';
 
     return Column(
       key: const ValueKey('email-step'),
@@ -268,6 +388,56 @@ class _LoginScreenState extends State<LoginScreen> {
               color: scheme.onSurfaceVariant,
               height: 1.35,
             ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerLow.withValues(alpha: 0.74),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: scheme.outlineVariant.withValues(alpha: 0.62),
+            ),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Server endpoint',
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      provider.apiBaseUrl,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                    if (isSelfHost)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          'Self-host mode detected: no Nomade subscription required on this endpoint.',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: scheme.primary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              TextButton(
+                onPressed: _isLoading ? null : _editServerEndpoint,
+                child: const Text('Change'),
+              ),
+            ],
           ),
         ),
         const SizedBox(height: 12),

@@ -136,6 +136,10 @@ nomade-agent pair --server-url https://app.example.com --config /path/config.jso
 - Agent appears offline: ensure daemon is running (`nomade-agent status`) and machine can reach API/WebSocket.
 - Tunnel errors or unavailable preview URL: expected for now; tunnel stack is still WIP.
 
+Self-host billing mode:
+- Set `BILLING_MODE=self_host` on your own instance to disable Nomade cloud subscription gating.
+- Set `FREE_MAX_AGENTS` to the device cap you want on your instance (for example `1000`).
+
 ## 8) Use from Flutter app (iPhone / iPad) to control the paired machine
 The mobile app controls an already paired/running agent. Recommended order:
 
