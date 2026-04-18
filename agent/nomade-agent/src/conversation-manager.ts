@@ -5,6 +5,7 @@ import {
   type AppServerServerRequestResolution,
   type CodexApprovalPolicy,
   type CodexCollaborationModeSummary,
+  type CodexMcpServerSummary,
   type CodexModelSummary,
   type CodexReasoningEffort,
   type CodexSandboxMode,
@@ -86,6 +87,7 @@ export interface CodexRuntimeOptions {
   reasoningEfforts: CodexReasoningEffort[];
   collaborationModes: CodexCollaborationModeSummary[];
   skills: CodexSkillSummary[];
+  mcpServers: CodexMcpServerSummary[];
   rateLimits?: Record<string, unknown>;
   rateLimitsByLimitId?: Record<string, Record<string, unknown>> | null;
   defaults: {
@@ -398,7 +400,7 @@ export class ConversationManager {
   async getRuntimeOptions(params?: { cwd?: string }): Promise<CodexRuntimeOptions> {
     await this.codexClient.start();
 
-    const [modelPage, config, collaborationModes, skills, rateLimitSnapshot] = await Promise.all([
+    const [modelPage, config, collaborationModes, skills, rateLimitSnapshot, mcpStatuses] = await Promise.all([
       this.codexClient.modelList({
         limit: 200,
         includeHidden: false
@@ -406,7 +408,8 @@ export class ConversationManager {
       this.codexClient.configRead({ cwd: params?.cwd ?? null }),
       this.codexClient.collaborationModeList({ cwd: params?.cwd ?? null }).catch(() => []),
       params?.cwd ? this.codexClient.skillsList({ cwd: params.cwd }).catch(() => []) : Promise.resolve([]),
-      this.codexClient.accountRateLimitsRead().catch(() => null)
+      this.codexClient.accountRateLimitsRead().catch(() => null),
+      this.listMcpServerStatuses().catch(() => [])
     ]);
 
     const approvalRaw = config.approval_policy;
@@ -428,6 +431,12 @@ export class ConversationManager {
       defaults.effort = effortRaw;
     }
 
+    const configuredMcpServers = this.parseConfiguredMcpServers(config);
+    const mcpServers = this.mergeMcpServerSummaries({
+      configured: configuredMcpServers,
+      statuses: mcpStatuses
+    });
+
     return {
       models: modelPage.data,
       approvalPolicies: codexApprovalPolicies,
@@ -435,10 +444,23 @@ export class ConversationManager {
       reasoningEfforts: codexReasoningEfforts,
       collaborationModes,
       skills,
+      mcpServers,
       rateLimits: rateLimitSnapshot?.rateLimits,
       rateLimitsByLimitId: rateLimitSnapshot?.rateLimitsByLimitId ?? null,
       defaults
     };
+  }
+
+  async setMcpServerEnabled(params: { name: string; enabled: boolean }): Promise<void> {
+    await this.codexClient.start();
+    const normalizedName = params.name.trim();
+    if (!normalizedName) {
+      throw new Error("mcp_server_name_required");
+    }
+    await this.codexClient.setMcpServerEnabled({
+      name: normalizedName,
+      enabled: params.enabled
+    });
   }
 
   async syncThreads(params: { bindings: ConversationThreadBinding[] }): Promise<void> {
@@ -1229,6 +1251,77 @@ export class ConversationManager {
       return null;
     }
     return trimmed.length > 240 ? `${trimmed.substring(0, 240)}...` : trimmed;
+  }
+
+  private async listMcpServerStatuses(): Promise<CodexMcpServerSummary[]> {
+    const collected = new Map<string, CodexMcpServerSummary>();
+    let cursor: string | null = null;
+    do {
+      const page = await this.codexClient.mcpServerStatusList({
+        limit: 200,
+        cursor,
+        detail: "toolsAndAuthOnly"
+      });
+      for (const server of page.data) {
+        if (!server.name) {
+          continue;
+        }
+        collected.set(server.name, server);
+      }
+      cursor = page.nextCursor;
+    } while (cursor);
+    return [...collected.values()];
+  }
+
+  private parseConfiguredMcpServers(config: Record<string, unknown>): CodexMcpServerSummary[] {
+    const source = config.mcp_servers;
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      return [];
+    }
+    const byName = new Map<string, CodexMcpServerSummary>();
+    for (const [rawName, rawConfig] of Object.entries(source as Record<string, unknown>)) {
+      const name = rawName.trim();
+      if (!name) {
+        continue;
+      }
+      if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
+        byName.set(name, { name });
+        continue;
+      }
+      const configEntry = rawConfig as Record<string, unknown>;
+      byName.set(name, {
+        name,
+        enabled: typeof configEntry.enabled === "boolean" ? configEntry.enabled : undefined,
+        required: typeof configEntry.required === "boolean" ? configEntry.required : undefined
+      });
+    }
+    return [...byName.values()];
+  }
+
+  private mergeMcpServerSummaries(params: {
+    configured: CodexMcpServerSummary[];
+    statuses: CodexMcpServerSummary[];
+  }): CodexMcpServerSummary[] {
+    const merged = new Map<string, CodexMcpServerSummary>();
+    for (const entry of params.statuses) {
+      if (!entry.name) {
+        continue;
+      }
+      merged.set(entry.name, { ...entry });
+    }
+    for (const entry of params.configured) {
+      if (!entry.name) {
+        continue;
+      }
+      const previous = merged.get(entry.name) ?? { name: entry.name };
+      merged.set(entry.name, {
+        ...previous,
+        ...entry,
+        enabled: entry.enabled ?? previous.enabled,
+        required: entry.required ?? previous.required
+      });
+    }
+    return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
   private isApprovalPolicy(value: unknown): value is CodexApprovalPolicy {

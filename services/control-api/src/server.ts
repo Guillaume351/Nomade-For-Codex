@@ -755,6 +755,18 @@ export const createServer = async (): Promise<http.Server> => {
     upgradeUrl: `${config.appBaseUrl.replace(/\/$/, "")}/web/account`
   });
 
+  const concurrentConversationLimitPayload = (params: {
+    planCode: string;
+    activeConversationId: string;
+    activeConversationTitle: string;
+  }): Record<string, unknown> => ({
+    error: "concurrent_conversation_limit_reached",
+    planCode: params.planCode,
+    activeConversationId: params.activeConversationId,
+    activeConversationTitle: params.activeConversationTitle,
+    upgradeUrl: `${config.appBaseUrl.replace(/\/$/, "")}/web/account`
+  });
+
   type EntitlementFeature = "tunnels" | "pushNotifications" | "deferredTurns";
   const ensureEntitlementFeature = async (params: {
     userId: string;
@@ -771,6 +783,35 @@ export const createServer = async (): Promise<http.Server> => {
       feature: params.feature,
       planCode: entitlements.planCode
     });
+    return false;
+  };
+
+  const ensureConcurrentConversationAllowance = async (params: {
+    userId: string;
+    conversationId: string;
+    res: express.Response;
+  }): Promise<boolean> => {
+    const entitlements = await repositories.getUserEntitlements(params.userId);
+    const paidPlan = entitlements.planCode !== "free" && entitlements.subscriptionStatus === "active";
+    if (paidPlan || entitlements.source === "self_host" || entitlements.planCode === "self_host") {
+      return true;
+    }
+
+    const activeConversation = await repositories.findOtherActiveConversationForUser({
+      userId: params.userId,
+      excludeConversationId: params.conversationId
+    });
+    if (!activeConversation) {
+      return true;
+    }
+
+    params.res.status(403).json(
+      concurrentConversationLimitPayload({
+        planCode: entitlements.planCode,
+        activeConversationId: activeConversation.id,
+        activeConversationTitle: activeConversation.title
+      })
+    );
     return false;
   };
 
@@ -3758,6 +3799,39 @@ export const createServer = async (): Promise<http.Server> => {
     }
   });
 
+  app.post("/agents/:agentId/codex/mcp/server-enabled", requireHybridUserAuth, async (req, res) => {
+    const schema = z.object({
+      name: z.string().min(1).max(200),
+      enabled: z.boolean()
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+      return;
+    }
+
+    const userId = req.userId!;
+    const agentId = req.params.agentId;
+    const agents = await repositories.listAgents(userId);
+    if (!agents.some((agent) => agent.id === agentId)) {
+      res.status(404).json({ error: "agent_not_found" });
+      return;
+    }
+
+    try {
+      await wsHub.setCodexMcpServerEnabledThroughAgent({
+        agentId,
+        name: parsed.data.name,
+        enabled: parsed.data.enabled
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "codex_mcp_toggle_failed";
+      const status = message === "agent_offline" ? 409 : 502;
+      res.status(status).json({ error: message });
+    }
+  });
+
   app.post("/workspaces", requireHybridUserAuth, async (req, res) => {
     const schema = z.object({
       agentId: z.string().uuid().or(z.string().min(10)),
@@ -4154,6 +4228,14 @@ export const createServer = async (): Promise<http.Server> => {
       if (!enabled) {
         return;
       }
+    }
+    const concurrencyAllowed = await ensureConcurrentConversationAllowance({
+      userId: req.userId!,
+      conversationId: conversation.id,
+      res
+    });
+    if (!concurrencyAllowed) {
+      return;
     }
     const userPrompt = JSON.stringify(parsed.data.e2ePromptEnvelope);
     const turn = await repositories.createConversationTurn({

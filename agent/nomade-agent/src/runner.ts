@@ -1338,6 +1338,40 @@ export const runAgent = async (args: RunArgs): Promise<void> => {
         return;
       }
 
+      if (type === "codex.mcp.server.setEnabled") {
+        const requestId = String(msg.requestId ?? randomToken("cmcp"));
+        const name = String(msg.name ?? "").trim();
+        const enabled = msg.enabled === true;
+        if (!name) {
+          sendToSpecificWs(ws, {
+            type: "codex.mcp.server.setEnabled.result",
+            requestId,
+            status: "error",
+            error: "mcp_server_name_required"
+          });
+          return;
+        }
+        try {
+          await conversationManager.setMcpServerEnabled({
+            name,
+            enabled
+          });
+          sendToSpecificWs(ws, {
+            type: "codex.mcp.server.setEnabled.result",
+            requestId,
+            status: "ok"
+          });
+        } catch (error) {
+          sendToSpecificWs(ws, {
+            type: "codex.mcp.server.setEnabled.result",
+            requestId,
+            status: "error",
+            error: error instanceof Error ? error.message : "codex_mcp_toggle_failed"
+          });
+        }
+        return;
+      }
+
       if (type === "tunnel.http.request") {
         const tunnelId = String(msg.tunnelId);
         const requestId = String(msg.requestId ?? randomToken("tr"));

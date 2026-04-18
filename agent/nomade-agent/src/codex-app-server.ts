@@ -95,6 +95,11 @@ interface SkillListResult {
   data?: unknown;
 }
 
+interface McpServerStatusListResult {
+  data?: unknown;
+  nextCursor?: unknown;
+}
+
 interface ConfigReadResult {
   config?: unknown;
 }
@@ -167,6 +172,16 @@ export interface CodexSkillSummary {
   scope?: string;
   enabled?: boolean;
   cwd?: string;
+}
+
+export interface CodexMcpServerSummary {
+  name: string;
+  enabled?: boolean;
+  required?: boolean;
+  authStatus?: string;
+  authRequired?: boolean;
+  toolCount?: number;
+  resourceCount?: number;
 }
 
 type TurnStartCollaborationMode = CodexCollaborationModeSummary["turnStartCollaborationMode"];
@@ -480,6 +495,63 @@ export const parseCodexSkillsList = (rawSkills: unknown): CodexSkillSummary[] =>
   }
 
   return [...byPath.values()];
+};
+
+const toBoolean = (value: unknown): boolean | undefined => {
+  return typeof value === "boolean" ? value : undefined;
+};
+
+const toInteger = (value: unknown): number | undefined => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.trunc(value));
+  }
+  return undefined;
+};
+
+export const parseCodexMcpServerStatusList = (rawStatuses: unknown): CodexMcpServerSummary[] => {
+  const rows = Array.isArray(rawStatuses) ? rawStatuses : [];
+  const byName = new Map<string, CodexMcpServerSummary>();
+
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      continue;
+    }
+    const record = row as Record<string, unknown>;
+    const name =
+      toNormalizedString(record.name) ??
+      toNormalizedString(record.serverName) ??
+      toNormalizedString(record.id);
+    if (!name) {
+      continue;
+    }
+
+    const authRecord =
+      record.auth && typeof record.auth === "object" && !Array.isArray(record.auth)
+        ? (record.auth as Record<string, unknown>)
+        : undefined;
+    const authStatus =
+      toNormalizedString(record.authStatus) ??
+      toNormalizedString(authRecord?.status) ??
+      toNormalizedString(authRecord?.state);
+    const authRequired = toBoolean(record.authRequired) ?? toBoolean(authRecord?.required);
+
+    const tools = Array.isArray(record.tools) ? record.tools : [];
+    const resources = Array.isArray(record.resources) ? record.resources : [];
+    const toolCount = toInteger(record.toolCount) ?? tools.length;
+    const resourceCount = toInteger(record.resourceCount) ?? resources.length;
+
+    byName.set(name, {
+      name,
+      enabled: toBoolean(record.enabled),
+      required: toBoolean(record.required),
+      authStatus,
+      authRequired,
+      toolCount,
+      resourceCount
+    });
+  }
+
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 };
 
 export class CodexAppServerClient {
@@ -822,6 +894,35 @@ export class CodexAppServerClient {
       cwds: [params.cwd]
     })) as SkillListResult;
     return parseCodexSkillsList(response?.data);
+  }
+
+  async mcpServerStatusList(params?: {
+    limit?: number;
+    cursor?: string | null;
+    detail?: "full" | "toolsAndAuthOnly";
+  }): Promise<{ data: CodexMcpServerSummary[]; nextCursor: string | null }> {
+    const response = (await this.request("mcpServerStatus/list", {
+      limit: params?.limit ?? 200,
+      cursor: params?.cursor ?? null,
+      detail: params?.detail ?? "toolsAndAuthOnly"
+    })) as McpServerStatusListResult;
+    return {
+      data: parseCodexMcpServerStatusList(response?.data),
+      nextCursor: typeof response?.nextCursor === "string" ? response.nextCursor : null
+    };
+  }
+
+  async setMcpServerEnabled(params: { name: string; enabled: boolean }): Promise<void> {
+    const name = toNormalizedString(params.name);
+    if (!name) {
+      throw new Error("mcp_server_name_required");
+    }
+    await this.request("config/value/write", {
+      keyPath: `mcp_servers.${name}.enabled`,
+      value: params.enabled,
+      mergeStrategy: "upsert"
+    });
+    await this.request("config/mcpServer/reload", null);
   }
 
   async configRead(params?: { cwd?: string | null }): Promise<Record<string, unknown>> {

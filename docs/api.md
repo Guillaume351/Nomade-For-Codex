@@ -40,7 +40,10 @@
     - `approvalPolicies`
     - `sandboxModes`
     - `reasoningEfforts`
+    - `mcpServers`
     - `defaults` (`model`, `approvalPolicy`, `sandboxMode`, `effort`)
+- `POST /agents/:agentId/codex/mcp/server-enabled` body `{ name, enabled }`
+  - toggles an MCP server `enabled` flag through the online agent (Codex config write + MCP reload)
 - `POST /workspaces` body `{ agentId, name, path }`
 - `GET /workspaces?agentId=...` (optional filter by active agent)
 - `POST /conversations` body `{ workspaceId, agentId?, title? }`

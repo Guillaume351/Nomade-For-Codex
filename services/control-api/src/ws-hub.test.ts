@@ -103,6 +103,15 @@ describe("parseCodexRuntimeOptions", () => {
           errors: []
         }
       ],
+      mcpServers: [
+        {
+          name: "github",
+          enabled: true,
+          required: false,
+          authStatus: "authorized",
+          toolCount: 12
+        }
+      ],
       defaults: {
         model: "gpt-5.4"
       }
@@ -138,6 +147,14 @@ describe("parseCodexRuntimeOptions", () => {
         cwd: "/repo"
       })
     ]);
+    expect(parsed.mcpServers).toEqual([
+      expect.objectContaining({
+        name: "github",
+        enabled: true,
+        authStatus: "authorized",
+        toolCount: 12
+      })
+    ]);
     expect(parsed.defaults.model).toBe("gpt-5.4");
   });
 
@@ -165,5 +182,6 @@ describe("parseCodexRuntimeOptions", () => {
 
     expect(parsed.collaborationModes).toEqual([]);
     expect(parsed.skills).toEqual([]);
+    expect(parsed.mcpServers).toEqual([]);
   });
 });

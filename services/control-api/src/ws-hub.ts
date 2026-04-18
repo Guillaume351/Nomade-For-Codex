@@ -109,6 +109,7 @@ export interface CodexRuntimeOptions {
   reasoningEfforts: string[];
   collaborationModes: Array<Record<string, unknown>>;
   skills: Array<Record<string, unknown>>;
+  mcpServers: Array<Record<string, unknown>>;
   rateLimits?: Record<string, unknown>;
   rateLimitsByLimitId?: Record<string, Record<string, unknown>> | null;
   defaults: {
@@ -121,6 +122,12 @@ export interface CodexRuntimeOptions {
 
 interface PendingCodexOptions {
   resolve: (value: CodexRuntimeOptions) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
+
+interface PendingCodexMcpServerSetEnabled {
+  resolve: () => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
 }
@@ -488,6 +495,78 @@ const parseCodexSkills = (value: unknown): Array<Record<string, unknown>> => {
   return [...byPath.values()];
 };
 
+const parseCodexMcpServers = (value: unknown): Array<Record<string, unknown>> => {
+  const rows = Array.isArray(value) ? value : [];
+  const byName = new Map<string, Record<string, unknown>>();
+
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      continue;
+    }
+    const record = row as Record<string, unknown>;
+    const name =
+      normalizeString(record.name) ??
+      normalizeString(record.serverName) ??
+      normalizeString(record.id);
+    if (!name) {
+      continue;
+    }
+    const normalized: Record<string, unknown> = {
+      ...(record as Record<string, unknown>),
+      name
+    };
+
+    if (typeof record.enabled === "boolean") {
+      normalized.enabled = record.enabled;
+    }
+    if (typeof record.required === "boolean") {
+      normalized.required = record.required;
+    }
+
+    const authRaw =
+      record.auth && typeof record.auth === "object" && !Array.isArray(record.auth)
+        ? (record.auth as Record<string, unknown>)
+        : undefined;
+    const authStatus =
+      normalizeString(record.authStatus) ??
+      normalizeString(authRaw?.status) ??
+      normalizeString(authRaw?.state);
+    if (authStatus != null) {
+      normalized.authStatus = authStatus;
+    }
+    const authRequired =
+      typeof record.authRequired === "boolean"
+        ? record.authRequired
+        : typeof authRaw?.required === "boolean"
+          ? authRaw.required
+          : undefined;
+    if (authRequired != null) {
+      normalized.authRequired = authRequired;
+    }
+
+    const tools = Array.isArray(record.tools) ? record.tools : [];
+    const resources = Array.isArray(record.resources) ? record.resources : [];
+    const toolCount =
+      typeof record.toolCount === "number" && Number.isFinite(record.toolCount)
+        ? Math.max(0, Math.trunc(record.toolCount))
+        : tools.length;
+    const resourceCount =
+      typeof record.resourceCount === "number" && Number.isFinite(record.resourceCount)
+        ? Math.max(0, Math.trunc(record.resourceCount))
+        : resources.length;
+    normalized.toolCount = toolCount;
+    normalized.resourceCount = resourceCount;
+
+    byName.set(name, normalized);
+  }
+
+  return [...byName.values()].sort((a, b) => {
+    const aName = String(a.name ?? "");
+    const bName = String(b.name ?? "");
+    return aName.localeCompare(bName);
+  });
+};
+
 export const parseCodexRuntimeOptions = (
   rawOptions: Record<string, unknown>
 ): CodexRuntimeOptions => {
@@ -554,6 +633,7 @@ export const parseCodexRuntimeOptions = (
     reasoningEfforts: toStringList(rawOptions.reasoningEfforts),
     collaborationModes: parseCodexCollaborationModes(rawOptions.collaborationModes),
     skills: parseCodexSkills(rawOptions.skills),
+    mcpServers: parseCodexMcpServers(rawOptions.mcpServers),
     rateLimits: rateLimitsRaw,
     rateLimitsByLimitId,
     defaults: {
@@ -588,6 +668,10 @@ export class WsHub {
   private readonly pendingThreadList = new Map<string, PendingThreadList>();
   private readonly pendingThreadRead = new Map<string, PendingThreadRead>();
   private readonly pendingCodexOptions = new Map<string, PendingCodexOptions>();
+  private readonly pendingCodexMcpServerSetEnabled = new Map<
+    string,
+    PendingCodexMcpServerSetEnabled
+  >();
 
   private isTurnForeignKeyRace(error: unknown): boolean {
     if (!error || typeof error !== "object") {
@@ -938,6 +1022,42 @@ export class WsHub {
       }, 20_000);
 
       this.pendingCodexOptions.set(requestId, { resolve, reject, timeout });
+      conn.ws.send(JSON.stringify(payload));
+    });
+  }
+
+  async setCodexMcpServerEnabledThroughAgent(params: {
+    agentId: string;
+    name: string;
+    enabled: boolean;
+  }): Promise<void> {
+    const requestId = randomToken("cmcp");
+    const conn = this.agentSockets.get(params.agentId);
+    if (!conn || conn.ws.readyState !== conn.ws.OPEN) {
+      throw new Error("agent_offline");
+    }
+    const name = params.name.trim();
+    if (!name) {
+      throw new Error("mcp_server_name_required");
+    }
+
+    const payload = {
+      type: "codex.mcp.server.setEnabled",
+      requestId,
+      name,
+      enabled: params.enabled
+    };
+
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingCodexMcpServerSetEnabled.delete(requestId);
+        reject(new Error("codex_mcp_server_set_enabled_timeout"));
+      }, 20_000);
+      this.pendingCodexMcpServerSetEnabled.set(requestId, {
+        resolve,
+        reject,
+        timeout
+      });
       conn.ws.send(JSON.stringify(payload));
     });
   }
@@ -1349,6 +1469,24 @@ export class WsHub {
       pending.resolve(
         parseCodexRuntimeOptions(optionsRaw as Record<string, unknown>)
       );
+      return;
+    }
+
+    if (type === "codex.mcp.server.setEnabled.result") {
+      const requestId = String(msg.requestId ?? "");
+      const pending = this.pendingCodexMcpServerSetEnabled.get(requestId);
+      if (!pending) {
+        return;
+      }
+      this.pendingCodexMcpServerSetEnabled.delete(requestId);
+      clearTimeout(pending.timeout);
+
+      const status = String(msg.status ?? "error");
+      if (status !== "ok") {
+        pending.reject(new Error(String(msg.error ?? "codex_mcp_server_set_enabled_failed")));
+        return;
+      }
+      pending.resolve();
       return;
     }
 

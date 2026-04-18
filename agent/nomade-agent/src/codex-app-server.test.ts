@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   parseCodexCollaborationModeList,
+  parseCodexMcpServerStatusList,
   parseCodexSkillsList
 } from "./codex-app-server.js";
 
@@ -103,5 +104,29 @@ describe("codex-app-server parsers", () => {
     ]);
 
     expect(parsed).toEqual([]);
+  });
+
+  it("parses mcp server status rows", () => {
+    const parsed = parseCodexMcpServerStatusList([
+      {
+        name: "github",
+        enabled: true,
+        required: false,
+        authStatus: "authorized",
+        tools: [{ name: "issues" }, { name: "pulls" }]
+      }
+    ]);
+
+    expect(parsed).toEqual([
+      {
+        name: "github",
+        enabled: true,
+        required: false,
+        authStatus: "authorized",
+        authRequired: undefined,
+        toolCount: 2,
+        resourceCount: 0
+      }
+    ]);
   });
 });

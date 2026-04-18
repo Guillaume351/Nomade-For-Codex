@@ -156,6 +156,18 @@ export interface UserDeviceRecord {
   updated_at: Date;
 }
 
+export interface ActiveConversationRecord {
+  id: string;
+  user_id: string;
+  workspace_id: string;
+  agent_id: string;
+  title: string;
+  status: string;
+  codex_thread_id: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 export interface SessionRecord {
   id: string;
   user_id: string;
@@ -1478,6 +1490,39 @@ export class Repositories {
       activity.set(row.conversation_id, row.has_active === true);
     }
     return activity;
+  }
+
+  async findOtherActiveConversationForUser(params: {
+    userId: string;
+    excludeConversationId?: string;
+  }): Promise<ActiveConversationRecord | null> {
+    const result = await this.pool.query<ActiveConversationRecord>(
+      `SELECT c.id,
+              c.user_id,
+              c.workspace_id,
+              c.agent_id,
+              c.title,
+              c.status,
+              c.codex_thread_id,
+              c.created_at,
+              c.updated_at
+       FROM conversations c
+       WHERE c.user_id = $1
+         AND ($2::text IS NULL OR c.id <> $2)
+         AND EXISTS (
+           SELECT 1
+           FROM conversation_turns t
+           WHERE t.conversation_id = c.id
+             AND t.status IN ('queued', 'running')
+         )
+       ORDER BY c.updated_at DESC
+       LIMIT 1`,
+      [params.userId, params.excludeConversationId ?? null]
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]) {
+      return null;
+    }
+    return result.rows[0];
   }
 
   async createConversationTurn(params: {
