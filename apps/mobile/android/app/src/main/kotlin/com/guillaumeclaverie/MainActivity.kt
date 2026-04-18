@@ -1,4 +1,4 @@
-package com.example.nomade_mobile
+package com.guillaumeclaverie
 
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine

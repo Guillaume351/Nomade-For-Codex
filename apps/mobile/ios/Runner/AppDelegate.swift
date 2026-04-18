@@ -1,6 +1,5 @@
 import Flutter
 import UIKit
-import UserNotifications
 
 #if canImport(ActivityKit)
 import ActivityKit
@@ -15,9 +14,7 @@ import ActivityKit
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    let launched = super.application(application, didFinishLaunchingWithOptions: launchOptions)
-    nativeNotificationsBridge.bootstrap(application: application)
-    return launched
+    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
   override func application(
@@ -50,21 +47,6 @@ private final class NativeNotificationsBridgeController {
 
   private var pushToken: String?
   private var pushTokenError: String?
-  private var didBootstrap = false
-
-  func bootstrap(application: UIApplication) {
-    guard !didBootstrap else { return }
-    didBootstrap = true
-    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) {
-      [weak self] _, error in
-      if let error {
-        self?.pushTokenError = "authorization_failed:\(error.localizedDescription)"
-      }
-      DispatchQueue.main.async {
-        application.registerForRemoteNotifications()
-      }
-    }
-  }
 
   func installChannel(pluginRegistry: FlutterPluginRegistry) {
     guard let registrar = pluginRegistry.registrar(forPlugin: "NomadeNativeNotificationsBridge") else {
@@ -264,6 +246,7 @@ private struct NomadeLiveActivityAttributes: ActivityAttributes {
     var subtitle: String
     var conversationId: String
     var turnId: String
+    var status: String
   }
 
   var id: String
@@ -284,7 +267,8 @@ private actor NomadeLiveActivityStore {
       title: title,
       subtitle: subtitle,
       conversationId: conversationId,
-      turnId: turnId
+      turnId: turnId,
+      status: "running"
     )
 
     if let existing = findActivity(for: key) {
@@ -319,12 +303,28 @@ private actor NomadeLiveActivityStore {
     guard let existing = findActivity(for: key) else {
       return
     }
+    let dismissalDate = Date().addingTimeInterval(15)
     if #available(iOS 16.2, *) {
       let currentState = existing.content.state
-      let content = ActivityContent(state: currentState, staleDate: nil)
-      await existing.end(content, dismissalPolicy: .immediate)
+      let completedState = NomadeLiveActivityAttributes.ContentState(
+        title: currentState.title,
+        subtitle: currentState.subtitle,
+        conversationId: currentState.conversationId,
+        turnId: currentState.turnId,
+        status: "completed"
+      )
+      let content = ActivityContent(state: completedState, staleDate: dismissalDate)
+      await existing.end(content, dismissalPolicy: .after(dismissalDate))
     } else {
-      await existing.end(using: existing.contentState, dismissalPolicy: .immediate)
+      let currentState = existing.contentState
+      let completedState = NomadeLiveActivityAttributes.ContentState(
+        title: currentState.title,
+        subtitle: currentState.subtitle,
+        conversationId: currentState.conversationId,
+        turnId: currentState.turnId,
+        status: "completed"
+      )
+      await existing.end(using: completedState, dismissalPolicy: .default)
     }
   }
 

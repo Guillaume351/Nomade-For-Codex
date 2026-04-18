@@ -1,80 +1,239 @@
-//
-//  NomadeLiveActivityExtensionLiveActivity.swift
-//  NomadeLiveActivityExtension
-//
-//  Created by Guillaume Claverie on 12/04/2026.
-//
-
 import ActivityKit
-import WidgetKit
 import SwiftUI
+import WidgetKit
 
-struct NomadeLiveActivityExtensionAttributes: ActivityAttributes {
+struct NomadeLiveActivityAttributes: ActivityAttributes {
     public struct ContentState: Codable, Hashable {
-        // Dynamic stateful properties about your activity go here!
-        var emoji: String
+        var title: String
+        var subtitle: String
+        var conversationId: String
+        var turnId: String
+        var status: String
     }
 
-    // Fixed non-changing properties about your activity go here!
-    var name: String
+    var id: String
 }
 
 struct NomadeLiveActivityExtensionLiveActivity: Widget {
     var body: some WidgetConfiguration {
-        ActivityConfiguration(for: NomadeLiveActivityExtensionAttributes.self) { context in
-            // Lock screen/banner UI goes here
-            VStack {
-                Text("Hello \(context.state.emoji)")
-            }
-            .activityBackgroundTint(Color.cyan)
-            .activitySystemActionForegroundColor(Color.black)
-
+        ActivityConfiguration(for: NomadeLiveActivityAttributes.self) { context in
+            NomadeLiveActivityContentView(
+                state: context.state
+            )
+            .activityBackgroundTint(backgroundTint(for: context.state))
+            .activitySystemActionForegroundColor(.primary)
         } dynamicIsland: { context in
             DynamicIsland {
-                // Expanded UI goes here.  Compose the expanded UI through
-                // various regions, like leading/trailing/center/bottom
                 DynamicIslandExpandedRegion(.leading) {
-                    Text("Leading")
+                    liveActivityIcon(for: context.state, size: 28)
                 }
+
+                DynamicIslandExpandedRegion(.center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(liveActivityTitle(for: context.state))
+                            .font(.headline.weight(.semibold))
+                            .lineLimit(1)
+                        Text(liveActivitySubtitle(for: context.state))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
                 DynamicIslandExpandedRegion(.trailing) {
-                    Text("Trailing")
+                    VStack(alignment: .trailing, spacing: 6) {
+                        LiveActivityStatusBadge(
+                            text: statusLabel(for: context.state),
+                            accent: accentColor(for: context.state),
+                            isCompleted: isCompleted(context.state)
+                        )
+                        if isCompleted(context.state) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.title3)
+                                .foregroundStyle(accentColor(for: context.state))
+                        } else {
+                            ProgressView()
+                                .tint(accentColor(for: context.state))
+                        }
+                    }
                 }
+
                 DynamicIslandExpandedRegion(.bottom) {
-                    Text("Bottom \(context.state.emoji)")
-                    // more content
+                    HStack(spacing: 8) {
+                        Image(systemName: bottomMessageIcon(for: context.state))
+                            .foregroundStyle(accentColor(for: context.state))
+                        Text(bottomMessage(for: context.state))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } compactLeading: {
-                Text("L")
+                Image(systemName: compactLeadingSymbol(for: context.state))
+                    .foregroundStyle(accentColor(for: context.state))
             } compactTrailing: {
-                Text("T \(context.state.emoji)")
+                if isCompleted(context.state) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(accentColor(for: context.state))
+                } else {
+                    ProgressView()
+                        .tint(accentColor(for: context.state))
+                }
             } minimal: {
-                Text(context.state.emoji)
+                Image(systemName: compactLeadingSymbol(for: context.state))
+                    .foregroundStyle(accentColor(for: context.state))
             }
-            .widgetURL(URL(string: "http://www.apple.com"))
-            .keylineTint(Color.red)
+            .keylineTint(accentColor(for: context.state))
+        }
+    }
+
+    private func liveActivityTitle(
+        for state: NomadeLiveActivityAttributes.ContentState
+    ) -> String {
+        let trimmed = state.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Nomade" : trimmed
+    }
+
+    private func liveActivitySubtitle(
+        for state: NomadeLiveActivityAttributes.ContentState
+    ) -> String {
+        let trimmed = state.subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Running request" : trimmed
+    }
+
+    private func isCompleted(_ state: NomadeLiveActivityAttributes.ContentState) -> Bool {
+        state.status == "completed"
+    }
+
+    private func accentColor(for state: NomadeLiveActivityAttributes.ContentState) -> Color {
+        isCompleted(state) ? Color.green : Color.blue
+    }
+
+    private func backgroundTint(for state: NomadeLiveActivityAttributes.ContentState) -> Color {
+        if isCompleted(state) {
+            return Color.green.opacity(0.12)
+        }
+        return Color(uiColor: .secondarySystemBackground)
+    }
+
+    private func statusLabel(for state: NomadeLiveActivityAttributes.ContentState) -> String {
+        isCompleted(state) ? "Ready" : "Working"
+    }
+
+    private func bottomMessage(for state: NomadeLiveActivityAttributes.ContentState) -> String {
+        if isCompleted(state) {
+            return "Your reply is ready in Nomade."
+        }
+        return "Nomade is generating your reply."
+    }
+
+    private func bottomMessageIcon(for state: NomadeLiveActivityAttributes.ContentState) -> String {
+        isCompleted(state) ? "sparkles" : "bolt.fill"
+    }
+
+    private func compactLeadingSymbol(for state: NomadeLiveActivityAttributes.ContentState) -> String {
+        isCompleted(state) ? "checkmark.bubble.fill" : "ellipsis.message.fill"
+    }
+
+    @ViewBuilder
+    private func liveActivityIcon(
+        for state: NomadeLiveActivityAttributes.ContentState,
+        size: CGFloat
+    ) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.34, style: .continuous)
+                .fill(accentColor(for: state).opacity(isCompleted(state) ? 0.16 : 0.14))
+                .frame(width: size, height: size)
+            Image(systemName: isCompleted(state) ? "checkmark.circle.fill" : "ellipsis.message.fill")
+                .font(.system(size: size * 0.46, weight: .semibold))
+                .foregroundStyle(accentColor(for: state))
         }
     }
 }
 
-extension NomadeLiveActivityExtensionAttributes {
-    fileprivate static var preview: NomadeLiveActivityExtensionAttributes {
-        NomadeLiveActivityExtensionAttributes(name: "World")
+private struct NomadeLiveActivityContentView: View {
+    let state: NomadeLiveActivityAttributes.ContentState
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(accent.opacity(isCompleted ? 0.16 : 0.14))
+                    .frame(width: 46, height: 46)
+                Image(systemName: isCompleted ? "checkmark.circle.fill" : "ellipsis.message.fill")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(accent)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .center, spacing: 8) {
+                    Text(title)
+                        .font(.headline.weight(.semibold))
+                        .lineLimit(1)
+
+                    Spacer(minLength: 0)
+
+                    LiveActivityStatusBadge(
+                        text: isCompleted ? "Ready" : "Working",
+                        accent: accent,
+                        isCompleted: isCompleted
+                    )
+                }
+
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                HStack(spacing: 6) {
+                    Image(systemName: isCompleted ? "sparkles" : "bolt.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(accent)
+                    Text(isCompleted ? "Your reply is ready in Nomade." : "Nomade is generating your reply.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    private var title: String {
+        let trimmed = state.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Nomade" : trimmed
+    }
+
+    private var subtitle: String {
+        let trimmed = state.subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Running request" : trimmed
+    }
+
+    private var isCompleted: Bool {
+        state.status == "completed"
+    }
+
+    private var accent: Color {
+        isCompleted ? .green : .blue
     }
 }
 
-extension NomadeLiveActivityExtensionAttributes.ContentState {
-    fileprivate static var smiley: NomadeLiveActivityExtensionAttributes.ContentState {
-        NomadeLiveActivityExtensionAttributes.ContentState(emoji: "😀")
-     }
-     
-     fileprivate static var starEyes: NomadeLiveActivityExtensionAttributes.ContentState {
-         NomadeLiveActivityExtensionAttributes.ContentState(emoji: "🤩")
-     }
-}
+private struct LiveActivityStatusBadge: View {
+    let text: String
+    let accent: Color
+    let isCompleted: Bool
 
-#Preview("Notification", as: .content, using: NomadeLiveActivityExtensionAttributes.preview) {
-   NomadeLiveActivityExtensionLiveActivity()
-} contentStates: {
-    NomadeLiveActivityExtensionAttributes.ContentState.smiley
-    NomadeLiveActivityExtensionAttributes.ContentState.starEyes
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(accent)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(accent.opacity(isCompleted ? 0.14 : 0.1))
+            )
+    }
 }

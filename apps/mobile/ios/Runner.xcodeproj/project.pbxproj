@@ -16,10 +16,11 @@
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
+		E1177144CF9B2A58A7016DAD /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 49536CE570FA632B65790FDA /* GoogleService-Info.plist */; };
 		F06B8C3C2FFA001000A1B2C3 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F06B8C3B2FFA001000A1B2C3 /* PrivacyInfo.xcprivacy */; };
+		F0E251672F8BE9B200977147 /* NomadeLiveActivityExtensionExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = F0E2514B2F8BE9B100977147 /* NomadeLiveActivityExtensionExtension.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		F0E2514D2F8BE9B100977147 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F0E2514C2F8BE9B100977147 /* WidgetKit.framework */; };
 		F0E2514F2F8BE9B100977147 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F0E2514E2F8BE9B100977147 /* SwiftUI.framework */; };
-		F0E251602F8BE9B200977147 /* NomadeLiveActivityExtensionExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F0E2514B2F8BE9B100977147 /* NomadeLiveActivityExtensionExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -30,7 +31,7 @@
 			remoteGlobalIDString = 97C146ED1CF9000F007C117D;
 			remoteInfo = Runner;
 		};
-		F0E2515E2F8BE9B200977147 /* PBXContainerItemProxy */ = {
+		F0E251682F8BE9B200977147 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 97C146E61CF9000F007C117D /* Project object */;
 			proxyType = 1;
@@ -40,6 +41,17 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		F0E251692F8BE9B200977147 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				F0E251672F8BE9B200977147 /* NomadeLiveActivityExtensionExtension.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		9705A1C41CF9048500538489 /* Embed Frameworks */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -50,17 +62,6 @@
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		F0E251612F8BE9B200977147 /* Embed Foundation Extensions */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
-			files = (
-				F0E251602F8BE9B200977147 /* NomadeLiveActivityExtensionExtension.appex in Embed Foundation Extensions */,
-			);
-			name = "Embed Foundation Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
@@ -69,6 +70,7 @@
 		331C807B294A618700263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
 		331C8081294A63A400263BE5 /* RunnerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RunnerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = AppFrameworkInfo.plist; path = Flutter/AppFrameworkInfo.plist; sourceTree = "<group>"; };
+		49536CE570FA632B65790FDA /* GoogleService-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; name = "GoogleService-Info.plist"; path = "Runner/GoogleService-Info.plist"; sourceTree = "<group>"; };
 		4C710182C53D6F4221DE8E0C /* Pods-RunnerTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.debug.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.debug.xcconfig"; sourceTree = "<group>"; };
 		74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -81,11 +83,11 @@
 		97C146FD1CF9000F007C117D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		97C147001CF9000F007C117D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		F06B8C3B2FFA001000A1B2C3 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		97C1A5674C274717B7DE9508 /* Pods-Runner.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.profile.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig"; sourceTree = "<group>"; };
 		A008050FEC3F673B5F99E7C8 /* Pods-RunnerTests.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.profile.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.profile.xcconfig"; sourceTree = "<group>"; };
 		AD6B4A5C3B1432D98D31E87B /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
 		CAC814CA849550286885F944 /* Pods_RunnerTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_RunnerTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		F06B8C3B2FFA001000A1B2C3 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		F0E251462F8BE5EA00977147 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		F0E2514B2F8BE9B100977147 /* NomadeLiveActivityExtensionExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NomadeLiveActivityExtensionExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		F0E2514C2F8BE9B100977147 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
@@ -201,6 +203,7 @@
 				331C8082294A63A400263BE5 /* RunnerTests */,
 				53BCC718D0872A56A6B47E4F /* Pods */,
 				6722782A2483BBA1DFA8B9AB /* Frameworks */,
+				49536CE570FA632B65790FDA /* GoogleService-Info.plist */,
 			);
 			sourceTree = "<group>";
 		};
@@ -263,7 +266,7 @@
 				97C146EB1CF9000F007C117D /* Frameworks */,
 				97C146EC1CF9000F007C117D /* Resources */,
 				9705A1C41CF9048500538489 /* Embed Frameworks */,
-				F0E251612F8BE9B200977147 /* Embed Foundation Extensions */,
+				F0E251692F8BE9B200977147 /* Embed App Extensions */,
 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
 				FAD7EC7583E66838E295BA87 /* [CP] Embed Pods Frameworks */,
 				D93DDD6FC9501DE13783D7E4 /* [CP] Copy Pods Resources */,
@@ -271,7 +274,7 @@
 			buildRules = (
 			);
 			dependencies = (
-				F0E2515F2F8BE9B200977147 /* PBXTargetDependency */,
+				F0E2516A2F8BE9B200977147 /* PBXTargetDependency */,
 			);
 			name = Runner;
 			productName = Runner;
@@ -359,6 +362,7 @@
 				97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */,
 				F06B8C3C2FFA001000A1B2C3 /* PrivacyInfo.xcprivacy in Resources */,
 				97C146FC1CF9000F007C117D /* Main.storyboard in Resources */,
+				E1177144CF9B2A58A7016DAD /* GoogleService-Info.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -516,10 +520,10 @@
 			target = 97C146ED1CF9000F007C117D /* Runner */;
 			targetProxy = 331C8085294A63A400263BE5 /* PBXContainerItemProxy */;
 		};
-		F0E2515F2F8BE9B200977147 /* PBXTargetDependency */ = {
+		F0E2516A2F8BE9B200977147 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = F0E2514A2F8BE9B100977147 /* NomadeLiveActivityExtensionExtension */;
-			targetProxy = F0E2515E2F8BE9B200977147 /* PBXContainerItemProxy */;
+			targetProxy = F0E251682F8BE9B200977147 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -588,8 +592,8 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.5;
 				MTL_ENABLE_DEBUG_INFO = NO;
-				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = iphoneos;
+					SDKROOT = auto;
+					SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALIDATE_PRODUCT = YES;
 			};
@@ -602,7 +606,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
-				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+					CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = K29MSNV5QP;
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
@@ -720,7 +724,8 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 15.5;
 				MTL_ENABLE_DEBUG_INFO = YES;
 				ONLY_ACTIVE_ARCH = YES;
-				SDKROOT = iphoneos;
+					SDKROOT = auto;
+					SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -770,8 +775,8 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.5;
 				MTL_ENABLE_DEBUG_INFO = NO;
-				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = iphoneos;
+					SDKROOT = auto;
+					SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -786,7 +791,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
-				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+					CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = K29MSNV5QP;
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
@@ -810,7 +815,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
-				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+					CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = K29MSNV5QP;
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
@@ -837,39 +842,42 @@
 				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
 				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = K29MSNV5QP;
+					CODE_SIGN_STYLE = Automatic;
+					CURRENT_PROJECT_VERSION = 1;
+					DEVELOPMENT_TEAM = K29MSNV5QP;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = NomadeLiveActivityExtension/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = NomadeLiveActivityExtension;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+						GENERATE_INFOPLIST_FILE = YES;
+					INFOPLIST_FILE = NomadeLiveActivityExtension/Info.plist;
+					INFOPLIST_KEY_CFBundleDisplayName = NomadeLiveActivityExtension;
+					INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+					INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+					INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MARKETING_VERSION = 1.0;
+					MARKETING_VERSION = 0.1.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.guillaumeclaverie.nomadeMobile.NomadeLiveActivityExtension;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+					SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+					SWIFT_APPROACHABLE_CONCURRENCY = YES;
+					SWIFT_EMIT_LOC_STRINGS = YES;
+					SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+					SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+					SWIFT_VERSION = 5.0;
+					TARGETED_DEVICE_FAMILY = "1,2";
+					VERSIONING_SYSTEM = "apple-generic";
+				};
+				name = Debug;
 			};
-			name = Debug;
-		};
 		F0E251632F8BE9B200977147 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -882,35 +890,38 @@
 				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+					CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = K29MSNV5QP;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = NomadeLiveActivityExtension/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = NomadeLiveActivityExtension;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+						GENERATE_INFOPLIST_FILE = YES;
+					INFOPLIST_FILE = NomadeLiveActivityExtension/Info.plist;
+					INFOPLIST_KEY_CFBundleDisplayName = NomadeLiveActivityExtension;
+					INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+					INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+					INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MARKETING_VERSION = 1.0;
+					MARKETING_VERSION = 0.1.0;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.guillaumeclaverie.nomadeMobile.NomadeLiveActivityExtension;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+					STRING_CATALOG_GENERATE_SYMBOLS = YES;
+					SWIFT_APPROACHABLE_CONCURRENCY = YES;
+					SWIFT_EMIT_LOC_STRINGS = YES;
+					SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+					SWIFT_VERSION = 5.0;
+					TARGETED_DEVICE_FAMILY = "1,2";
+					VERSIONING_SYSTEM = "apple-generic";
+				};
+				name = Release;
 			};
-			name = Release;
-		};
 		F0E251642F8BE9B200977147 /* Profile */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -923,35 +934,38 @@
 				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+					CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = K29MSNV5QP;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = NomadeLiveActivityExtension/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = NomadeLiveActivityExtension;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+						GENERATE_INFOPLIST_FILE = YES;
+					INFOPLIST_FILE = NomadeLiveActivityExtension/Info.plist;
+					INFOPLIST_KEY_CFBundleDisplayName = NomadeLiveActivityExtension;
+					INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+					INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+					INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MARKETING_VERSION = 1.0;
+					MARKETING_VERSION = 0.1.0;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.guillaumeclaverie.nomadeMobile.NomadeLiveActivityExtension;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+					STRING_CATALOG_GENERATE_SYMBOLS = YES;
+					SWIFT_APPROACHABLE_CONCURRENCY = YES;
+					SWIFT_EMIT_LOC_STRINGS = YES;
+					SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+					SWIFT_VERSION = 5.0;
+					TARGETED_DEVICE_FAMILY = "1,2";
+					VERSIONING_SYSTEM = "apple-generic";
+				};
+				name = Profile;
 			};
-			name = Profile;
-		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */

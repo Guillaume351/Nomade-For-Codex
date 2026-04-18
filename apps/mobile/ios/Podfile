@@ -38,5 +38,41 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
+    target.build_configurations.each do |config|
+      key = 'EXCLUDED_ARCHS[sdk=iphonesimulator*]'
+      excluded = config.build_settings[key]
+      next if excluded.nil?
+
+      values = excluded
+        .to_s
+        .split(/\s+/)
+        .map(&:strip)
+        .select { |value| !value.empty? }
+        .reject { |value| value == 'arm64' }
+
+      if values.empty?
+        config.build_settings.delete(key)
+      else
+        config.build_settings[key] = values.join(' ')
+      end
+    end
+  end
+
+  Dir.glob(File.join(__dir__, 'Pods', 'Target Support Files', '**', '*.xcconfig')).each do |path|
+    next unless File.file?(path)
+
+    content = File.read(path)
+    updated = content.gsub(/(EXCLUDED_ARCHS\[sdk=iphonesimulator\*\]\s*=\s*)(.*)$/) do
+      prefix = Regexp.last_match(1)
+      values = Regexp.last_match(2)
+        .split(/\s+/)
+        .map(&:strip)
+        .select { |value| !value.empty? }
+        .reject { |value| value == 'arm64' }
+      "#{prefix}#{values.empty? ? '$(inherited)' : values.join(' ')}"
+    end
+
+    File.write(path, updated) if updated != content
   end
 end
