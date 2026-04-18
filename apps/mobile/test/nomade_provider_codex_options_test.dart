@@ -70,12 +70,24 @@ void main() {
             'errors': const [],
           }
         ],
+        'mcpServers': const [
+          {
+            'name': 'github',
+            'enabled': true,
+            'required': false,
+            'authStatus': 'authorized',
+            'toolCount': 8,
+          }
+        ],
         'defaults': const {},
       });
 
       expect(provider.codexSkills, hasLength(1));
       expect(provider.codexSkills.first['path'], '/skills/a/SKILL.md');
       expect(provider.codexSkills.first['shortDescription'], 'short-a');
+      expect(provider.codexMcpServers, hasLength(1));
+      expect(provider.codexMcpServers.first['name'], 'github');
+      expect(provider.codexMcpServers.first['enabled'], isTrue);
       expect(provider.selectedSkillPaths, ['/skills/a/SKILL.md']);
       expect(provider.selectedCollaborationModeSlug, 'default');
     });

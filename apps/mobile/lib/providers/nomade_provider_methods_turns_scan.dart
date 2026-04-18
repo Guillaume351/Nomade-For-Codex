@@ -78,6 +78,7 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
   }) async {
     if (accessToken == null) return;
 
+    String? attemptedDeliveryPolicy;
     try {
       final commandResolution =
           NomadeCodexUtils.resolvePromptSlashCommand(prompt);
@@ -174,8 +175,12 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
               normalizedPolicyOverride == 'immediate'
           ? normalizedPolicyOverride
           : (_offlineTurnDefault == 'defer' ? 'defer_if_offline' : 'immediate');
+      attemptedDeliveryPolicy = effectiveDeliveryPolicy;
       if (effectiveDeliveryPolicy == 'defer_if_offline' &&
           !canUseDeferredTurns) {
+        showUpgradePrompt(
+          reason: NomadeProvider.upgradePromptReasonDeferredTurns,
+        );
         status = 'Queued execution is not available on your current plan.';
         _notifyListenersSafe();
         return;
@@ -285,6 +290,10 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         e2ePromptEnvelope: e2ePromptEnvelope,
         deliveryPolicy: effectiveDeliveryPolicy,
       );
+      if (upgradePromptReason ==
+          NomadeProvider.upgradePromptReasonConcurrentConversations) {
+        clearUpgradePrompt();
+      }
 
       final createdTurnId = turn['id'] as String?;
       final createdDeliveryState = turn['delivery_state']?.toString() ?? '';
@@ -321,6 +330,17 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
       if (await _logoutIfUnauthorized(e)) {
         return;
       }
+      if (e.errorCode == 'feature_not_enabled' &&
+          attemptedDeliveryPolicy == 'defer_if_offline') {
+        showUpgradePrompt(
+          reason: NomadeProvider.upgradePromptReasonDeferredTurns,
+        );
+      }
+      if (e.errorCode == 'concurrent_conversation_limit_reached') {
+        showUpgradePrompt(
+          reason: NomadeProvider.upgradePromptReasonConcurrentConversations,
+        );
+      }
       final conversationId = selectedConversation?.id;
       if (conversationId != null) {
         final runtime = _runtimeByConversation.putIfAbsent(
@@ -347,7 +367,12 @@ extension NomadeProviderTurnsAndScanMethods on NomadeProvider {
         }
         await loadTurns(conversationId);
       }
-      status = 'Error: ${e.message}';
+      if (e.errorCode == 'concurrent_conversation_limit_reached') {
+        status =
+            'Free tier can only run one conversation at a time. Wait for the other run to finish or upgrade to Pro.';
+      } else {
+        status = 'Error: ${e.message}';
+      }
       _notifyListenersSafe();
     } catch (e) {
       final conversationId = selectedConversation?.id;

@@ -29,6 +29,13 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     _notifyListenersSafe();
   }
 
+  Future<void> resetApiBaseUrl({bool clearSession = true}) {
+    return setApiBaseUrl(
+      defaultApiBaseUrl,
+      clearSession: clearSession,
+    );
+  }
+
   void setSelectedSkillPaths(List<String> paths) {
     final normalized = paths
         .map((entry) => entry.trim())
@@ -119,6 +126,74 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       return true;
     }
     return error.errorCode?.trim().toLowerCase() == 'rate_limited';
+  }
+
+  bool _hasTrackedOtherActiveConversation({String? excludeConversationId}) {
+    for (final conversation in conversations) {
+      if (excludeConversationId != null &&
+          conversation.id == excludeConversationId) {
+        continue;
+      }
+      if (conversation.status == 'running' || conversation.status == 'queued') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void showUpgradePrompt({required String reason}) {
+    final normalized = reason.trim();
+    if (normalized.isEmpty) {
+      return;
+    }
+    _upgradePromptReason = normalized;
+    _upgradePromptDismissed = false;
+    _notifyListenersSafe();
+  }
+
+  void dismissUpgradePrompt() {
+    if (_upgradePromptReason == null || _upgradePromptDismissed) {
+      return;
+    }
+    _upgradePromptDismissed = true;
+    _notifyListenersSafe();
+  }
+
+  void clearUpgradePrompt() {
+    if (_upgradePromptReason == null && !_upgradePromptDismissed) {
+      return;
+    }
+    _upgradePromptReason = null;
+    _upgradePromptDismissed = false;
+    _notifyListenersSafe();
+  }
+
+  void _syncUpgradePromptState() {
+    if (hasCloudProAccess || isSelfHostedEndpoint) {
+      _upgradePromptReason = null;
+      _upgradePromptDismissed = false;
+      return;
+    }
+    if (_upgradePromptReason == NomadeProvider.upgradePromptReasonDeferredTurns &&
+        canUseDeferredTurns) {
+      _upgradePromptReason = null;
+      _upgradePromptDismissed = false;
+      return;
+    }
+    if (_upgradePromptReason == NomadeProvider.upgradePromptReasonDeviceLimit &&
+        deviceLimitReached != true) {
+      _upgradePromptReason = null;
+      _upgradePromptDismissed = false;
+      return;
+    }
+    if (_upgradePromptReason ==
+            NomadeProvider.upgradePromptReasonConcurrentConversations &&
+        !_hasTrackedOtherActiveConversation(
+          excludeConversationId: selectedConversation?.id,
+        )) {
+      _upgradePromptReason = null;
+      _upgradePromptDismissed = false;
+    }
   }
 
   int _resolveRateLimitWaitSec(ApiException error,
@@ -227,7 +302,18 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       return;
     }
 
-    final registration = await NativeNotificationsBridge.getPushRegistration();
+    NativePushRegistration? registration;
+    for (var attempt = 0; attempt < 4; attempt++) {
+      registration = await NativeNotificationsBridge.getPushRegistration();
+      if (registration != null) {
+        break;
+      }
+      if (attempt < 3) {
+        await Future<void>.delayed(
+          Duration(milliseconds: 500 * (attempt + 1)),
+        );
+      }
+    }
     if (registration == null) {
       pushRegistrationError = 'native_push_token_unavailable';
       return;
@@ -449,7 +535,8 @@ extension NomadeProviderCoreMethods on NomadeProvider {
 
   Future<void> restoreSession() async {
     try {
-      final storedApiBaseUrl = await _readStorage(NomadeProvider._apiBaseUrlKey);
+      final storedApiBaseUrl =
+          await _readStorage(NomadeProvider._apiBaseUrlKey);
       if (storedApiBaseUrl != null && storedApiBaseUrl.trim().isNotEmpty) {
         try {
           _api = NomadeApi(
@@ -632,6 +719,8 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     accessTokenExpiresAt = null;
     planCode = null;
     entitlementSource = null;
+    currentUserId = null;
+    currentUserEmail = null;
     currentAgents = null;
     maxAgents = null;
     deviceLimitReached = null;
@@ -666,6 +755,8 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     _pendingScanShortCode = null;
     _securityError = null;
     _secureScanApprovalInProgress = false;
+    _upgradePromptReason = null;
+    _upgradePromptDismissed = false;
     _offlineTurnDefault = 'prompt';
     activeTurnId = null;
     status = 'Logged out';
@@ -675,6 +766,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     socket?.sink.close();
     realtimeConnected = false;
 
+    unawaited(RevenueCatService.logOut());
     await _storage.deleteAll();
     await _writeStorage(
       NomadeProvider._apiBaseUrlKey,
@@ -829,8 +921,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       planCode = payload['planCode']?.toString() ??
           payload['plan_code']?.toString() ??
           planCode;
-      entitlementSource =
-          payload['source']?.toString() ?? entitlementSource;
+      entitlementSource = payload['source']?.toString() ?? entitlementSource;
       currentAgents =
           _asInt(payload['currentAgents'] ?? payload['current_agents']) ??
               currentAgents;
@@ -864,6 +955,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
         canUsePushNotifications = false;
         canUseDeferredTurns = false;
       }
+      _syncUpgradePromptState();
       unawaited(syncNativePushRegistration());
       if (notifyListenersNow) {
         _notifyListenersSafe();
@@ -875,6 +967,33 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     }
   }
 
+  Future<void> loadCurrentUser({bool notifyListenersNow = true}) async {
+    final token = accessToken;
+    if (token == null) {
+      return;
+    }
+    try {
+      final payload = await api.getMe(token);
+      currentUserId = payload['id']?.toString() ?? currentUserId;
+      currentUserEmail = payload['email']?.toString() ?? currentUserEmail;
+      if (notifyListenersNow) {
+        _notifyListenersSafe();
+      }
+    } catch (error) {
+      if (await _logoutIfUnauthorized(error)) {
+        return;
+      }
+    }
+  }
+
+  Future<void> refreshBillingState({bool notifyListenersNow = true}) async {
+    await loadCurrentUser(notifyListenersNow: false);
+    await loadEntitlements(notifyListenersNow: false);
+    if (notifyListenersNow) {
+      _notifyListenersSafe();
+    }
+  }
+
   Future<void> bootstrapData(
       {String? storedAgentId,
       String? storedWorkspaceId,
@@ -882,6 +1001,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
     loadingData = true;
     _notifyListenersSafe();
     try {
+      await loadCurrentUser(notifyListenersNow: false);
       await loadEntitlements(notifyListenersNow: false);
       final loadedAgents = await api.listAgents(accessToken!);
       agents = loadedAgents.map((e) => Agent.fromJson(e)).toList();
@@ -1023,6 +1143,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
         turns = [];
         unawaited(persistSession());
       }
+      _syncUpgradePromptState();
       _notifyListenersSafe();
     } catch (e) {
       if (requestToken != _loadConversationsRequestToken) {
@@ -1156,6 +1277,7 @@ extension NomadeProviderCoreMethods on NomadeProvider {
       } else if (_selectedConversation?.id == conversationId) {
         activeTurnId = null;
       }
+      _syncUpgradePromptState();
       unawaited(_persistE2ERuntime());
       _notifyListenersSafe();
     } on E2ERuntimeException catch (error) {

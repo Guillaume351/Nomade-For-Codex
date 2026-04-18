@@ -108,32 +108,16 @@ Token hygiene:
 
 ## 8) Mobile Runtime / Native Bridges
 
-### Default mode (no flag)
+### Automatic mode (no flag)
 
-Run app without:
-
-```bash
---dart-define=NOMADE_ENABLE_NATIVE_NOTIFICATIONS=true
-```
+Run app normally (no extra `dart-define` needed).
 
 Expected:
 
 - app runs normally
-- no crashes from missing native integrations
-- push/live status bridge is disabled by design
-
-### Enabled mode
-
-Run with:
-
-```bash
---dart-define=NOMADE_ENABLE_NATIVE_NOTIFICATIONS=true
-```
-
-Expected:
-
-- if native channels are still no-op, app still runs (no regressions)
-- once native handlers are implemented, push token registration and runtime status calls execute.
+- if Firebase mobile config files are present, push token registration is attempted
+- if Firebase mobile config files are missing, push registration is skipped gracefully
+- runtime status bridge calls remain no-op safe when unsupported by platform/runtime
 
 ## 9) npm Publish Flow (Phase 1D)
 

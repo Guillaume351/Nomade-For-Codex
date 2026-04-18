@@ -21,6 +21,14 @@ pnpm-debug.log*
 .env
 .env.*
 !.env.example
+*.p8
+**/AuthKey_*.p8
+**/firebase-adminsdk-*.json
+**/*service-account*.json
+apps/mobile/android/app/google-services.json
+apps/mobile/ios/Runner/GoogleService-Info.plist
+apps/mobile/lib/firebase_options.dart
+apps/mobile/firebase.json
 
 # Temp / cache
 .cache/

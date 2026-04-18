@@ -11,6 +11,8 @@ import '../providers/nomade_provider.dart';
 import '../screens/onboarding_screen.dart';
 import 'app_motion.dart';
 import 'e2e_guide_sheet.dart';
+import 'pro_paywall_sheet.dart';
+import 'server_endpoint_dialog.dart';
 import 'tunnel_manager_sheet.dart';
 
 class Sidebar extends StatefulWidget {
@@ -139,65 +141,18 @@ class _SidebarState extends State<Sidebar> {
     BuildContext context,
     NomadeProvider provider,
   ) async {
-    final controller = TextEditingController(text: provider.apiBaseUrl);
-    String? validationError;
-    final normalized = await showDialog<String>(
-      context: context,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (dialogContext, setDialogState) => AlertDialog(
-            title: const Text('Set server endpoint'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                TextField(
-                  controller: controller,
-                  keyboardType: TextInputType.url,
-                  autofocus: true,
-                  decoration: InputDecoration(
-                    labelText: 'API base URL',
-                    hintText: 'https://app.example.com',
-                    errorText: validationError,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Use your self-host endpoint to run without Nomade cloud subscription limits.',
-                  style: TextStyle(fontSize: 12),
-                ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(dialogContext).pop(),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () {
-                  final raw = controller.text.trim();
-                  try {
-                    final next = NomadeProvider.normalizeApiBaseUrl(raw);
-                    Navigator.of(dialogContext).pop(next);
-                  } on FormatException catch (error) {
-                    setDialogState(() {
-                      validationError = error.message;
-                    });
-                  }
-                },
-                child: const Text('Apply'),
-              ),
-            ],
-          ),
-        );
-      },
+    final result = await showServerEndpointDialog(
+      context,
+      currentUrl: provider.apiBaseUrl,
+      defaultUrl: provider.defaultApiBaseUrl,
+      helperText:
+          'Use your self-host endpoint to run without Nomade cloud subscription limits.',
     );
-    controller.dispose();
-
-    if (normalized == null || !context.mounted) {
+    if (result == null || !context.mounted) {
       return;
     }
 
+    final normalized = result.normalizedUrl;
     final current = provider.apiBaseUrl.replaceAll(RegExp(r'/$'), '');
     if (normalized == current) {
       return;
@@ -238,7 +193,13 @@ class _SidebarState extends State<Sidebar> {
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Server endpoint set to ${provider.apiBaseUrl}')),
+      SnackBar(
+        content: Text(
+          result.isReset
+              ? 'Server endpoint reset to ${provider.apiBaseUrl}'
+              : 'Server endpoint set to ${provider.apiBaseUrl}',
+        ),
+      ),
     );
     if (!provider.isAuthenticated) {
       Navigator.of(context).pushAndRemoveUntil(
@@ -302,7 +263,9 @@ class _SidebarState extends State<Sidebar> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            message.isEmpty ? 'Account deletion failed. Please retry.' : message,
+            message.isEmpty
+                ? 'Account deletion failed. Please retry.'
+                : message,
           ),
         ),
       );
@@ -1200,9 +1163,9 @@ class _SidebarState extends State<Sidebar> {
 
   Widget _buildToolsSection(BuildContext context, NomadeProvider provider) {
     final theme = Theme.of(context);
-    final isSelfHost = provider.entitlementSource == 'self_host' ||
-        provider.planCode == 'self_host';
-    final hasQuota = provider.currentAgents != null && provider.maxAgents != null;
+    final isSelfHost = provider.isSelfHostedEndpoint;
+    final hasQuota =
+        provider.currentAgents != null && provider.maxAgents != null;
     final quotaLabel = hasQuota
         ? '${provider.currentAgents}/${provider.maxAgents} paired devices'
         : 'Quota unavailable';
@@ -1233,6 +1196,13 @@ class _SidebarState extends State<Sidebar> {
             provider.apiBaseUrl,
             style: const TextStyle(fontSize: 11),
           ),
+          trailing: provider.isUsingDefaultApiBaseUrl
+              ? null
+              : Icon(
+                  Icons.restart_alt_rounded,
+                  size: 18,
+                  color: theme.colorScheme.primary,
+                ),
           onTap: () async {
             await _editApiEndpoint(context, provider);
           },
@@ -1256,9 +1226,30 @@ class _SidebarState extends State<Sidebar> {
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
-            leading: const Icon(Icons.sell_outlined),
-            title: const Text('View pricing'),
+            leading: Icon(
+              provider.billingUiSupported && provider.billingConfigured
+                  ? Icons.workspace_premium_outlined
+                  : Icons.sell_outlined,
+            ),
+            title: Text(
+              provider.billingUiSupported && provider.billingConfigured
+                  ? 'Upgrade to Pro'
+                  : 'View pricing',
+            ),
+            subtitle: provider.billingUiSupported && provider.billingConfigured
+                ? const Text(
+                    'Open the in-app subscription sheet',
+                    style: TextStyle(fontSize: 11),
+                  )
+                : null,
             onTap: () async {
+              if (provider.billingUiSupported && provider.billingConfigured) {
+                await showProPaywallSheet(
+                  context,
+                  sourceLabel: 'Tools & account',
+                );
+                return;
+              }
               await _openExternalUrl(
                 context,
                 _publicUrlForApiBase(provider.api.baseUrl, '/pricing'),

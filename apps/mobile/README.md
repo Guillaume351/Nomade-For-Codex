@@ -50,6 +50,22 @@ You can override API URL:
 fvm flutter run -d macos --dart-define NOMADE_API_URL=http://localhost:8080
 ```
 
+RevenueCat mobile billing keys:
+```bash
+fvm flutter run -d <ios-device-id> \
+  --dart-define NOMADE_API_URL=http://<MAC_LAN_IP>:8080 \
+  --dart-define NOMADE_RC_APPLE_API_KEY=appl_xxxxxxxxxxxxx
+```
+
+For Android builds:
+```bash
+fvm flutter run -d <android-device-id> \
+  --dart-define NOMADE_API_URL=http://10.0.2.2:8080 \
+  --dart-define NOMADE_RC_GOOGLE_API_KEY=goog_xxxxxxxxxxxxx
+```
+
+The mobile app passes Nomade `/me.id` to RevenueCat as `appUserID`, which must match the RevenueCat webhook mapping expected by the control API.
+
 Dev auto-login (used by `npm run dev:full`):
 ```bash
 fvm flutter run -d macos \

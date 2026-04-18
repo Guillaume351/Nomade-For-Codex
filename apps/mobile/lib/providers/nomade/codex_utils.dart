@@ -221,6 +221,59 @@ class NomadeCodexUtils {
     return byPath.values.toList(growable: false);
   }
 
+  static List<Map<String, dynamic>> normalizeCodexMcpServersPayload(
+    dynamic rawServers,
+  ) {
+    final rows = (rawServers as List?)
+            ?.whereType<Map>()
+            .map((entry) => entry.cast<String, dynamic>())
+            .toList() ??
+        const <Map<String, dynamic>>[];
+    final byName = <String, Map<String, dynamic>>{};
+
+    for (final row in rows) {
+      final name = normalizeString(row['name'] ?? row['serverName'] ?? row['id']);
+      if (name == null) {
+        continue;
+      }
+      final authRaw =
+          row['auth'] is Map ? (row['auth'] as Map).cast<String, dynamic>() : null;
+      final authStatus = normalizeString(row['authStatus']) ??
+          normalizeString(authRaw?['status']) ??
+          normalizeString(authRaw?['state']);
+      final authRequiredRaw = authRaw == null ? null : authRaw['required'];
+      final authRequired = row['authRequired'] is bool
+          ? row['authRequired'] as bool
+          : authRequiredRaw is bool
+              ? authRequiredRaw
+              : null;
+      final toolCount =
+          row['toolCount'] is num ? (row['toolCount'] as num).toInt() : null;
+      final resourceCount = row['resourceCount'] is num
+          ? (row['resourceCount'] as num).toInt()
+          : null;
+      byName[name] = {
+        ...row,
+        'name': name,
+        if (row['enabled'] is bool) 'enabled': row['enabled'],
+        if (row['required'] is bool) 'required': row['required'],
+        if (authStatus != null) 'authStatus': authStatus,
+        if (authRequired != null) 'authRequired': authRequired,
+        if (toolCount != null && toolCount >= 0) 'toolCount': toolCount,
+        if (resourceCount != null && resourceCount >= 0)
+          'resourceCount': resourceCount,
+      };
+    }
+
+    final values = byName.values.toList(growable: false);
+    values.sort((a, b) {
+      final left = a['name']?.toString() ?? '';
+      final right = b['name']?.toString() ?? '';
+      return left.compareTo(right);
+    });
+    return values;
+  }
+
   static String? defaultCollaborationModeSlugFor(
     List<Map<String, dynamic>> modes,
   ) {

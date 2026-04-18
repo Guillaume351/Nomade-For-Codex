@@ -214,6 +214,18 @@ class NomadeApi {
     return _decodeObject(response);
   }
 
+  Future<Map<String, dynamic>> getMe(String accessToken) async {
+    final response = await _send(
+      () => http.get(
+        _uri('/me'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+        },
+      ),
+    );
+    return _decodeObject(response);
+  }
+
   Future<Map<String, dynamic>> getE2EDevices({
     required String accessToken,
   }) async {
@@ -263,6 +275,28 @@ class NomadeApi {
           queryParameters: query.isEmpty ? null : query,
         ),
         headers: {'authorization': 'Bearer $accessToken'},
+      ),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> setCodexMcpServerEnabled({
+    required String accessToken,
+    required String agentId,
+    required String name,
+    required bool enabled,
+  }) async {
+    final response = await _send(
+      () => http.post(
+        _uri('/agents/$agentId/codex/mcp/server-enabled'),
+        headers: {
+          'authorization': 'Bearer $accessToken',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'name': name,
+          'enabled': enabled,
+        }),
       ),
     );
     return _decodeObject(response);
@@ -750,10 +784,14 @@ class NomadeApi {
 
   WebSocketChannel openUserSocket(String accessToken) {
     final base = Uri.parse(baseUrl);
-    final uri = base.replace(
+    final uri = Uri(
       scheme: base.scheme == 'https' ? 'wss' : 'ws',
+      userInfo: base.userInfo.isEmpty ? null : base.userInfo,
+      host: base.host,
+      port: base.hasPort ? base.port : null,
       path: '/ws',
       queryParameters: {'access_token': accessToken},
+      fragment: null,
     );
     return WebSocketChannel.connect(uri);
   }

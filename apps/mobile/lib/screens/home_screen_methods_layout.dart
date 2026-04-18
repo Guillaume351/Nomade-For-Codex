@@ -550,6 +550,7 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final slashSuggestions = _filteredSlashCommands(provider);
+    final dollarSuggestions = _filteredDollarSuggestions(provider);
     final isPlanMode = provider.isPlanModeSelected();
 
     return Padding(
@@ -609,7 +610,7 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
               AnimatedSize(
                 duration: AppMotion.medium,
                 curve: AppMotion.standardCurve,
-                child: slashSuggestions.isEmpty
+                child: slashSuggestions.isEmpty && dollarSuggestions.isEmpty
                     ? const SizedBox.shrink()
                     : Column(
                         children: [
@@ -627,28 +628,74 @@ extension _HomeScreenLayoutMethods on _HomeScreenState {
                             child: ListView(
                               shrinkWrap: true,
                               padding: const EdgeInsets.symmetric(vertical: 6),
-                              children: slashSuggestions.map((command) {
-                                return ListTile(
-                                  dense: true,
-                                  visualDensity: VisualDensity.compact,
-                                  title: Text(
-                                    command.command,
-                                    style: theme.textTheme.bodyMedium?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                  subtitle: Text(
-                                    command.inlineHelp == null
-                                        ? command.description
-                                        : '${command.description} • ${command.inlineHelp}',
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  onTap: isRunning
-                                      ? null
-                                      : () => _applySlashCommand(command),
-                                );
-                              }).toList(),
+                              children: slashSuggestions.isNotEmpty
+                                  ? slashSuggestions.map((command) {
+                                      return ListTile(
+                                        dense: true,
+                                        visualDensity: VisualDensity.compact,
+                                        title: Text(
+                                          command.command,
+                                          style: theme.textTheme.bodyMedium
+                                              ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                        subtitle: Text(
+                                          command.inlineHelp == null
+                                              ? command.description
+                                              : '${command.description} • ${command.inlineHelp}',
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        onTap: isRunning
+                                            ? null
+                                            : () => _applySlashCommand(command),
+                                      );
+                                    }).toList(growable: false)
+                                  : dollarSuggestions.map((suggestion) {
+                                      final kindLabel =
+                                          suggestion.kind ==
+                                                  _ComposerDollarSuggestionKind
+                                                      .skill
+                                              ? 'skill'
+                                              : 'MCP';
+                                      final subtitle = suggestion.description
+                                              .trim()
+                                              .isEmpty
+                                          ? kindLabel
+                                          : '$kindLabel • ${suggestion.description}';
+                                      return ListTile(
+                                        dense: true,
+                                        visualDensity: VisualDensity.compact,
+                                        title: Text(
+                                          suggestion.token,
+                                          style: theme.textTheme.bodyMedium
+                                              ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                        subtitle: Text(
+                                          subtitle,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        trailing: Icon(
+                                          suggestion.enabled
+                                              ? Icons.check_circle_rounded
+                                              : Icons.circle_outlined,
+                                          size: 18,
+                                          color: suggestion.enabled
+                                              ? scheme.primary
+                                              : scheme.onSurfaceVariant,
+                                        ),
+                                        onTap: isRunning
+                                            ? null
+                                            : () => _applyDollarSuggestion(
+                                                  suggestion,
+                                                  provider,
+                                                ),
+                                      );
+                                    }).toList(growable: false),
                             ),
                           ),
                           const SizedBox(height: 8),

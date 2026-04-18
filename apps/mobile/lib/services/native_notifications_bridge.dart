@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 
 class NativePushRegistration {
   const NativePushRegistration({
@@ -16,49 +18,73 @@ class NativePushRegistration {
 }
 
 class NativeNotificationsBridge {
-  static const bool enabled = bool.fromEnvironment(
-    'NOMADE_ENABLE_NATIVE_NOTIFICATIONS',
-    defaultValue: false,
-  );
+  static bool get enabled =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.iOS ||
+          defaultTargetPlatform == TargetPlatform.android);
 
-  static const MethodChannel _pushChannel =
-      MethodChannel('nomade/native_notifications');
   static const MethodChannel _runtimeChannel =
       MethodChannel('nomade/runtime_status');
+  static Future<void>? _firebaseInitialization;
+
+  static Future<void> _ensureFirebaseInitialized() {
+    final existing = _firebaseInitialization;
+    if (existing != null) {
+      return existing;
+    }
+    final future = () async {
+      if (Firebase.apps.isNotEmpty) {
+        return;
+      }
+      await Firebase.initializeApp();
+    }();
+    _firebaseInitialization = future;
+    return future;
+  }
 
   static Future<NativePushRegistration?> getPushRegistration() async {
-    if (!enabled || kIsWeb) {
+    if (!enabled) {
       return null;
     }
+
     try {
-      final raw = await _pushChannel.invokeMapMethod<String, dynamic>(
-        'getPushRegistration',
+      await _ensureFirebaseInitialized();
+      final messaging = FirebaseMessaging.instance;
+      await messaging.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+        provisional: false,
       );
-      if (raw == null) {
-        return null;
+
+      String? fcmToken;
+      for (var attempt = 0; attempt < 4; attempt++) {
+        fcmToken = await messaging.getToken();
+        if (fcmToken != null && fcmToken.trim().isNotEmpty) {
+          break;
+        }
+        if (attempt < 3) {
+          await Future<void>.delayed(
+            Duration(milliseconds: 500 * (attempt + 1)),
+          );
+        }
       }
-      final token = raw['token']?.toString().trim() ?? '';
-      if (token.isEmpty) {
-        return null;
+      final token = fcmToken?.trim() ?? '';
+      if (token.isNotEmpty) {
+        return NativePushRegistration(
+          provider: 'fcm',
+          platform: defaultTargetPlatform.name,
+          token: token,
+          // Leave empty so provider can fall back to secure-storage-backed ID.
+          deviceId: '',
+        );
       }
-      final provider = raw['provider']?.toString().trim();
-      final platform = raw['platform']?.toString().trim();
-      final deviceId = raw['deviceId']?.toString().trim();
-      return NativePushRegistration(
-        provider: provider != null && provider.isNotEmpty ? provider : 'fcm',
-        platform: platform != null && platform.isNotEmpty
-            ? platform
-            : defaultTargetPlatform.name,
-        token: token,
-        deviceId: deviceId != null && deviceId.isNotEmpty
-            ? deviceId
-            : 'mobile-${defaultTargetPlatform.name}',
-      );
-    } on MissingPluginException {
+    } on FirebaseException {
       return null;
-    } on PlatformException {
+    } on UnsupportedError {
       return null;
     }
+    return null;
   }
 
   static Future<void> setRunningStatus({
@@ -79,9 +105,18 @@ class NativeNotificationsBridge {
           'subtitle': subtitle.trim(),
       });
     } on MissingPluginException {
-      // no-op when native bridge is unavailable
-    } on PlatformException {
-      // no-op when native bridge errors
+      if (kDebugMode) {
+        debugPrint(
+          '[nomade/runtime_status] native bridge unavailable for setRunningStatus',
+        );
+      }
+    } on PlatformException catch (error) {
+      if (kDebugMode) {
+        debugPrint(
+          '[nomade/runtime_status] setRunningStatus failed: '
+          '${error.code} ${error.message ?? ""}'.trim(),
+        );
+      }
     }
   }
 
@@ -98,9 +133,18 @@ class NativeNotificationsBridge {
         'turnId': turnId,
       });
     } on MissingPluginException {
-      // no-op when native bridge is unavailable
-    } on PlatformException {
-      // no-op when native bridge errors
+      if (kDebugMode) {
+        debugPrint(
+          '[nomade/runtime_status] native bridge unavailable for clearRunningStatus',
+        );
+      }
+    } on PlatformException catch (error) {
+      if (kDebugMode) {
+        debugPrint(
+          '[nomade/runtime_status] clearRunningStatus failed: '
+          '${error.code} ${error.message ?? ""}'.trim(),
+        );
+      }
     }
   }
 }

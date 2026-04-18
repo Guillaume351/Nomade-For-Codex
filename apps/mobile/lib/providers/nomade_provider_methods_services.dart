@@ -12,6 +12,8 @@ extension NomadeProviderServiceMethods on NomadeProvider {
             payload['collaborationModes']);
     codexSkills =
         NomadeCodexUtils.normalizeCodexSkillsPayload(payload['skills']);
+    codexMcpServers =
+        NomadeCodexUtils.normalizeCodexMcpServersPayload(payload['mcpServers']);
     codexRateLimits = _asStringKeyedMap(payload['rateLimits']);
     codexRateLimitsByLimitId =
         _normalizeRateLimitsByLimitId(payload['rateLimitsByLimitId']);
@@ -74,6 +76,56 @@ extension NomadeProviderServiceMethods on NomadeProvider {
         .where((path) => availableSkillPaths.contains(path))
         .toList()
       ..sort();
+  }
+
+  Future<bool> setCodexMcpServerEnabled({
+    required String name,
+    required bool enabled,
+  }) async {
+    final token = accessToken;
+    final agent = selectedAgent;
+    final normalizedName = name.trim();
+    if (token == null || agent == null || normalizedName.isEmpty) {
+      return false;
+    }
+    try {
+      await api.setCodexMcpServerEnabled(
+        accessToken: token,
+        agentId: agent.id,
+        name: normalizedName,
+        enabled: enabled,
+      );
+      final index = codexMcpServers.indexWhere(
+        (entry) => entry['name']?.toString() == normalizedName,
+      );
+      if (index == -1) {
+        codexMcpServers = [
+          ...codexMcpServers,
+          {
+            'name': normalizedName,
+            'enabled': enabled,
+          }
+        ];
+      } else {
+        codexMcpServers[index] = {
+          ...codexMcpServers[index],
+          'enabled': enabled,
+        };
+      }
+      status = enabled
+          ? 'MCP server enabled: $normalizedName'
+          : 'MCP server disabled: $normalizedName';
+      _notifyListenersSafe();
+      await loadCodexOptions();
+      return true;
+    } catch (error) {
+      if (await _logoutIfUnauthorized(error)) {
+        return false;
+      }
+      status = 'Failed to update MCP server "$normalizedName": $error';
+      _notifyListenersSafe();
+      return false;
+    }
   }
 
   Future<void> loadDevSettings() async {

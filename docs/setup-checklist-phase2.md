@@ -56,21 +56,20 @@ Without this config, push delivery is skipped but app flows keep working.
 Current bridge status:
 
 - iOS `nomade/runtime_status` is implemented (ActivityKit start/update/end).
-- iOS `nomade/native_notifications` now captures native token state, but backend registration requires FCM token format.
-- Android native channels are still no-op.
+- Push token registration now uses `firebase_messaging` in Flutter.
+- If Firebase mobile config is missing on a device/build, push registration is skipped (no crash).
 
 To fully enable native push + live status:
 
-1. Finish push token provider alignment:
-   - iOS must return an FCM registration token for backend `provider: "fcm"` (APNs-only token is insufficient).
-   - Android `nomade/native_notifications` still needs real token implementation.
+1. Ensure Firebase mobile app config files are present in local/release builds:
+   - Android: `android/app/google-services.json`
+   - iOS: `ios/Runner/GoogleService-Info.plist`
 2. Complete Xcode Live Activity wiring:
    - Widget extension target with Live Activity UI.
    - Runner capabilities/signing for Push Notifications + Background remote notifications.
-3. Build mobile app with:
-   - `--dart-define=NOMADE_ENABLE_NATIVE_NOTIFICATIONS=true`
+3. Upload APNs key/cert in Firebase project settings for iOS push delivery.
 
-If you do not enable this flag or native bridge logic, app behavior remains unchanged (no regressions).
+No extra `--dart-define` flag is required for notification registration.
 
 Detailed Xcode steps for iOS Live Activities are in `docs/ios-live-activities-xcode-todo.md`.
 

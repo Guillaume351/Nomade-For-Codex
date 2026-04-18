@@ -54,8 +54,7 @@ Notes:
 
 ## 7) Runtime verification sequence
 
-1. Build app with:
-   - `--dart-define=NOMADE_ENABLE_NATIVE_NOTIFICATIONS=true`
+1. Build app normally (no extra `dart-define` required).
 2. Start a turn in app and confirm `setRunningStatus` is invoked.
 3. In Xcode console, look for ActivityKit errors.
 4. Confirm Live Activity appears on Lock Screen / Dynamic Island.

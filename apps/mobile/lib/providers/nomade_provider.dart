@@ -22,6 +22,7 @@ import 'nomade/diagnostics_models.dart';
 import 'nomade/support_report_builder.dart';
 import '../services/mobile_e2e_runtime.dart';
 import '../services/native_notifications_bridge.dart';
+import '../services/revenuecat_service.dart';
 import '../services/secure_scan_parser.dart';
 
 part 'nomade_provider_methods_core.dart';
@@ -32,11 +33,20 @@ part 'nomade_provider_methods_turns_scan.dart';
 
 class NomadeProvider with ChangeNotifier {
   NomadeProvider({required String baseUrl})
-      : _api = NomadeApi(baseUrl: normalizeApiBaseUrl(baseUrl));
+      : _defaultApiBaseUrl = normalizeApiBaseUrl(baseUrl),
+        _api = NomadeApi(baseUrl: normalizeApiBaseUrl(baseUrl));
 
+  static const upgradePromptReasonDeferredTurns = 'deferred_turns';
+  static const upgradePromptReasonDeviceLimit = 'device_limit';
+  static const upgradePromptReasonConcurrentConversations =
+      'concurrent_conversations';
+
+  final String _defaultApiBaseUrl;
   NomadeApi _api;
   NomadeApi get api => _api;
   String get apiBaseUrl => _api.baseUrl;
+  String get defaultApiBaseUrl => _defaultApiBaseUrl;
+  bool get isUsingDefaultApiBaseUrl => apiBaseUrl == _defaultApiBaseUrl;
   final _storage = const FlutterSecureStorage();
 
   static const _accessTokenKey = 'nomade.access_token';
@@ -102,6 +112,8 @@ class NomadeProvider with ChangeNotifier {
   DateTime? accessTokenExpiresAt;
   String? planCode;
   String? entitlementSource;
+  String? currentUserId;
+  String? currentUserEmail;
   String? deviceCode;
   String? userCode;
   int? currentAgents;
@@ -141,11 +153,31 @@ class NomadeProvider with ChangeNotifier {
   bool _strictFailureInProgress = false;
   bool _cancelLoginWait = false;
   bool _secureScanApprovalInProgress = false;
+  String? _upgradePromptReason;
+  bool _upgradePromptDismissed = false;
 
   bool get e2eReady => _e2eRuntime?.isReady == true;
   String? get securityError => _securityError;
   String? get pendingScanPayload => _pendingScanPayload;
   String? get pendingScanShortCode => _pendingScanShortCode;
+  bool get isSelfHostedEndpoint =>
+      entitlementSource == 'self_host' || planCode == 'self_host';
+  bool get hasCloudProAccess {
+    final normalized = planCode?.trim().toLowerCase();
+    if (normalized == null || normalized.isEmpty) {
+      return false;
+    }
+    return normalized != 'free' && normalized != 'self_host';
+  }
+
+  bool get shouldShowUpgradePrompt =>
+      !isSelfHostedEndpoint &&
+      !hasCloudProAccess &&
+      _upgradePromptReason != null &&
+      !_upgradePromptDismissed;
+  String? get upgradePromptReason => _upgradePromptReason;
+  bool get billingUiSupported => RevenueCatService.isSupportedOnCurrentPlatform;
+  bool get billingConfigured => RevenueCatService.hasApiKeyForCurrentPlatform;
   int? get remainingAgentSlots {
     final current = currentAgents;
     final max = maxAgents;
@@ -322,6 +354,7 @@ class NomadeProvider with ChangeNotifier {
   List<Map<String, dynamic>> codexModels = [];
   List<Map<String, dynamic>> codexCollaborationModes = [];
   List<Map<String, dynamic>> codexSkills = [];
+  List<Map<String, dynamic>> codexMcpServers = [];
   Map<String, dynamic>? codexRateLimits;
   Map<String, Map<String, dynamic>> codexRateLimitsByLimitId = {};
   List<String> codexApprovalPolicies = [

@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../providers/nomade_provider.dart';
 import '../widgets/app_motion.dart';
+import '../widgets/server_endpoint_dialog.dart';
 import 'home_screen.dart';
 import 'secure_scan_camera_screen.dart';
 
@@ -42,63 +43,17 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _editServerEndpoint() async {
     final provider = context.read<NomadeProvider>();
-    final controller = TextEditingController(text: provider.apiBaseUrl);
-    String? validationError;
-    final normalized = await showDialog<String>(
-      context: context,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (dialogContext, setDialogState) => AlertDialog(
-            title: const Text('Set server endpoint'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                TextField(
-                  controller: controller,
-                  keyboardType: TextInputType.url,
-                  autofocus: true,
-                  decoration: InputDecoration(
-                    labelText: 'API base URL',
-                    hintText: 'https://app.example.com',
-                    errorText: validationError,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Use your self-host endpoint to avoid Nomade cloud subscription limits.',
-                  style: TextStyle(fontSize: 12),
-                ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(dialogContext).pop(),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () {
-                  final raw = controller.text.trim();
-                  try {
-                    final next = NomadeProvider.normalizeApiBaseUrl(raw);
-                    Navigator.of(dialogContext).pop(next);
-                  } on FormatException catch (error) {
-                    setDialogState(() {
-                      validationError = error.message;
-                    });
-                  }
-                },
-                child: const Text('Apply'),
-              ),
-            ],
-          ),
-        );
-      },
+    final result = await showServerEndpointDialog(
+      context,
+      currentUrl: provider.apiBaseUrl,
+      defaultUrl: provider.defaultApiBaseUrl,
+      helperText:
+          'Use your self-host endpoint to avoid Nomade cloud subscription limits.',
     );
-    controller.dispose();
-    if (normalized == null || !mounted) {
+    if (result == null || !mounted) {
       return;
     }
+    final normalized = result.normalizedUrl;
     final current = provider.apiBaseUrl.replaceAll(RegExp(r'/$'), '');
     if (normalized == current) {
       return;
@@ -108,7 +63,29 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Server endpoint set to ${provider.apiBaseUrl}')),
+      SnackBar(
+        content: Text(
+          result.isReset
+              ? 'Server endpoint reset to ${provider.apiBaseUrl}'
+              : 'Server endpoint set to ${provider.apiBaseUrl}',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _resetServerEndpoint() async {
+    final provider = context.read<NomadeProvider>();
+    if (provider.isUsingDefaultApiBaseUrl) {
+      return;
+    }
+    await provider.resetApiBaseUrl(clearSession: false);
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Server endpoint reset to ${provider.apiBaseUrl}'),
+      ),
     );
   }
 
@@ -433,9 +410,19 @@ class _LoginScreenState extends State<LoginScreen> {
                   ],
                 ),
               ),
-              TextButton(
-                onPressed: _isLoading ? null : _editServerEndpoint,
-                child: const Text('Change'),
+              Wrap(
+                spacing: 4,
+                children: [
+                  if (!provider.isUsingDefaultApiBaseUrl)
+                    TextButton(
+                      onPressed: _isLoading ? null : _resetServerEndpoint,
+                      child: const Text('Reset'),
+                    ),
+                  TextButton(
+                    onPressed: _isLoading ? null : _editServerEndpoint,
+                    child: const Text('Change'),
+                  ),
+                ],
               ),
             ],
           ),

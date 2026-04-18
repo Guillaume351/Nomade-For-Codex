@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:super_clipboard/super_clipboard.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/conversation.dart';
 import '../models/turn.dart';
@@ -18,6 +19,8 @@ import '../widgets/e2e_guide_sheet.dart';
 import '../widgets/home/service_terminal_sheet.dart';
 import '../widgets/home/turn_options_sheet.dart';
 import '../widgets/app_motion.dart';
+import '../widgets/pro_paywall_sheet.dart';
+import '../widgets/server_endpoint_dialog.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/tunnel_manager_sheet.dart';
 
@@ -26,6 +29,7 @@ part 'home_screen_methods_topbar.dart';
 part 'home_screen_methods_layout.dart';
 
 enum _TopBarMenuAction {
+  connectionBilling,
   conversationDiff,
   turnOptions,
   copyUsefulLogs,
@@ -53,6 +57,26 @@ class _ComposerSlashCommand {
   final String command;
   final String description;
   final String? inlineHelp;
+}
+
+enum _ComposerDollarSuggestionKind { skill, mcpServer }
+
+class _ComposerDollarSuggestion {
+  const _ComposerDollarSuggestion({
+    required this.kind,
+    required this.token,
+    required this.name,
+    required this.description,
+    this.path,
+    this.enabled = false,
+  });
+
+  final _ComposerDollarSuggestionKind kind;
+  final String token;
+  final String name;
+  final String description;
+  final String? path;
+  final bool enabled;
 }
 
 class _PendingAttachment {

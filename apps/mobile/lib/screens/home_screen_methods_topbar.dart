@@ -1,6 +1,225 @@
 part of 'home_screen.dart';
 
 extension _HomeScreenTopBarMethods on _HomeScreenState {
+  Uri _publicUrlForApiBase(String apiBaseUrl, String path) {
+    final normalizedPath = path.startsWith('/') ? path : '/$path';
+    final base = Uri.parse(apiBaseUrl);
+    return base.replace(
+      path: normalizedPath,
+      queryParameters: null,
+      fragment: null,
+    );
+  }
+
+  String _endpointSummary(String apiBaseUrl) {
+    final uri = Uri.parse(apiBaseUrl);
+    final host = uri.host.trim();
+    if (host.isEmpty) {
+      return apiBaseUrl;
+    }
+    if (uri.hasPort) {
+      return '$host:${uri.port}';
+    }
+    return host;
+  }
+
+  Future<void> _applyServerEndpointChange(
+    NomadeProvider provider, {
+    required String normalizedUrl,
+    required bool isReset,
+  }) async {
+    final current = provider.apiBaseUrl.replaceAll(RegExp(r'/$'), '');
+    if (normalizedUrl == current) {
+      return;
+    }
+
+    var shouldProceed = true;
+    if (provider.isAuthenticated) {
+      shouldProceed = await showDialog<bool>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              title: Text(
+                isReset ? 'Reset endpoint and sign out?' : 'Switch endpoint and sign out?',
+              ),
+              content: Text(
+                isReset
+                    ? 'Resetting the server endpoint signs you out to protect session tokens. Continue?'
+                    : 'Changing the server endpoint signs you out to protect session tokens. Continue?',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                  child: const Text('Continue'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+    }
+    if (!shouldProceed) {
+      return;
+    }
+
+    if (isReset) {
+      await provider.resetApiBaseUrl(clearSession: provider.isAuthenticated);
+    } else {
+      await provider.setApiBaseUrl(
+        normalizedUrl,
+        clearSession: provider.isAuthenticated,
+      );
+    }
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          isReset
+              ? 'Server endpoint reset to ${provider.apiBaseUrl}'
+              : 'Server endpoint set to ${provider.apiBaseUrl}',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _editServerEndpointQuick(NomadeProvider provider) async {
+    final result = await showServerEndpointDialog(
+      context,
+      currentUrl: provider.apiBaseUrl,
+      defaultUrl: provider.defaultApiBaseUrl,
+      helperText:
+          'Use your self-host endpoint to run without Nomade cloud subscription limits.',
+    );
+    if (result == null) {
+      return;
+    }
+    await _applyServerEndpointChange(
+      provider,
+      normalizedUrl: result.normalizedUrl,
+      isReset: result.isReset,
+    );
+  }
+
+  Future<void> _resetServerEndpointQuick(NomadeProvider provider) async {
+    if (provider.isUsingDefaultApiBaseUrl) {
+      return;
+    }
+    await _applyServerEndpointChange(
+      provider,
+      normalizedUrl: provider.defaultApiBaseUrl,
+      isReset: true,
+    );
+  }
+
+  Future<void> _openBillingEntryPoint(
+    NomadeProvider provider, {
+    required String sourceLabel,
+  }) async {
+    if (provider.isSelfHostedEndpoint) {
+      await provider.refreshBillingState();
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Self-host endpoint detected. Nomade billing is disabled here.'),
+        ),
+      );
+      return;
+    }
+
+    final canOpenNativePaywall =
+        provider.billingUiSupported && provider.billingConfigured;
+    if (canOpenNativePaywall) {
+      await showProPaywallSheet(
+        context,
+        sourceLabel: sourceLabel,
+      );
+      return;
+    }
+
+    final launched = await launchUrl(
+      _publicUrlForApiBase(provider.apiBaseUrl, '/pricing'),
+      mode: LaunchMode.externalApplication,
+    );
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          launched
+              ? 'Opened pricing page in browser.'
+              : 'Unable to open pricing page.',
+        ),
+      ),
+    );
+  }
+
+  void _showConnectionAndBillingSheet(NomadeProvider provider) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) => Padding(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+        child: Material(
+          color: scheme.surface,
+          borderRadius: BorderRadius.circular(28),
+          clipBehavior: Clip.antiAlias,
+          child: SafeArea(
+            top: false,
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Connection & billing',
+                              style: theme.textTheme.titleLarge?.copyWith(
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Server endpoint and subscription controls stay here, out of the main chat view.',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: scheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: () => Navigator.of(sheetContext).pop(),
+                        icon: const Icon(Icons.close_rounded),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  _buildConnectionBillingPanel(provider),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   bool _onChatScrollNotification(
     ScrollNotification notification,
     NomadeProvider provider,
@@ -200,6 +419,11 @@ extension _HomeScreenTopBarMethods on _HomeScreenState {
               ),
             if (!isCompactTopBar) ...[
               _buildTopAction(
+                icon: Icons.cloud_outlined,
+                tooltip: 'Server endpoint & subscription',
+                onPressed: () => _showConnectionAndBillingSheet(provider),
+              ),
+              _buildTopAction(
                 icon: Icons.menu_book_outlined,
                 tooltip: 'Guide E2E',
                 onPressed: () => showE2eGuideSheet(context),
@@ -256,6 +480,14 @@ extension _HomeScreenTopBarMethods on _HomeScreenState {
                   tooltip: 'Actions',
                   icon: const Icon(Icons.more_horiz_rounded),
                   itemBuilder: (_) => [
+                    const PopupMenuItem(
+                      value: _TopBarMenuAction.connectionBilling,
+                      child: ListTile(
+                        dense: true,
+                        leading: Icon(Icons.cloud_outlined),
+                        title: Text('Connection & billing'),
+                      ),
+                    ),
                     if (provider.selectedConversation != null)
                       const PopupMenuItem(
                         value: _TopBarMenuAction.conversationDiff,
@@ -456,7 +688,8 @@ extension _HomeScreenTopBarMethods on _HomeScreenState {
                           color: scheme.surfaceContainerLowest,
                           borderRadius: BorderRadius.circular(11),
                           border: Border.all(
-                            color: scheme.outlineVariant.withValues(alpha: 0.68),
+                            color:
+                                scheme.outlineVariant.withValues(alpha: 0.68),
                           ),
                         ),
                         child: Column(
@@ -969,6 +1202,7 @@ extension _HomeScreenTopBarMethods on _HomeScreenState {
 
     return Column(
       children: [
+        if (provider.shouldShowUpgradePrompt) _buildUpgradeBanner(provider),
         if (showDiagnostics) _buildConversationDiagnostics(provider),
         Expanded(
           child: AnimatedSwitcher(
@@ -1015,6 +1249,289 @@ extension _HomeScreenTopBarMethods on _HomeScreenState {
         ),
         _buildInputArea(provider),
       ],
+    );
+  }
+
+  Widget _buildConnectionBillingPanel(NomadeProvider provider) {
+    final isSelfHost = provider.isSelfHostedEndpoint;
+    final planHeadline = isSelfHost
+        ? 'Self-hosted'
+        : provider.hasCloudProAccess
+            ? 'Pro active'
+            : 'Free plan';
+    final planSupporting = isSelfHost
+        ? 'No Nomade subscription on this endpoint.'
+        : provider.billingUiSupported && provider.billingConfigured
+            ? 'Open the in-app subscription sheet.'
+            : 'Open pricing in the browser.';
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isWide = constraints.maxWidth >= 720;
+        final cardWidth =
+            isWide ? (constraints.maxWidth - 10) / 2 : constraints.maxWidth;
+        return Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            SizedBox(
+              width: cardWidth,
+              child: _buildQuickAccessCard(
+                icon: Icons.cloud_outlined,
+                title: 'Server endpoint',
+                headline: _endpointSummary(provider.apiBaseUrl),
+                supportingText: provider.isUsingDefaultApiBaseUrl
+                    ? 'Default endpoint: ${provider.apiBaseUrl}'
+                    : 'Custom endpoint: ${provider.apiBaseUrl}',
+                actions: [
+                  FilledButton.tonalIcon(
+                    onPressed: () => _editServerEndpointQuick(provider),
+                    icon: const Icon(Icons.edit_outlined, size: 16),
+                    label: const Text('Change'),
+                  ),
+                  if (!provider.isUsingDefaultApiBaseUrl)
+                    TextButton.icon(
+                      onPressed: () => _resetServerEndpointQuick(provider),
+                      icon: const Icon(Icons.restart_alt_rounded, size: 16),
+                      label: const Text('Reset'),
+                    ),
+                ],
+              ),
+            ),
+            SizedBox(
+              width: cardWidth,
+              child: _buildQuickAccessCard(
+                icon: isSelfHost
+                    ? Icons.dns_outlined
+                    : provider.hasCloudProAccess
+                        ? Icons.workspace_premium_outlined
+                        : Icons.sell_outlined,
+                title: 'Subscription',
+                headline: planHeadline,
+                supportingText: planSupporting,
+                actions: [
+                  FilledButton.tonalIcon(
+                    onPressed: () => _openBillingEntryPoint(
+                      provider,
+                      sourceLabel: 'Connection & billing',
+                    ),
+                    icon: Icon(
+                      isSelfHost
+                          ? Icons.refresh_rounded
+                          : provider.hasCloudProAccess
+                              ? Icons.manage_accounts_outlined
+                              : Icons.workspace_premium_outlined,
+                      size: 16,
+                    ),
+                    label: Text(
+                      isSelfHost
+                          ? 'Refresh status'
+                          : provider.hasCloudProAccess
+                              ? 'Manage'
+                              : 'Upgrade',
+                    ),
+                  ),
+                  if (!isSelfHost)
+                    TextButton(
+                      onPressed: () async {
+                        await provider.refreshBillingState();
+                      },
+                      child: const Text('Refresh'),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildQuickAccessCard({
+    required IconData icon,
+    required String title,
+    required String headline,
+    required String supportingText,
+    required List<Widget> actions,
+  }) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: scheme.surface.withValues(alpha: 0.88),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: scheme.outlineVariant.withValues(alpha: 0.62),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 18, color: scheme.primary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            headline,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            supportingText,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: actions,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUpgradeBanner(NomadeProvider provider) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final reason = provider.upgradePromptReason;
+    final isDeferredTurns =
+        reason == NomadeProvider.upgradePromptReasonDeferredTurns;
+    final isDeviceLimit =
+        reason == NomadeProvider.upgradePromptReasonDeviceLimit;
+    final isConcurrentLimit =
+        reason == NomadeProvider.upgradePromptReasonConcurrentConversations;
+    final quotaKnown =
+        provider.currentAgents != null && provider.maxAgents != null;
+    final quotaLabel = quotaKnown
+        ? '${provider.currentAgents}/${provider.maxAgents} paired devices used'
+        : 'Free tier limits still apply on this account';
+    final title = isDeferredTurns
+        ? 'Queued turns require Pro'
+        : isDeviceLimit
+            ? 'Device limit reached'
+            : isConcurrentLimit
+                ? 'One active conversation on Free'
+            : 'Upgrade available';
+    final message = isDeferredTurns
+        ? 'Queue-for-reconnect is a paid cloud feature. Upgrade if you want turns to wait for an offline agent instead of failing immediately.'
+        : isDeviceLimit
+            ? 'Upgrade to Pro to keep pairing additional devices and unlock paid cloud limits.'
+            : isConcurrentLimit
+                ? 'Free tier can only run one conversation at a time. Upgrade if you want to work across multiple conversations in parallel.'
+            : 'Upgrade to Pro to unlock additional cloud features.';
+    final supporting = isDeferredTurns
+        ? 'This prompt stays dismissed until you try a gated feature again.'
+        : isConcurrentLimit
+            ? 'This prompt stays dismissed until you try to start work in another conversation while one is still active.'
+        : 'Use the connection icon in the top bar to manage billing or switch endpoint.';
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: scheme.primaryContainer.withValues(alpha: 0.58),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: scheme.primary.withValues(alpha: 0.22),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.workspace_premium_rounded,
+                  size: 18, color: scheme.onPrimaryContainer),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: scheme.onPrimaryContainer,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Dismiss',
+                onPressed: provider.dismissUpgradePrompt,
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                  Icons.close_rounded,
+                  size: 18,
+                  color: scheme.onPrimaryContainer,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            message,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: scheme.onPrimaryContainer,
+            ),
+          ),
+          if (isDeviceLimit) ...[
+            const SizedBox(height: 6),
+            Text(
+              quotaLabel,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onPrimaryContainer.withValues(alpha: 0.82),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+          const SizedBox(height: 8),
+          Text(
+            supporting,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onPrimaryContainer.withValues(alpha: 0.82),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilledButton.tonalIcon(
+                onPressed: () => _openBillingEntryPoint(
+                  provider,
+                  sourceLabel: 'Upgrade banner',
+                ),
+                icon: const Icon(Icons.workspace_premium_outlined, size: 16),
+                label: const Text('Upgrade'),
+              ),
+              TextButton(
+                onPressed: provider.dismissUpgradePrompt,
+                child: const Text('Dismiss'),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 

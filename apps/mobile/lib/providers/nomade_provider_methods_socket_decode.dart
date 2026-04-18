@@ -462,5 +462,6 @@ extension NomadeProviderSocketDecodeMethods on NomadeProvider {
         }
       }
     }
+    _syncUpgradePromptState();
   }
 }

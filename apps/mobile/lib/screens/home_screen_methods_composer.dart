@@ -135,7 +135,7 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
         _showSlashStatusSheet(provider);
         return (consumeOnly: true, promptToSend: null);
       case '/mcp':
-        _showSlashMcpSheet();
+        _showSlashMcpSheet(provider);
         return (consumeOnly: true, promptToSend: null);
       case '/plan-mode':
         final wasPlan = provider.isPlanModeSelected();
@@ -323,6 +323,170 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
       selection: TextSelection.collapsed(offset: nextText.length),
     );
     _setStateSafe(() {});
+  }
+
+  String _mcpServerTokenSlug(String name) {
+    final normalized = name
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9_-]+'), '-')
+        .replaceAll(RegExp(r'-{2,}'), '-')
+        .replaceAll(RegExp(r'^-+|-+$'), '');
+    return normalized;
+  }
+
+  List<_ComposerDollarSuggestion> _composerDollarSuggestions(
+    NomadeProvider provider,
+  ) {
+    final suggestions = <_ComposerDollarSuggestion>[];
+
+    for (final skill in provider.codexSkills) {
+      final path = (skill['path']?.toString() ?? '').trim();
+      if (path.isEmpty) {
+        continue;
+      }
+      final slug = _skillCommandSlug(skill);
+      if (slug.isEmpty) {
+        continue;
+      }
+      final name = (skill['name']?.toString() ?? path).trim();
+      final description = (skill['shortDescription']?.toString() ??
+              skill['description']?.toString() ??
+              'Enable this skill for upcoming prompts.')
+          .trim();
+      suggestions.add(
+        _ComposerDollarSuggestion(
+          kind: _ComposerDollarSuggestionKind.skill,
+          token: '\$$slug',
+          name: name.isEmpty ? slug : name,
+          description: description.isEmpty
+              ? 'Enable this skill for upcoming prompts.'
+              : description,
+          path: path,
+          enabled: provider.selectedSkillPaths.contains(path),
+        ),
+      );
+    }
+
+    for (final server in provider.codexMcpServers) {
+      final name = (server['name']?.toString() ?? '').trim();
+      if (name.isEmpty) {
+        continue;
+      }
+      final slug = _mcpServerTokenSlug(name);
+      if (slug.isEmpty) {
+        continue;
+      }
+      final enabled = server['enabled'] is bool ? server['enabled'] == true : true;
+      final authStatus = (server['authStatus']?.toString() ?? '').trim();
+      final toolCount = server['toolCount'] is num
+          ? (server['toolCount'] as num).toInt()
+          : null;
+      final statusText = authStatus.isNotEmpty ? 'auth: $authStatus' : null;
+      final toolText = toolCount != null ? '$toolCount tools' : null;
+      final details = [statusText, toolText]
+          .whereType<String>()
+          .where((entry) => entry.isNotEmpty)
+          .join(' • ');
+      suggestions.add(
+        _ComposerDollarSuggestion(
+          kind: _ComposerDollarSuggestionKind.mcpServer,
+          token: '\$$slug',
+          name: name,
+          description: details.isEmpty
+              ? 'Toggle MCP server for this agent.'
+              : 'Toggle MCP server for this agent • $details',
+          enabled: enabled,
+        ),
+      );
+    }
+
+    suggestions.sort((a, b) => a.token.compareTo(b.token));
+    return suggestions;
+  }
+
+  List<_ComposerDollarSuggestion> _filteredDollarSuggestions(
+    NomadeProvider provider,
+  ) {
+    final raw = _promptController.text.trimLeft();
+    if (raw.isEmpty || !raw.startsWith(r'$')) {
+      return const [];
+    }
+    final firstLine = raw.split('\n').first.trimRight();
+    if (firstLine.isEmpty || firstLine.contains(RegExp(r'\s'))) {
+      return const [];
+    }
+    final typed = firstLine.toLowerCase();
+    final allSuggestions = _composerDollarSuggestions(provider);
+    if (typed == r'$') {
+      return allSuggestions;
+    }
+    return allSuggestions
+        .where((suggestion) => suggestion.token.toLowerCase().startsWith(typed))
+        .toList(growable: false);
+  }
+
+  void _applyDollarToken(String token) {
+    final nextText = '$token ';
+    _promptController.value = TextEditingValue(
+      text: nextText,
+      selection: TextSelection.collapsed(offset: nextText.length),
+    );
+  }
+
+  Future<void> _applyDollarSuggestion(
+    _ComposerDollarSuggestion suggestion,
+    NomadeProvider provider,
+  ) async {
+    HapticFeedback.selectionClick();
+    switch (suggestion.kind) {
+      case _ComposerDollarSuggestionKind.skill:
+        final path = (suggestion.path ?? '').trim();
+        if (path.isEmpty) {
+          return;
+        }
+        provider.toggleSkillPath(path);
+        _applyDollarToken(suggestion.token);
+        if (!mounted) {
+          return;
+        }
+        final nowEnabled = provider.selectedSkillPaths.contains(path);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              nowEnabled
+                  ? 'Skill enabled: ${suggestion.name}'
+                  : 'Skill disabled: ${suggestion.name}',
+            ),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+        _setStateSafe(() {});
+        return;
+      case _ComposerDollarSuggestionKind.mcpServer:
+        final toggled = await provider.setCodexMcpServerEnabled(
+          name: suggestion.name,
+          enabled: !suggestion.enabled,
+        );
+        if (!mounted) {
+          return;
+        }
+        if (toggled) {
+          _promptController.clear();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                !suggestion.enabled
+                    ? 'MCP enabled: ${suggestion.name}'
+                    : 'MCP disabled: ${suggestion.name}',
+              ),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+        _setStateSafe(() {});
+        return;
+    }
   }
 
   KeyEventResult _handleComposerKeyEvent({
@@ -848,42 +1012,112 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
     );
   }
 
-  void _showSlashMcpSheet() {
+  void _showSlashMcpSheet(NomadeProvider provider) {
+    final busyServers = <String>{};
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       builder: (context) {
         final theme = Theme.of(context);
         final scheme = theme.colorScheme;
-        return SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(18, 6, 18, 18),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'MCP status',
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final servers = provider.codexMcpServers;
+            return SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(18, 6, 18, 18),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'MCP status',
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Type \$ in the composer to quickly toggle servers.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    if (servers.isEmpty)
+                      Text(
+                        'No MCP servers detected in Codex config for this workspace.',
+                        style: theme.textTheme.bodyMedium,
+                      )
+                    else
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 320),
+                        child: ListView(
+                          shrinkWrap: true,
+                          children: servers.map((entry) {
+                            final name = (entry['name']?.toString() ?? '').trim();
+                            if (name.isEmpty) {
+                              return const SizedBox.shrink();
+                            }
+                            final enabled = entry['enabled'] is bool
+                                ? entry['enabled'] == true
+                                : true;
+                            final authStatus =
+                                (entry['authStatus']?.toString() ?? '').trim();
+                            final toolCount = entry['toolCount'] is num
+                                ? (entry['toolCount'] as num).toInt()
+                                : null;
+                            final resourceCount = entry['resourceCount'] is num
+                                ? (entry['resourceCount'] as num).toInt()
+                                : null;
+                            final details = <String>[
+                              if (authStatus.isNotEmpty) 'auth: $authStatus',
+                              if (toolCount != null) '$toolCount tools',
+                              if (resourceCount != null) '$resourceCount resources',
+                            ].join(' • ');
+                            final busy = busyServers.contains(name);
+
+                            return ListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              title: Text(name),
+                              subtitle: details.isEmpty
+                                  ? null
+                                  : Text(
+                                      details,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                              trailing: Switch.adaptive(
+                                value: enabled,
+                                onChanged: busy
+                                    ? null
+                                    : (nextValue) async {
+                                        setModalState(() {
+                                          busyServers.add(name);
+                                        });
+                                        await provider.setCodexMcpServerEnabled(
+                                          name: name,
+                                          enabled: nextValue,
+                                        );
+                                        if (!mounted) {
+                                          return;
+                                        }
+                                        setModalState(() {
+                                          busyServers.remove(name);
+                                        });
+                                      },
+                              ),
+                            );
+                          }).toList(growable: false),
+                        ),
+                      ),
+                  ],
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  'This mobile build does not yet expose live connected MCP server details.',
-                  style: theme.textTheme.bodyMedium,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Use Codex desktop/CLI for detailed MCP server status right now.',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         );
       },
     );
@@ -922,11 +1156,12 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
   }
 
   bool _isNearBottom() {
-    if (!_scrollController.hasClients) {
+    final positions = _scrollController.positions;
+    if (positions.isEmpty) {
       return true;
     }
     const threshold = 140.0;
-    final position = _scrollController.position;
+    final position = positions.last;
     return position.maxScrollExtent - position.pixels <= threshold;
   }
 
@@ -935,11 +1170,13 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
       return;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) {
+      final positions = _scrollController.positions;
+      if (positions.isEmpty) {
         return;
       }
+      final position = positions.last;
       _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
+        position.maxScrollExtent,
         duration: AppMotion.medium,
         curve: AppMotion.standardCurve,
       );
@@ -1018,6 +1255,9 @@ extension _HomeScreenComposerMethods on _HomeScreenState {
     NomadeProvider provider,
   ) async {
     switch (action) {
+      case _TopBarMenuAction.connectionBilling:
+        _showConnectionAndBillingSheet(provider);
+        return;
       case _TopBarMenuAction.conversationDiff:
         _showConversationDiffBottomSheet(provider);
         return;
